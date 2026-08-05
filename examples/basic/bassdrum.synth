@@ -1,0 +1,14 @@
+(* Bass drum: a soft, round 55 Hz note with a ~250 ms ADSR shape -
+   a really quick 25 ms attack, quick decay to a low sustain, and a
+   quick release starting at 200 ms (so the note ends at 250 ms) -
+   plus a short, dark noise layer riding only on the attack. soft_clip
+   rounds the sum off gently. *)
+
+let env : Scalar Signal = adsr 25ms 60ms 0.5 50ms 200ms ;;
+let tone : Scalar Signal = (sine 55.0) * env ;;
+let attack_noise : Scalar Signal =
+  (lowpass 900.0 (noise 700.0)) * (exp_decay 45.0) * 0.18 ;;
+let bass_drum : Scalar Signal = soft_clip 0.8 (tone * 0.7 + attack_noise) ;;
+
+let _ = render "bass-drum" 48000.0 (sample bass_drum 0s 300ms) ;;
+let _ = render_vis "bass-drum-wave" 48000.0 (sample bass_drum 0s 300ms) ;;

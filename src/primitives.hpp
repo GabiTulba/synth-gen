@@ -30,6 +30,7 @@ enum class PrimId {
   PlaceMulti,
   Render,
   RenderVis,
+  RenderStems,
   LoadMono,
   LoadMulti,
   Map,

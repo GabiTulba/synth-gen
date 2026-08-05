@@ -301,6 +301,30 @@ class Interp {
           placed.push_back(makePlace(s.sig, s.from, s.to, timeArg(t)));
         return Value{makeMix(std::move(placed))};
       }
+      case PrimId::RenderStems: {
+        const std::string& base = strArg(args[0]);
+        double rate = scalarArg(args[1]);
+        if (base.empty()) throw EvalError("render_stems: empty base name");
+        if (rate <= 0)
+          throw EvalError("render_stems: sample rate must be positive");
+        for (auto& item : std::get<ListV>(args[2].v).items) {
+          const TupleV& stem = std::get<TupleV>(item.v);
+          const std::string& label = std::get<StringV>(stem.items[0].v).s;
+          if (label.empty())
+            throw EvalError("render_stems: empty stem label");
+          RenderTarget t;
+          t.kind = RenderTarget::Kind::Audio;
+          t.name = base + "-" + label;
+          t.rate = rate;
+          t.sample = std::get<SampleV>(stem.items[1].v);
+          t.file = mod.parsed.path;
+          t.span = currentDef_ ? currentDef_->span : Span{};
+          t.declModule = currentModule_;
+          t.declDef = currentDef_;
+          targets_.push_back(std::move(t));
+        }
+        return Value{UnitV{}};
+      }
       case PrimId::Render:
       case PrimId::RenderVis: {
         RenderTarget t;

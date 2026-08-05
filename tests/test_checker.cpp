@@ -623,3 +623,29 @@ let warm : Scalar Signal =
                                          : prog.modules[0].parsed.source);
   CHECK(!diags.hasErrors());
 }
+
+TEST(checker_render_stems) {
+  TempProject tp;
+  std::string f = tp.write("ok.synth", R"(
+let a : Scalar Sample = sine 440.0 |> sample ~from:0s ~to:100ms ;;
+let b : Scalar Sample = saw 220.0 |> sample ~from:0s ~to:100ms ;;
+let _ = render_stems ~name:"mix" ~rate:8000.0
+                     ~stems:[("lead", a); ("bass", b)] ;;
+)");
+  DiagnosticBag diags;
+  Program prog = checkProject({f}, diags);
+  for (auto& d : diags.items)
+    std::cerr << renderDiagnostic(d, prog.modules.empty()
+                                         ? std::string{}
+                                         : prog.modules[0].parsed.source);
+  CHECK(!diags.hasErrors());
+
+  // Stems must be (String, Sample) tuples.
+  std::string g = tp.write("bad.synth", R"(
+let _ = render_stems ~name:"mix" ~rate:8000.0
+                     ~stems:[(1.0, sine 440.0 |> sample ~from:0s ~to:10ms)] ;;
+)");
+  DiagnosticBag d2;
+  checkProject({g}, d2);
+  CHECK(d2.hasErrors());
+}

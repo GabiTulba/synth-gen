@@ -264,6 +264,13 @@ follows (all easy to revisit):
   (warm, tube-like), never quite reaching it. Both are pointwise,
   polymorphic in the element type, and reject non-positive thresholds at
   graph construction. Drive is the ordinary idiom: `soft_clip 0.5 (x * 3.0)`.
+- **`render_stems name:String rate:Scalar stems:(String, 'a Sample) list
+  : unit`** — stem export (the doc's §13 wish): each `(label, sample)`
+  pair declares an ordinary audio target named `<name>-<label>`, so stems
+  get the same parallel rendering, incremental caching, metadata and
+  dev-app treatment as any target. The song example exports
+  `song-drums` / `song-pad` / `song-piano` / `song-guitar`, verified to
+  sum (through the soft-clip master) back to the mix.
 - **`render_vis name:String rate:Scalar sample:'a Sample : unit`** — a
   second effect alongside `render`: declares a build target whose artifact
   is a waveform *image* (`build/artifacts/<name>.svg`) of the discretized

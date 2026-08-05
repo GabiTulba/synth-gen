@@ -228,6 +228,9 @@ val place_multi : sample:'a Sample -> ats:Timestamp list -> 'a Signal  (* mix of
 (* the effects *)
 val render    : name:String -> rate:Scalar -> sample:'a Sample -> unit
 val render_vis: name:String -> rate:Scalar -> sample:'a Sample -> unit  (* waveform SVG *)
+val render_stems : name:String -> rate:Scalar
+                -> stems:(String, 'a Sample) list -> unit
+  (* one audio target per stem, named "<name>-<label>" *)
 
 (* file import *)
 val load_mono : path:String -> Scalar Signal

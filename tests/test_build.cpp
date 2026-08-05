@@ -865,3 +865,51 @@ let _ = voice |> sample ~from:0s ~to:50ms |> render ~name:"out" ~rate:8000.0 ;;
   CHECK(r.ok);
   CHECK(r.targets[0].cached);  // the edit touched only the shadowed def
 }
+
+TEST(build_render_stems_produces_named_targets) {
+  // Each stem must byte-match the same sample rendered individually.
+  TempDir stems, solo;
+  stems.write("p.synth", R"(
+let lead : Scalar Sample = sine 440.0 * 0.5 |> sample ~from:0s ~to:200ms ;;
+let bass : Scalar Sample = sine 110.0 * 0.5 |> sample ~from:0s ~to:200ms ;;
+let _ = render_stems ~name:"mix" ~rate:8000.0
+                     ~stems:[("lead", lead); ("bass", bass)] ;;
+)");
+  stems.write(".build", "project st\nsource p.synth\n");
+  solo.write("p.synth", R"(
+let lead : Scalar Sample = sine 440.0 * 0.5 |> sample ~from:0s ~to:200ms ;;
+let bass : Scalar Sample = sine 110.0 * 0.5 |> sample ~from:0s ~to:200ms ;;
+let _ = lead |> render ~name:"mix-lead" ~rate:8000.0 ;;
+let _ = bass |> render ~name:"mix-bass" ~rate:8000.0 ;;
+)");
+  solo.write(".build", "project so\nsource p.synth\n");
+  BuildResult rs = buildProject(stems.dir.string());
+  BuildResult ro = buildProject(solo.dir.string());
+  for (auto& d : rs.diags.items) std::cerr << d.message << "\n";
+  CHECK(rs.ok);
+  CHECK(ro.ok);
+  CHECK(rs.targets.size() == 2);
+  for (const char* nm : {"mix-lead.wav", "mix-bass.wav"}) {
+    std::string a = slurp(stems.dir / "build" / "artifacts" / nm);
+    std::string b = slurp(solo.dir / "build" / "artifacts" / nm);
+    CHECK(!a.empty());
+    CHECK(a == b);
+  }
+  // Both stems appear in metadata as ordinary audio targets.
+  std::string meta = slurp(stems.dir / "build" / "metadata.json");
+  CHECK(meta.find("\"name\": \"mix-lead\"") != std::string::npos);
+  CHECK(meta.find("\"name\": \"mix-bass\"") != std::string::npos);
+}
+
+TEST(build_render_stems_duplicate_labels_fail) {
+  TempDir tp;
+  tp.write("p.synth", R"(
+let s : Scalar Sample = sine 440.0 |> sample ~from:0s ~to:50ms ;;
+let _ = render_stems ~name:"mix" ~rate:8000.0
+                     ~stems:[("x", s); ("x", s)] ;;
+)");
+  tp.write(".build", "project dup\nsource p.synth\n");
+  BuildResult r = buildProject(tp.dir.string());
+  CHECK(!r.ok);
+  CHECK(r.diags.hasErrors());
+}

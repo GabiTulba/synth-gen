@@ -28,22 +28,21 @@ let drums : Scalar Signal =
   kicks + snares * 0.9 + hats * 0.5
 ;;
 
-let left : Scalar Signal =
-  Pad.progression 0.9 * 0.5
-  + drums * 0.9
-  + Keys.melody * 0.6
-  + Strings.riff * 0.3
-;;
-
-let right : Scalar Signal =
-  Pad.progression 1.4 * 0.5
-  + drums * 0.9
-  + Keys.melody * 0.45
-  + Strings.riff * 0.45
-;;
+(* Per-instrument stereo buses, mixed exactly as they appear in the
+   master. Keeping them as named buses is what makes stem export a
+   one-liner. *)
+let pad_bus : Vector Signal =
+  channels [Pad.progression 0.9 * 0.5; Pad.progression 1.4 * 0.5] ;;
+let drum_bus : Vector Signal =
+  channels [drums * 0.6; drums * 0.6] ;;
+let keys_bus : Vector Signal =
+  channels [Keys.melody * 0.6; Keys.melody * 0.45] ;;
+let strings_bus : Vector Signal =
+  channels [Strings.riff * 0.3; Strings.riff * 0.45] ;;
 
 let master : Vector Signal =
-  channels [left; right] |> soft_clip ~threshold:0.9
+  pad_bus + drum_bus + keys_bus + strings_bus
+    |> soft_clip ~threshold:0.9
 ;;
 
 let _ =
@@ -52,3 +51,14 @@ let _ =
 let _ =
   master |> sample ~from:0s ~to:16500ms
          |> render_vis ~name:"song-wave" ~rate:48000.0 ;;
+
+(* Stems: one artifact per instrument bus (song-drums, song-pad,
+   song-piano, song-guitar), pre-master - summing them and applying the
+   soft_clip master reproduces the mix. *)
+let _ =
+  render_stems ~name:"song" ~rate:48000.0
+    ~stems:[("drums", drum_bus |> sample ~from:0s ~to:16500ms);
+            ("pad", pad_bus |> sample ~from:0s ~to:16500ms);
+            ("piano", keys_bus |> sample ~from:0s ~to:16500ms);
+            ("guitar", strings_bus |> sample ~from:0s ~to:16500ms)]
+;;

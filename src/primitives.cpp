@@ -87,6 +87,12 @@ const std::vector<PrimSig>& primitives() {
         {tString(), tScalar(), tSample(a)}, tUnit());
     add(PrimId::RenderVis, "render_vis", {"name", "rate", "sample"},
         {tString(), tScalar(), tSample(a)}, tUnit());
+    // Stem export: each (label, sample) pair declares an ordinary audio
+    // target named "<name>-<label>", so stems get the same parallel
+    // rendering, caching, metadata, and dev-app treatment as any target.
+    add(PrimId::RenderStems, "render_stems", {"name", "rate", "stems"},
+        {tString(), tScalar(), tList(tTuple({tString(), tSample(a)}))},
+        tUnit());
     // File import
     add(PrimId::LoadMono, "load_mono", {"path"}, {tString()},
         tSignal(tScalar()));

@@ -19,6 +19,8 @@ cp examples/primitives/build/artifacts/*.wav outputs/primitives/ 2>/dev/null || 
 cp examples/primitives/build/artifacts/*.svg outputs/primitives/ 2>/dev/null || true
 cp examples/basic/build/artifacts/*.wav outputs/basic/ 2>/dev/null || true
 cp examples/basic/build/artifacts/*.svg outputs/basic/ 2>/dev/null || true
-cp examples/song/build/artifacts/*.wav outputs/song/ 2>/dev/null || true
-cp examples/song/build/artifacts/*.svg outputs/song/ 2>/dev/null || true
+# Only the master + waveform are committed; the per-instrument stems
+# (song-drums/pad/piano/guitar.wav, ~3 MB each) build locally.
+cp examples/song/build/artifacts/song.wav outputs/song/ 2>/dev/null || true
+cp examples/song/build/artifacts/song-wave.svg outputs/song/ 2>/dev/null || true
 echo "outputs/ refreshed"

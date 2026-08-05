@@ -1,0 +1,8 @@
+# Full stereo song: arrangement in song.synth, instruments in their
+# own modules.
+project stereo-song
+source song.synth
+source drums.synth
+source pad.synth
+source keys.synth
+source strings.synth

@@ -1,0 +1,37 @@
+(* Background synth pad: two detuned saws per chord tone, lowpassed,
+   under a slow chord envelope. The detune amount is a parameter so the
+   two stereo sides can run different widths - that difference is what
+   makes the pad feel wide. *)
+
+let tone ~freq:Scalar ~detune:Scalar : Scalar Signal =
+  (saw (freq - detune) + saw (freq + detune)) * 0.5
+;;
+
+let chord ~a:Scalar ~b:Scalar ~c:Scalar ~d:Scalar ~detune:Scalar
+    : Scalar Signal =
+  let env : Scalar Signal =
+    adsr ~attack:250ms ~decay:500ms ~sustain:0.8 ~release:700ms
+         ~hold:3300ms in
+  let stack : Scalar Signal =
+    (tone ~freq:a ~detune:detune + tone ~freq:b ~detune:detune
+     + tone ~freq:c ~detune:detune + tone ~freq:d ~detune:detune) * 0.25 in
+  (stack |> lowpass ~cutoff:1100.0) * env
+;;
+
+(* Am -> F -> C -> G, four seconds (two bars at 120 BPM) per chord. *)
+let progression detune:Scalar : Scalar Signal =
+  let am : Scalar Sample =
+    chord ~a:110.0 ~b:164.81 ~c:220.0 ~d:261.63 ~detune:detune
+      |> sample ~from:0s ~to:4s in
+  let f : Scalar Sample =
+    chord ~a:87.31 ~b:130.81 ~c:174.61 ~d:220.0 ~detune:detune
+      |> sample ~from:0s ~to:4s in
+  let c : Scalar Sample =
+    chord ~a:130.81 ~b:196.0 ~c:261.63 ~d:329.63 ~detune:detune
+      |> sample ~from:0s ~to:4s in
+  let g : Scalar Sample =
+    chord ~a:98.0 ~b:146.83 ~c:196.0 ~d:246.94 ~detune:detune
+      |> sample ~from:0s ~to:4s in
+  mix_all [am |> place ~at:0s; f |> place ~at:4s;
+           c |> place ~at:8s; g |> place ~at:12s]
+;;

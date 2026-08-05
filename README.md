@@ -132,6 +132,7 @@ positional argument).
 | `examples/pluck/` | The design doc's §3.4 example as a buildable project |
 | `examples/primitives/` | One short, audible render target per library primitive |
 | `examples/basic/` | Basic instrument samples: snare, kick, guitar pluck, piano note |
+| `examples/song/` | A full 16-bar stereo song across five modules — drums, synth pad, piano, guitar, and the arrangement that imports them (`outputs/song/song.wav`) |
 | `outputs/` | Committed renders of the showcase projects (`outputs/primitives/`, `outputs/basic/`) — `.wav` to listen to and `render_vis` waveform `.svg`s to look at, without building anything; refresh with `scripts/render-outputs.sh` |
 
 ## Implementation status (design doc §12)

@@ -1,0 +1,32 @@
+(* Guitar for the song: a bright pluck sample and an eighth-note
+   arpeggio pattern (root . fifth . octave . fifth) built entirely from
+   place_multi + time_steps. *)
+
+let pluck freq:Scalar : Scalar Sample =
+  let body : Scalar Signal =
+    (sine freq * 0.7 + saw freq * 0.3) * exp_decay 6.0 in
+  let pick : Scalar Signal = noise 3000.0 * exp_decay 80.0 * 0.1 in
+  (body + pick) * 0.8
+    |> sample ~from:0s ~to:600ms
+;;
+
+(* One two-bar arpeggio: the root and octave land on the beat cycle
+   (step 1s), the fifth fills every off-beat (step 500ms). *)
+let arp ~root:Scalar ~fifth:Scalar ~oct:Scalar
+        ~root_t:Timestamp ~fifth_t:Timestamp ~oct_t:Timestamp
+    : Scalar Signal =
+  mix_all [place_multi (pluck root)
+                       (time_steps ~start:root_t ~step:1s ~count:4.0);
+           place_multi (pluck fifth)
+                       (time_steps ~start:fifth_t ~step:500ms ~count:8.0);
+           place_multi (pluck oct)
+                       (time_steps ~start:oct_t ~step:1s ~count:4.0)]
+;;
+
+(* Enters with the C chord (8s): C arpeggio, then G arpeggio. *)
+let riff : Scalar Signal =
+  arp ~root:261.63 ~fifth:392.0 ~oct:523.25
+      ~root_t:8s ~fifth_t:8250ms ~oct_t:8500ms
+  + arp ~root:196.0 ~fifth:293.66 ~oct:392.0
+        ~root_t:12s ~fifth_t:12250ms ~oct_t:12500ms
+;;

@@ -1,0 +1,34 @@
+(* Piano for the song: the inharmonic additive voice from the basic
+   examples, packaged as fixed-length note samples plus the melody line. *)
+
+let partial ~freq:Scalar ~amp:Scalar ~decay:Scalar : Scalar Signal =
+  sine freq * exp_decay decay * amp
+;;
+
+let strike root:Scalar : Scalar Signal =
+  mix_all [partial ~freq:root ~amp:1.0 ~decay:1.1;
+           partial ~freq:(root * 2.001) ~amp:0.50 ~decay:1.6;
+           partial ~freq:(root * 3.004) ~amp:0.26 ~decay:2.2;
+           partial ~freq:(root * 4.009) ~amp:0.14 ~decay:2.9;
+           partial ~freq:(root * 5.016) ~amp:0.07 ~decay:3.7]
+;;
+
+let note freq:Scalar : Scalar Sample =
+  let env : Scalar Signal =
+    adsr ~attack:4ms ~decay:600ms ~sustain:0.25 ~release:350ms ~hold:850ms in
+  strike freq * env * 0.6
+    |> sample ~from:0s ~to:1200ms
+;;
+
+(* Quarter-note melody entering with the F chord (4s), one phrase per
+   chord. Repeated pitches share one sample via place_multi. *)
+let melody : Scalar Signal =
+  mix_all [place_multi (note 440.0) [4s; 6s];        (* A4 *)
+           note 523.25 |> place ~at:5s;              (* C5 *)
+           note 349.23 |> place ~at:7s;              (* F4 *)
+           place_multi (note 392.0) [8s; 14s];       (* G4 *)
+           place_multi (note 329.63) [9s; 11s];      (* E4 *)
+           note 261.63 |> place ~at:10s;             (* C4 *)
+           note 293.66 |> place ~at:12s;             (* D4 *)
+           note 246.94 |> place ~at:13s]             (* B3 *)
+;;

@@ -1,0 +1,54 @@
+(* A full stereo song: 16 bars-worth of material at 120 BPM (beat =
+   500ms, bar = 2s), Am -> F -> C -> G, two bars per chord.
+
+   Arrangement: the pad opens alone; drums enter at bar 2 (2s), the
+   piano melody at bar 3 (4s), the guitar arpeggios at bar 5 (8s).
+
+   Stereo comes from mixing two different mono buses: the pad runs a
+   different detune width per side, the piano sits a little left, the
+   guitar a little right, and the drums stay centered. channels glues
+   the buses into one Vector Signal and soft_clip is the master bus
+   glue. *)
+
+import Drums
+import Pad
+import Keys
+import Strings
+
+let drums : Scalar Signal =
+  let kicks : Scalar Signal =
+    place_multi Drums.kick_hit
+                (time_steps ~start:2s ~step:500ms ~count:28.0) in
+  let snares : Scalar Signal =
+    place_multi Drums.snare_hit
+                (time_steps ~start:2500ms ~step:1s ~count:14.0) in
+  let hats : Scalar Signal =
+    place_multi Drums.hat_hit
+                (time_steps ~start:4s ~step:250ms ~count:48.0) in
+  kicks + snares * 0.9 + hats * 0.5
+;;
+
+let left : Scalar Signal =
+  Pad.progression 0.9 * 0.5
+  + drums * 0.9
+  + Keys.melody * 0.6
+  + Strings.riff * 0.3
+;;
+
+let right : Scalar Signal =
+  Pad.progression 1.4 * 0.5
+  + drums * 0.9
+  + Keys.melody * 0.45
+  + Strings.riff * 0.45
+;;
+
+let master : Vector Signal =
+  channels [left; right] |> soft_clip ~threshold:0.9
+;;
+
+let _ =
+  master |> sample ~from:0s ~to:16500ms
+         |> render ~name:"song" ~rate:48000.0 ;;
+let _ =
+  master |> sample ~from:0s ~to:16500ms
+         |> render_vis ~name:"song-wave" ~rate:48000.0 ;;

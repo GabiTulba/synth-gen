@@ -12,10 +12,13 @@ fi
 
 "$BUILD_DIR/synthc" build examples/primitives
 "$BUILD_DIR/synthc" build examples/basic
+"$BUILD_DIR/synthc" build examples/song
 
-mkdir -p outputs/primitives outputs/basic
+mkdir -p outputs/primitives outputs/basic outputs/song
 cp examples/primitives/build/artifacts/*.wav outputs/primitives/ 2>/dev/null || true
 cp examples/primitives/build/artifacts/*.svg outputs/primitives/ 2>/dev/null || true
 cp examples/basic/build/artifacts/*.wav outputs/basic/ 2>/dev/null || true
 cp examples/basic/build/artifacts/*.svg outputs/basic/ 2>/dev/null || true
+cp examples/song/build/artifacts/*.wav outputs/song/ 2>/dev/null || true
+cp examples/song/build/artifacts/*.svg outputs/song/ 2>/dev/null || true
 echo "outputs/ refreshed"

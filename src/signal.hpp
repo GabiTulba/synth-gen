@@ -72,6 +72,10 @@ enum class FilterKind { Lowpass, Highpass };
 enum class SigBinOp { Add, Sub, Mul, Div };
 
 SigPtr makeOsc(OscKind kind, double freq);
+// Deterministic pseudo-noise: two cascaded FM stages with golden-ratio
+// frequency relationships and large modulation indices. Chaotic, broadband,
+// bounded to [-1, 1], and bit-identical across renders (no RNG).
+SigPtr makeNoise(double freq);
 // FM: sine with instantaneous frequency carrier + modulator(t) Hz,
 // integrated sample-by-sample from the epoch (stateful).
 SigPtr makeFm(double carrier, SigPtr modulator);

@@ -362,3 +362,54 @@ TEST(engine_reverb_validates_parameters) {
   try { makeReverb(0.5, 0.5, -0.1, src); } catch (const EngineError&) { threw++; }
   CHECK(threw == 3);
 }
+
+TEST(engine_noise_is_bounded_and_centered) {
+  Rendered r = renderWindow(makeNoise(1000.0), 0.0, 1.0, 48000.0);
+  double mean = 0, var = 0, peak = 0;
+  for (double v : r.interleaved) mean += v;
+  mean /= (double)r.interleaved.size();
+  for (double v : r.interleaved) {
+    var += (v - mean) * (v - mean);
+    peak = std::max(peak, std::fabs(v));
+  }
+  var /= (double)r.interleaved.size();
+  CHECK(peak <= 1.0 + 1e-9);          // it is still a sine at heart
+  CHECK(std::fabs(mean) < 0.1);        // no DC offset
+  CHECK(std::sqrt(var) > 0.3);         // substantial energy
+}
+
+TEST(engine_noise_is_not_periodic) {
+  // A pure 1 kHz sine at 48 kHz has autocorrelation ~1.0 at its period
+  // (48 samples); the noise must show none, and must decorrelate fast.
+  Rendered r = renderWindow(makeNoise(1000.0), 0.0, 1.0, 48000.0);
+  auto& x = r.interleaved;
+  size_t n = x.size();
+  double mean = 0, var = 0;
+  for (double v : x) mean += v;
+  mean /= (double)n;
+  for (double v : x) var += (v - mean) * (v - mean);
+  var /= (double)n;
+  auto autocorr = [&](size_t lag) {
+    double c = 0;
+    for (size_t i = lag; i < n; i++) c += (x[i] - mean) * (x[i - lag] - mean);
+    return c / ((double)(n - lag) * var);
+  };
+  CHECK(std::fabs(autocorr(48)) < 0.3);   // no 1 kHz periodicity
+  CHECK(std::fabs(autocorr(480)) < 0.2);  // decorrelated at 10 ms
+}
+
+TEST(engine_noise_is_deterministic) {
+  // Purity by construction: no RNG, so two renders are bit-identical.
+  Rendered a = renderWindow(makeNoise(700.0), 0.0, 0.25, 48000.0);
+  Rendered b = renderWindow(makeNoise(700.0), 0.0, 0.25, 48000.0);
+  CHECK(a.interleaved.size() == b.interleaved.size());
+  for (size_t i = 0; i < a.interleaved.size(); i++)
+    CHECK(a.interleaved[i] == b.interleaved[i]);
+}
+
+TEST(engine_noise_rejects_nonpositive_frequency) {
+  int threw = 0;
+  try { makeNoise(0.0); } catch (const EngineError&) { threw++; }
+  try { makeNoise(-100.0); } catch (const EngineError&) { threw++; }
+  CHECK(threw == 2);
+}

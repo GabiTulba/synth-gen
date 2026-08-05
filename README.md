@@ -113,7 +113,8 @@ resolves `a.synth` in the same directory).
   `channels`/`mix_all`/`map`/`fold`, `load_mono`/`load_multi` with
   build-time channel validation. Beyond the v1 roster: `fm`/`pm`/`am`
   modulation primitives, the feedforward `delay` the doc left under
-  consideration, and a Schroeder `reverb`.
+  consideration, a Schroeder `reverb`, and a deterministic FM-based
+  `noise` generator.
 - [x] **Epic 5** — One-shot build system: manifest, project validation,
   target enumeration, metadata emission, `synthc build` + `synthc lint`.
 - [x] **Epic 6** — Build daemon: `synthc watch` rebuilds on changes to
@@ -179,3 +180,13 @@ follows (all easy to revisit):
   inside the primitive's per-render state — the *language-level* signal
   graph stays acyclic, exactly like the stateful one-pole filters.
   Parameters are validated at graph construction.
+- **`noise freq:Scalar : Scalar Signal`** — pseudo-noise built from
+  two-step cascaded FM: an `fm` operator driven hard by a sine, itself
+  modulating a second `fm` operator, with golden-ratio frequency
+  relationships (so the stages never phase-lock into a periodic tone) and
+  modulation indices far above 1 (smearing the sidebands into a dense,
+  chaotic spectrum). `freq` sets the spectral center. There is
+  deliberately no RNG: "purity by construction" requires renders to be
+  deterministic and cacheable, and this noise is bit-identical on every
+  build while measuring as broadband and aperiodic (near-zero
+  autocorrelation at any lag beyond a fraction of a millisecond).

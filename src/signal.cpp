@@ -507,6 +507,22 @@ SigPtr makeOsc(OscKind kind, double freq) {
 SigPtr makeFm(double carrier, SigPtr modulator) {
   return std::make_shared<FmNode>(carrier, std::move(modulator));
 }
+
+// Two-step FM noise: stage 1 is an FM operator driven hard by a sine whose
+// frequency relates to the center by the golden ratio (the "most
+// irrational" number, so the stages never phase-lock into a periodic
+// tone); stage 2 is FM again, with stage 1 as its modulator at a deviation
+// several times the center frequency. Both indices are far above 1, which
+// smears the sidebands into a dense, chaotic, noise-like spectrum.
+SigPtr makeNoise(double freq) {
+  if (freq <= 0) throw EngineError("noise: frequency must be positive");
+  constexpr double kPhi = 1.6180339887498949;
+  SigPtr innerMod = makeBinOp(SigBinOp::Mul, makeOsc(OscKind::Sine, freq / kPhi),
+                              makeConst(freq * kPhi * 3.0));
+  SigPtr stage1 = makeFm(freq * kPhi, innerMod);
+  return makeFm(freq,
+                makeBinOp(SigBinOp::Mul, stage1, makeConst(freq * 8.0)));
+}
 SigPtr makePm(double carrier, SigPtr modulator) {
   return std::make_shared<PmNode>(carrier, std::move(modulator));
 }

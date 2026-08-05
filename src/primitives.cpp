@@ -16,6 +16,11 @@ const std::vector<PrimSig>& primitives() {
     add(PrimId::Sine, "sine", {"freq"}, {tScalar()}, tSignal(tScalar()));
     add(PrimId::Saw, "saw", {"freq"}, {tScalar()}, tSignal(tScalar()));
     add(PrimId::Square, "square", {"freq"}, {tScalar()}, tSignal(tScalar()));
+    // Deterministic pseudo-noise via two-step cascaded FM (an fm operator
+    // modulating another fm operator, golden-ratio-related frequencies,
+    // large indices). No RNG anywhere: renders stay reproducible, which
+    // "purity by construction" requires. freq sets the spectral center.
+    add(PrimId::Noise, "noise", {"freq"}, {tScalar()}, tSignal(tScalar()));
     // Modulation. fm: sine oscillator whose instantaneous frequency is
     // carrier + modulator(t) Hz (phase-integrated, so operators cascade).
     // pm: sin(2*pi*carrier*t + modulator(t)), modulator in radians.

@@ -336,3 +336,26 @@ let _ = render "roomy" 8000.0 (sample roomy 0s 1s) ;;
   CHECK(peakAround(0.2, 0.4) > 0.01);
   CHECK(peakAround(0.2, 0.4) > peakAround(0.7, 1.0) * 3.0);
 }
+
+TEST(build_noise_snare_end_to_end) {
+  TempDir tp;
+  tp.write("snare.synth", R"(
+let snare : Scalar Signal = (noise 1800.0) * (exp_decay 25.0) ;;
+let _ = render "snare" 16000.0 (sample snare 0s 400ms) ;;
+)");
+  tp.write(".build", "project snare\nsource snare.synth\n");
+  BuildResult r = buildProject(tp.dir.string());
+  for (auto& d : r.diags.items) std::cerr << d.message << "\n";
+  CHECK(r.ok);
+  WavData w = readWav((tp.dir / "build" / "artifacts" / "snare.wav").string());
+  CHECK(w.frames() == 6400);
+  auto rmsIn = [&](double t0, double t1) {
+    double acc = 0;
+    int64_t a = (int64_t)(t0 * 16000.0), b = (int64_t)(t1 * 16000.0);
+    for (int64_t i = a; i < b && i < w.frames(); i++)
+      acc += w.channels[0][(size_t)i] * w.channels[0][(size_t)i];
+    return std::sqrt(acc / (double)(b - a));
+  };
+  CHECK(rmsIn(0.0, 0.05) > 0.3);              // loud onset
+  CHECK(rmsIn(0.3, 0.4) < rmsIn(0.0, 0.05) * 0.05);  // decayed away
+}

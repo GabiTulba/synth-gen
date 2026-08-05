@@ -11,6 +11,7 @@ enum class PrimId {
   Sine,
   Saw,
   Square,
+  Noise,
   Fm,
   Pm,
   Am,

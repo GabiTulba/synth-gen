@@ -305,3 +305,26 @@ let hall : Vector Signal =
   checkProject({g}, diags2);
   CHECK(diags2.hasErrors());
 }
+
+TEST(checker_noise_primitive) {
+  TempProject tp;
+  std::string f = tp.write("ok.synth", R"(
+let hiss : Scalar Signal = noise 4000.0 ;;
+let snare : Scalar Signal = (noise 1800.0) * (exp_decay 25.0) ;;
+let airy : Scalar Signal = reverb 300ms 0.5 0.4 snare ;;
+)");
+  DiagnosticBag diags;
+  Program prog = checkProject({f}, diags);
+  for (auto& d : diags.items)
+    std::cerr << renderDiagnostic(d, prog.modules.empty()
+                                         ? std::string{}
+                                         : prog.modules[0].parsed.source);
+  CHECK(!diags.hasErrors());
+
+  // noise takes a Scalar, not a Timestamp.
+  std::string g =
+      tp.write("bad.synth", "let x : Scalar Signal = noise 1s ;;");
+  DiagnosticBag diags2;
+  checkProject({g}, diags2);
+  CHECK(diags2.hasErrors());
+}

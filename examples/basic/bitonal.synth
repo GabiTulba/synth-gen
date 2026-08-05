@@ -6,3 +6,4 @@ let bitone : Scalar Signal = ((saw 220.0) + (saw 224.0)) * 0.5 ;;
 let modded : Scalar Signal = am bitone (sine 2.0) 0.5 ;;
 
 let _ = render "bitonal-saw" 48000.0 (sample (modded * 0.5) 0s 10s) ;;
+let _ = render_vis "bitonal-saw-wave" 48000.0 (sample (modded * 0.5) 0s 10s) ;;

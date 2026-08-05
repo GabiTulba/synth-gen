@@ -511,3 +511,68 @@ let _ = render "two" 8000.0 (sample ((saw 110.0) * 0.5) 0s 50ms) ;;
   CHECK(builds == 2);
   CHECK(cachedInSecondBuild == 2);
 }
+
+TEST(build_render_vis_writes_svg_artifact) {
+  TempDir tp;
+  tp.write("v.synth", R"(
+let tone : Scalar Signal = (sine 440.0) * (exp_decay 6.0) ;;
+let _ = render "tone" 8000.0 (sample tone 0s 500ms) ;;
+let _ = render_vis "tone-wave" 8000.0 (sample tone 0s 500ms) ;;
+)");
+  tp.write(".build", "project vis\nsource v.synth\n");
+  BuildResult r = buildProject(tp.dir.string());
+  for (auto& d : r.diags.items) std::cerr << d.message << "\n";
+  CHECK(r.ok);
+  CHECK(r.targets.size() == 2);
+
+  const TargetInfo* wav = nullptr;
+  const TargetInfo* svg = nullptr;
+  for (auto& t : r.targets) {
+    if (t.name == "tone") wav = &t;
+    if (t.name == "tone-wave") svg = &t;
+  }
+  CHECK(wav && wav->kind == "audio");
+  CHECK(svg && svg->kind == "visual");
+  CHECK(svg->artifact == "build/artifacts/tone-wave.svg");
+  CHECK(svg->frames == 4000);
+
+  std::string content = slurp(tp.dir / svg->artifact);
+  CHECK(content.find("<svg") == 0);
+  CHECK(content.find("tone-wave") != std::string::npos);
+  CHECK(content.find("<path") != std::string::npos);
+  CHECK(content.find("0.500s @ 8000 Hz, 1 channel") != std::string::npos);
+
+  // Metadata carries the kind so the dev app can tell them apart.
+  std::string meta = slurp(tp.dir / "build" / "metadata.json");
+  CHECK(meta.find("\"kind\": \"visual\"") != std::string::npos);
+  CHECK(meta.find("\"kind\": \"audio\"") != std::string::npos);
+}
+
+TEST(build_render_vis_multichannel_lanes) {
+  TempDir tp;
+  tp.write("st.synth", R"(
+let _ = render_vis "stereo-wave" 4000.0
+  (sample (channels [sine 220.0; sine 224.0]) 0s 1s) ;;
+)");
+  tp.write(".build", "project visst\nsource st.synth\n");
+  BuildResult r = buildProject(tp.dir.string());
+  CHECK(r.ok);
+  std::string content = slurp(tp.dir / r.targets[0].artifact);
+  CHECK(content.find("2 channels") != std::string::npos);
+  // Two waveform lanes -> two path elements.
+  size_t first = content.find("<path");
+  CHECK(first != std::string::npos);
+  CHECK(content.find("<path", first + 1) != std::string::npos);
+}
+
+TEST(build_render_and_render_vis_share_namespace) {
+  TempDir tp;
+  tp.write("dup.synth", R"(
+let _ = render "same" 8000.0 (sample (sine 440.0) 0s 100ms) ;;
+let _ = render_vis "same" 8000.0 (sample (sine 440.0) 0s 100ms) ;;
+)");
+  tp.write(".build", "project visdup\nsource dup.synth\n");
+  BuildResult r = buildProject(tp.dir.string());
+  CHECK(!r.ok);
+  CHECK(r.diags.hasErrors());
+}

@@ -26,6 +26,7 @@ bool parseManifest(const std::string& text, const std::string& file,
 
 struct TargetInfo {
   std::string name;
+  std::string kind = "audio";  // "audio" (.wav) or "visual" (.svg)
   std::string artifact;  // path relative to project dir; empty on failure
   double rate = 0;
   int channelCount = 0;

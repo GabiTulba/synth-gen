@@ -18,3 +18,4 @@ let pick : Scalar Signal = (noise 3000.0) * (exp_decay 70.0) * 0.15 ;;
 let guitar : Scalar Signal = body * 0.55 + pick ;;
 
 let _ = render "guitar-pluck" 48000.0 (sample guitar 0s 2s) ;;
+let _ = render_vis "guitar-pluck-wave" 48000.0 (sample guitar 0s 2s) ;;

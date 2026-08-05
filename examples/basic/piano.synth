@@ -19,3 +19,4 @@ let note : Scalar Signal = (strike 261.63 + (strike 261.9) * 0.35) * env ;;
 let piano : Scalar Signal = reverb 500ms 0.5 0.2 (note * 0.5) ;;
 
 let _ = render "piano-note" 48000.0 (sample piano 0s 2500ms) ;;
+let _ = render_vis "piano-note-wave" 48000.0 (sample piano 0s 2500ms) ;;

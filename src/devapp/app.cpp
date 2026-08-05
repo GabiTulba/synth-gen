@@ -101,7 +101,11 @@ void drawTargets(AppState& app) {
         (fs::path(app.projectDir) / t.artifact).string();
     bool isPlaying =
         app.player.playing() && app.player.currentPath() == artifactPath;
-    if (isPlaying) {
+    if (t.kind == "visual") {
+      // Waveform images are viewed in any browser/image viewer; the dev
+      // app just points at them.
+      ImGui::TextDisabled("%s", t.status == "ok" ? "waveform svg" : "-");
+    } else if (isPlaying) {
       if (ImGui::SmallButton("stop")) app.player.stop();
       ImGui::SameLine();
       ImGui::ProgressBar((float)app.player.progress(), ImVec2(-1, 0), "");

@@ -14,6 +14,8 @@ fi
 "$BUILD_DIR/synthc" build examples/basic
 
 mkdir -p outputs/primitives outputs/basic
-cp examples/primitives/build/artifacts/*.wav outputs/primitives/
-cp examples/basic/build/artifacts/*.wav outputs/basic/
+cp examples/primitives/build/artifacts/*.wav outputs/primitives/ 2>/dev/null || true
+cp examples/primitives/build/artifacts/*.svg outputs/primitives/ 2>/dev/null || true
+cp examples/basic/build/artifacts/*.wav outputs/basic/ 2>/dev/null || true
+cp examples/basic/build/artifacts/*.svg outputs/basic/ 2>/dev/null || true
 echo "outputs/ refreshed"

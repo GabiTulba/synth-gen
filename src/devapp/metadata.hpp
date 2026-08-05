@@ -11,6 +11,7 @@ namespace synth::devapp {
 
 struct TargetMeta {
   std::string name;
+  std::string kind;      // "audio" | "visual"
   std::string status;    // "ok" | "error"
   std::string artifact;  // path relative to the project directory
   std::string error;

@@ -67,8 +67,12 @@ const std::vector<PrimSig>& primitives() {
         {tSignal(a), tTimestamp(), tTimestamp()}, tSample(a));
     add(PrimId::Place, "place", {"sample", "at"}, {tSample(a), tTimestamp()},
         tSignal(a));
-    // The single effect
+    // The effects: render writes an audio artifact; render_vis writes a
+    // waveform image (SVG) of the same discretized window instead. Both
+    // declare build targets and share the project-wide name space.
     add(PrimId::Render, "render", {"name", "rate", "sample"},
+        {tString(), tScalar(), tSample(a)}, tUnit());
+    add(PrimId::RenderVis, "render_vis", {"name", "rate", "sample"},
         {tString(), tScalar(), tSample(a)}, tUnit());
     // File import
     add(PrimId::LoadMono, "load_mono", {"path"}, {tString()},

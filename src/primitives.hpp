@@ -26,6 +26,7 @@ enum class PrimId {
   Sample,
   Place,
   Render,
+  RenderVis,
   LoadMono,
   LoadMulti,
   Map,

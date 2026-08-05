@@ -13,6 +13,7 @@
 #include "checker.hpp"
 #include "eval.hpp"
 #include "incremental.hpp"
+#include "vis.hpp"
 #include "wav.hpp"
 
 namespace fs = std::filesystem;
@@ -108,7 +109,8 @@ void writeMetadata(const std::string& path, const BuildResult& r,
   j << "  \"targets\": [\n";
   for (size_t i = 0; i < r.targets.size(); i++) {
     const TargetInfo& t = r.targets[i];
-    j << "    {\"name\": \"" << jsonEscape(t.name) << "\", \"status\": \""
+    j << "    {\"name\": \"" << jsonEscape(t.name) << "\", \"kind\": \""
+      << jsonEscape(t.kind) << "\", \"status\": \""
       << (t.ok ? "ok" : "error") << "\", \"cached\": "
       << (t.cached ? "true" : "false") << ", \"artifact\": \""
       << jsonEscape(t.artifact) << "\", \"rate\": " << formatDouble(t.rate)
@@ -270,9 +272,12 @@ BuildResult buildProject(const std::string& projectDir, BuildCache* cache) {
   // target is recorded in metadata but does not stop the others (§6.3).
   r.targets.resize(targets.size());
   std::vector<size_t> pending;
+  auto extensionFor = [](const RenderTarget& t) {
+    return t.kind == RenderTarget::Kind::Visual ? ".svg" : ".wav";
+  };
   for (size_t i = 0; i < targets.size(); i++) {
     const RenderTarget& t = targets[i];
-    fs::path artifactPath = artifactDir / (t.name + ".wav");
+    fs::path artifactPath = artifactDir / (t.name + extensionFor(t));
     const BuildCache::Entry* hit = nullptr;
     if (cache) {
       auto it = cache->targets.find(t.name);
@@ -299,14 +304,21 @@ BuildResult buildProject(const std::string& projectDir, BuildCache* cache) {
         const RenderTarget& t = targets[i];
         TargetInfo info;
         info.name = t.name;
+        info.kind = t.kind == RenderTarget::Kind::Visual ? "visual" : "audio";
         info.rate = t.rate;
         try {
           Rendered rendered =
               renderWindow(t.sample.sig, t.sample.from, t.sample.to, t.rate);
-          std::string fileName = t.name + ".wav";
+          std::string fileName = t.name + extensionFor(t);
           fs::path artifactPath = artifactDir / fileName;
-          writeWav(artifactPath.string(), t.rate, rendered.channels,
-                   rendered.interleaved);
+          if (t.kind == RenderTarget::Kind::Visual) {
+            std::ofstream out(artifactPath, std::ios::trunc);
+            if (!out) throw std::runtime_error("cannot write artifact file");
+            out << renderWaveformSvg(t.name, rendered, t.rate);
+          } else {
+            writeWav(artifactPath.string(), t.rate, rendered.channels,
+                     rendered.interleaved);
+          }
           info.artifact =
               (fs::path("build") / "artifacts" / fileName).generic_string();
           info.channelCount = rendered.channels;

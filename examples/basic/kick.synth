@@ -8,3 +8,4 @@ let click : Scalar Signal = (noise 4000.0) * (exp_decay 90.0) * 0.3 ;;
 let kick : Scalar Signal = (thump * (exp_decay 7.0) + click) * 0.7 ;;
 
 let _ = render "kick" 48000.0 (sample kick 0s 500ms) ;;
+let _ = render_vis "kick-wave" 48000.0 (sample kick 0s 500ms) ;;

@@ -107,7 +107,7 @@ resolves `a.synth` in the same directory).
 | `examples/pluck/` | The design doc's §3.4 example as a buildable project |
 | `examples/primitives/` | One short, audible render target per library primitive |
 | `examples/basic/` | Basic instrument samples: snare, kick, guitar pluck, piano note |
-| `outputs/` | Committed renders of the showcase projects (`outputs/primitives/`, `outputs/basic/`) — listen without building anything; refresh with `scripts/render-outputs.sh` |
+| `outputs/` | Committed renders of the showcase projects (`outputs/primitives/`, `outputs/basic/`) — `.wav` to listen to and `render_vis` waveform `.svg`s to look at, without building anything; refresh with `scripts/render-outputs.sh` |
 
 ## Implementation status (design doc §12)
 
@@ -211,6 +211,14 @@ follows (all easy to revisit):
   inside the primitive's per-render state — the *language-level* signal
   graph stays acyclic, exactly like the stateful one-pole filters.
   Parameters are validated at graph construction.
+- **`render_vis name:String rate:Scalar sample:'a Sample : unit`** — a
+  second effect alongside `render`: declares a build target whose artifact
+  is a waveform *image* (`build/artifacts/<name>.svg`) of the discretized
+  window instead of audio. One lane per channel, min/max-per-column
+  drawing, dependency-free SVG (viewable straight from a git host).
+  Visual and audio targets share the project-wide name space, appear in
+  build metadata with a `kind` field, and get the same incremental
+  caching; the dev app lists them (playback stays audio-only).
 - **`noise freq:Scalar : Scalar Signal`** — pseudo-noise built from
   two-step cascaded FM: an `fm` operator driven hard by a sine, itself
   modulating a second `fm` operator, with golden-ratio frequency

@@ -20,6 +20,7 @@ add_library(synthgraph_core
   src/checker.cpp
   src/incremental.cpp
   src/signal.cpp
+  src/vis.cpp
   src/eval.cpp
   src/wav.cpp
   src/build.cpp

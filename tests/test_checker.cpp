@@ -328,3 +328,21 @@ let airy : Scalar Signal = reverb 300ms 0.5 0.4 snare ;;
   checkProject({g}, diags2);
   CHECK(diags2.hasErrors());
 }
+
+TEST(checker_render_vis_primitive) {
+  TempProject tp;
+  std::string f = tp.write("ok.synth",
+                           "let _ = render_vis \"wave\" 1000.0 "
+                           "(sample (sine 440.0) 0s 1s) ;;");
+  DiagnosticBag diags;
+  checkProject({f}, diags);
+  CHECK(!diags.hasErrors());
+
+  // render_vis produces unit, so it cannot be bound as a value.
+  std::string g = tp.write("bad.synth",
+                           "let x : Scalar = render_vis \"w\" 1000.0 "
+                           "(sample (sine 440.0) 0s 1s) ;;");
+  DiagnosticBag diags2;
+  checkProject({g}, diags2);
+  CHECK(diags2.hasErrors());
+}

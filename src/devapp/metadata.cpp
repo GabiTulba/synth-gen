@@ -50,6 +50,7 @@ MetadataLoadResult loadProjectMetadata(const std::string& path) {
     for (auto& t : targets->array) {
       TargetMeta m;
       m.name = t.getString("name");
+      m.kind = t.getString("kind", "audio");
       m.status = t.getString("status", "error");
       m.artifact = t.getString("artifact");
       m.error = t.getString("error");

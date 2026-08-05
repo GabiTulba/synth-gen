@@ -38,6 +38,8 @@ struct Value {
 // A build target collected from a `render` call (§5.2): the name is the
 // stable artifact identifier, unique project-wide.
 struct RenderTarget {
+  enum class Kind { Audio, Visual };
+  Kind kind = Kind::Audio;
   std::string name;
   double rate = 0;
   SampleV sample;

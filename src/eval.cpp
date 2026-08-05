@@ -203,8 +203,11 @@ class Interp {
         double at = timeArg(args[1]);
         return Value{makePlace(s.sig, s.from, s.to, at)};
       }
-      case PrimId::Render: {
+      case PrimId::Render:
+      case PrimId::RenderVis: {
         RenderTarget t;
+        t.kind = p.id == PrimId::RenderVis ? RenderTarget::Kind::Visual
+                                           : RenderTarget::Kind::Audio;
         t.name = strArg(args[0]);
         t.rate = scalarArg(args[1]);
         t.sample = std::get<SampleV>(args[2].v);

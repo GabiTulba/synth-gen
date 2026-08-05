@@ -90,7 +90,8 @@ Rules:
   type is expected (`map place_pluck [...]`); partial application and
   lambdas do not exist in v1.
 - **`let _` is the effect form.** Its body must have type `unit`, and
-  `render` is the only source of `unit`.
+  the render primitives (`render`, `render_vis`) are the only sources of
+  `unit`.
 - **Empty list literals are rejected** ("cannot determine the element
   type"); list elements must all have one type.
 - **Duplicate definitions** in a module and **duplicate parameters** in a
@@ -182,8 +183,9 @@ val channels  : chans:Scalar Signal list -> Vector Signal
 val sample    : signal:'a Signal -> from:Timestamp -> to:Timestamp -> 'a Sample
 val place     : sample:'a Sample -> at:Timestamp -> 'a Signal
 
-(* the single effect *)
+(* the effects *)
 val render    : name:String -> rate:Scalar -> sample:'a Sample -> unit
+val render_vis: name:String -> rate:Scalar -> sample:'a Sample -> unit  (* waveform SVG *)
 
 (* file import *)
 val load_mono : path:String -> Scalar Signal

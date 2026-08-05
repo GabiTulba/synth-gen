@@ -1,0 +1,8 @@
+(* Bitonal sawtooth: two saw tones 4 Hz apart (220 + 224 Hz), which beat
+   against each other at 4 Hz, with a 2 Hz sine amplitude modulation
+   riding on top. *)
+
+let bitone : Scalar Signal = ((saw 220.0) + (saw 224.0)) * 0.5 ;;
+let modded : Scalar Signal = am bitone (sine 2.0) 0.5 ;;
+
+let _ = render "bitonal-saw" 48000.0 (sample (modded * 0.5) 0s 3s) ;;

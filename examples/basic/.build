@@ -1,5 +1,6 @@
 # Basic instrument samples: one artifact per instrument.
 project basic-samples
+source bitonal.synth
 source snare.synth
 source kick.synth
 source guitar.synth

@@ -22,16 +22,24 @@ struct SampleV {
   SigPtr sig;
   double from = 0, to = 0;
 };
+// A user function, possibly with some labeled arguments already bound
+// (label-driven partial application).
 struct FunV {
   const TopDef* def = nullptr;
   const CheckedModule* mod = nullptr;
+  std::shared_ptr<std::map<std::string, Value>> bound;  // by param name
+};
+// A primitive as a first-class value, possibly partially applied.
+struct PrimClosureV {
+  int primId = 0;  // PrimId, kept as int to avoid the header dependency
+  std::shared_ptr<std::map<std::string, Value>> bound;  // by param name
 };
 struct ListV { std::vector<Value> items; };
 struct TupleV { std::vector<Value> items; };
 
 struct Value {
   std::variant<UnitV, ScalarV, TimeV, StringV, VectorV, SigPtr, SampleV,
-               ListV, TupleV, FunV>
+               ListV, TupleV, FunV, PrimClosureV>
       v;
 };
 

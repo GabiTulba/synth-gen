@@ -673,3 +673,52 @@ let _ = render "out" 8000.0 (sample (place_multi wet [0s; 300ms]) 0s 600ms) ;;
     CHECK_NEAR(w.channels[0][(size_t)i], w.channels[0][(size_t)(i + shift)],
                2.0 / 32768.0);  // identical up to 16-bit quantization
 }
+
+TEST(build_pipes_and_labels_match_classic_style) {
+  // The same voice written classic-style and pipe/label-style must
+  // produce byte-identical artifacts.
+  TempDir classic, piped;
+  classic.write("p.synth", R"(
+let voice : Scalar Signal =
+  soft_clip 0.8 (lowpass 900.0 ((saw 220.0) * 2.0)) ;;
+let _ = render "out" 8000.0 (sample voice 0s 300ms) ;;
+)");
+  classic.write(".build", "project c\nsource p.synth\n");
+  piped.write("p.synth", R"(
+let voice : Scalar Signal =
+  saw 220.0 * 2.0 |> lowpass ~cutoff:900.0 |> soft_clip ~threshold:0.8 ;;
+let _ = sample voice ~from:0s ~to:300ms |> render ~name:"out" ~rate:8000.0 ;;
+)");
+  piped.write(".build", "project p\nsource p.synth\n");
+  BuildResult rc = buildProject(classic.dir.string());
+  BuildResult rp = buildProject(piped.dir.string());
+  for (auto& d : rc.diags.items) std::cerr << d.message << "\n";
+  for (auto& d : rp.diags.items) std::cerr << d.message << "\n";
+  CHECK(rc.ok);
+  CHECK(rp.ok);
+  std::string a = slurp(classic.dir / "build" / "artifacts" / "out.wav");
+  std::string b = slurp(piped.dir / "build" / "artifacts" / "out.wav");
+  CHECK(!a.empty());
+  CHECK(a == b);
+}
+
+TEST(build_labeled_partial_application_evaluates) {
+  // A user function partially applied by label, bound, then finished -
+  // and a primitive passed bare to map.
+  TempDir tp;
+  tp.write("p.synth", R"(
+let voice ~amp:Scalar ~freq:Scalar : Scalar Signal = (sine freq) * amp ;;
+let quiet : Scalar -> Scalar Signal = voice ~amp:0.25 ;;
+let tones : Scalar Signal list = map sine [220.0; 330.0] ;;
+let sum : Scalar Signal = (mix_all tones) * 0.2 + quiet 440.0 ;;
+let _ = render "out" 8000.0 (sample sum 0s 200ms) ;;
+)");
+  tp.write(".build", "project partial\nsource p.synth\n");
+  BuildResult r = buildProject(tp.dir.string());
+  for (auto& d : r.diags.items) std::cerr << d.message << "\n";
+  CHECK(r.ok);
+  WavData w = readWav((tp.dir / "build" / "artifacts" / "out.wav").string());
+  double peak = 0;
+  for (double v : w.channels[0]) peak = std::max(peak, std::fabs(v));
+  CHECK(peak > 0.3);  // all three tones present
+}

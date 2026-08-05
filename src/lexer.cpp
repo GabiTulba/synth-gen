@@ -43,6 +43,8 @@ const char* tokenName(Tok t) {
     case Tok::Comma: return "','";
     case Tok::Dot: return "'.'";
     case Tok::Arrow: return "'->'";
+    case Tok::Tilde: return "'~'";
+    case Tok::PipeGt: return "'|>'";
     case Tok::Plus: return "'+'";
     case Tok::Minus: return "'-'";
     case Tok::Star: return "'*'";
@@ -171,6 +173,11 @@ std::vector<Token> lex(const std::string& src, const std::string& file,
       push(Tok::Arrow, lo, i);
       continue;
     }
+    if (c == '|' && i + 1 < n && src[i + 1] == '>') {
+      i += 2;
+      push(Tok::PipeGt, lo, i);
+      continue;
+    }
     i++;
     switch (c) {
       case ':': push(Tok::Colon, lo, i); break;
@@ -182,6 +189,7 @@ std::vector<Token> lex(const std::string& src, const std::string& file,
       case ']': push(Tok::RBracket, lo, i); break;
       case ',': push(Tok::Comma, lo, i); break;
       case '.': push(Tok::Dot, lo, i); break;
+      case '~': push(Tok::Tilde, lo, i); break;
       case '+': push(Tok::Plus, lo, i); break;
       case '-': push(Tok::Minus, lo, i); break;
       case '*': push(Tok::Star, lo, i); break;

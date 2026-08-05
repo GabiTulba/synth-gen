@@ -32,6 +32,8 @@ struct Expr {
   std::string name;        // Ident
   BinOpKind op = BinOpKind::Add;
   std::vector<ExprPtr> items;
+  // App only: label per argument, parallel to items[1..]; "" = positional.
+  std::vector<std::string> argLabels;
 
   // Filled in by the type checker.
   TypePtr type;
@@ -42,6 +44,7 @@ struct Expr {
 struct Param {
   std::string name;
   TypePtr type;
+  bool labeled = false;  // declared with ~name:Type
   Span span{};
 };
 

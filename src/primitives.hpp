@@ -46,5 +46,6 @@ struct PrimSig {
 
 const std::vector<PrimSig>& primitives();
 const PrimSig* findPrimitive(const std::string& name);
+const PrimSig* findPrimitiveById(PrimId id);
 
 }  // namespace synth

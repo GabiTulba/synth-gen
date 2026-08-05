@@ -397,3 +397,110 @@ let wide : Vector Signal =
   checkProject({g}, diags2);
   CHECK(diags2.hasErrors());
 }
+
+TEST(checker_labeled_args_any_order) {
+  TempProject tp;
+  std::string f = tp.write("ok.synth", R"(
+let voice ~amp:Scalar ~freq:Scalar : Scalar Signal = (sine freq) * amp ;;
+let a : Scalar Signal = voice ~amp:0.5 ~freq:440.0 ;;
+let b : Scalar Signal = voice ~freq:440.0 ~amp:0.5 ;;
+let c : Scalar Signal = voice 0.5 440.0 ;;
+)");
+  DiagnosticBag diags;
+  Program prog = checkProject({f}, diags);
+  for (auto& d : diags.items)
+    std::cerr << renderDiagnostic(d, prog.modules.empty()
+                                         ? std::string{}
+                                         : prog.modules[0].parsed.source);
+  CHECK(!diags.hasErrors());
+}
+
+TEST(checker_labeled_partial_application_curries) {
+  TempProject tp;
+  std::string f = tp.write("ok.synth", R"(
+let voice ~amp:Scalar ~freq:Scalar : Scalar Signal = (sine freq) * amp ;;
+let half : Scalar -> Scalar Signal = voice ~amp:0.5 ;;
+let tone : Scalar Signal = half 440.0 ;;
+)");
+  DiagnosticBag diags;
+  Program prog = checkProject({f}, diags);
+  for (auto& d : diags.items)
+    std::cerr << renderDiagnostic(d, prog.modules.empty()
+                                         ? std::string{}
+                                         : prog.modules[0].parsed.source);
+  CHECK(!diags.hasErrors());
+  const TypePtr& half = prog.modules[0].defTypes.at("half");
+  CHECK(half->kind == Type::Kind::Fun);
+  CHECK(half->items.size() == 1);
+}
+
+TEST(checker_prim_labels_and_polymorphic_partial) {
+  TempProject tp;
+  // Primitives are callable by label, and a partial application of a
+  // polymorphic primitive resolves its variables against the annotation.
+  std::string f = tp.write("ok.synth", R"(
+let a : Scalar Signal = sine ~freq:440.0 ;;
+let b : unit = render ~rate:48000.0 ~name:"x" ~sample:(sample (sine 1.0) 0s 10ms) ;;
+let damp : Scalar Signal -> Scalar Signal = lowpass ~cutoff:600.0 ;;
+let c : Scalar Signal = damp (saw 220.0) ;;
+)");
+  DiagnosticBag diags;
+  Program prog = checkProject({f}, diags);
+  for (auto& d : diags.items)
+    std::cerr << renderDiagnostic(d, prog.modules.empty()
+                                         ? std::string{}
+                                         : prog.modules[0].parsed.source);
+  CHECK(!diags.hasErrors());
+}
+
+TEST(checker_label_errors) {
+  TempProject tp;
+  // Unknown label.
+  std::string f =
+      tp.write("bad1.synth", "let x : Scalar Signal = sine ~nope:440.0 ;;");
+  DiagnosticBag d1;
+  checkProject({f}, d1);
+  CHECK(d1.hasErrors());
+  // Same label twice.
+  std::string g = tp.write(
+      "bad2.synth", "let x : Scalar Signal = sine ~freq:440.0 ~freq:220.0 ;;");
+  DiagnosticBag d2;
+  checkProject({g}, d2);
+  CHECK(d2.hasErrors());
+  // Unfilled positional parameter cannot be curried.
+  std::string h = tp.write("bad3.synth", R"(
+let f x:Scalar ~y:Scalar : Scalar = x + y ;;
+let g : Scalar -> Scalar = f ~y:1.0 ;;
+)");
+  DiagnosticBag d3;
+  checkProject({h}, d3);
+  CHECK(d3.hasErrors());
+}
+
+TEST(checker_pipe_typing) {
+  TempProject tp;
+  std::string f = tp.write("ok.synth", R"(
+let warm : Scalar Signal =
+  saw 220.0 |> lowpass ~cutoff:800.0 |> soft_clip 0.8 ;;
+let s : Scalar Sample = sine 440.0 |> sample ~from:0s ~to:1s ;;
+)");
+  DiagnosticBag diags;
+  Program prog = checkProject({f}, diags);
+  for (auto& d : diags.items)
+    std::cerr << renderDiagnostic(d, prog.modules.empty()
+                                         ? std::string{}
+                                         : prog.modules[0].parsed.source);
+  CHECK(!diags.hasErrors());
+  CHECK(typeEquals(prog.modules[0].defTypes.at("warm"), tSignal(tScalar())));
+  CHECK(typeEquals(prog.modules[0].defTypes.at("s"), tSample(tScalar())));
+}
+
+TEST(checker_pipe_type_error_propagates) {
+  TempProject tp;
+  // Piping a Scalar into lowpass's Signal slot is a type error.
+  std::string f = tp.write(
+      "bad.synth", "let x : Scalar Signal = 1.0 |> lowpass ~cutoff:800.0 ;;");
+  DiagnosticBag diags;
+  checkProject({f}, diags);
+  CHECK(diags.hasErrors());
+}

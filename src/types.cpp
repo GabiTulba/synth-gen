@@ -52,6 +52,14 @@ TypePtr tFun(std::vector<TypePtr> params, TypePtr ret) {
   t->ret = std::move(ret);
   return t;
 }
+TypePtr tFun(std::vector<TypePtr> params, std::vector<std::string> labels,
+             TypePtr ret) {
+  auto t = std::make_shared<Type>(Type::Kind::Fun);
+  t->items = std::move(params);
+  t->labels = std::move(labels);
+  t->ret = std::move(ret);
+  return t;
+}
 TypePtr tVar(int id) {
   auto t = std::make_shared<Type>(Type::Kind::Var);
   t->var = id;
@@ -108,7 +116,11 @@ std::string typeName(const TypePtr& t) {
     }
     case Type::Kind::Fun: {
       std::string s = "(";
-      for (auto& p : t->items) s += typeName(p) + " -> ";
+      for (size_t i = 0; i < t->items.size(); i++) {
+        std::string label = t->labelAt(i);
+        if (!label.empty()) s += label + ":";
+        s += typeName(t->items[i]) + " -> ";
+      }
       return s + typeName(t->ret) + ")";
     }
     case Type::Kind::Var:
@@ -169,7 +181,7 @@ TypePtr applySubst(const TypePtr& t, const Subst& subst) {
     case Type::Kind::Fun: {
       std::vector<TypePtr> params;
       for (auto& x : t->items) params.push_back(applySubst(x, subst));
-      return tFun(std::move(params), applySubst(t->ret, subst));
+      return tFun(std::move(params), t->labels, applySubst(t->ret, subst));
     }
     default:
       return t;

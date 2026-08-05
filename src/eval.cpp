@@ -34,7 +34,8 @@ class Interp {
         try {
           if (!def.params.empty()) {
             // Functions are values; the body runs at call time.
-            globals_[mod.parsed.name][def.name] = Value{FunV{&def, &mod}};
+            globals_[mod.parsed.name][def.name] =
+                Value{FunV{&def, &mod, nullptr}};
           } else {
             Env empty;
             Value v = eval(*def.body, empty, mod);
@@ -71,18 +72,14 @@ class Interp {
       case Expr::Kind::StrLit: return Value{StringV{e.str}};
       case Expr::Kind::Ident: return lookup(e, env, mod);
       case Expr::Kind::App: {
-        std::vector<Value> args;
-        for (size_t i = 1; i < e.items.size(); i++)
-          args.push_back(eval(*e.items[i], env, mod));
-        const Expr& callee = *e.items[0];
-        // Primitive if not shadowed (mirrors the checker's resolution).
-        if (callee.moduleName.empty() && !env.count(callee.name) &&
-            !globals_[mod.parsed.name].count(callee.name)) {
-          if (const PrimSig* p = findPrimitive(callee.name))
-            return applyPrim(*p, std::move(args), mod);
+        std::vector<std::pair<std::string, Value>> args;  // label, value
+        for (size_t i = 1; i < e.items.size(); i++) {
+          std::string label =
+              i - 1 < e.argLabels.size() ? e.argLabels[i - 1] : "";
+          args.emplace_back(std::move(label), eval(*e.items[i], env, mod));
         }
-        Value fn = lookup(callee, env, mod);
-        return apply(fn, std::move(args));
+        Value fn = lookup(*e.items[0], env, mod);
+        return applyValue(fn, std::move(args), mod);
       }
       case Expr::Kind::BinOp: {
         Value l = eval(*e.items[0], env, mod);
@@ -110,6 +107,8 @@ class Interp {
       auto& g = globals_[mod.parsed.name];
       auto gt = g.find(ident.name);
       if (gt != g.end()) return gt->second;
+      if (const PrimSig* p = findPrimitive(ident.name))
+        return Value{PrimClosureV{(int)p->id, nullptr}};
       throw EvalError("unbound name '" + ident.name + "' at build time");
     }
     auto mt = globals_.find(ident.moduleName);
@@ -122,13 +121,72 @@ class Interp {
     return it->second;
   }
 
-  Value apply(const Value& fn, std::vector<Value> args) {
+  // Positional-only application (map/fold and internal call sites).
+  Value apply(const Value& fn, std::vector<Value> args,
+              const CheckedModule& mod) {
+    std::vector<std::pair<std::string, Value>> labeled;
+    for (auto& a : args) labeled.emplace_back("", std::move(a));
+    return applyValue(fn, std::move(labeled), mod);
+  }
+
+  // Label-aware application over both user functions and primitives.
+  // Positional values fill the leftmost unbound parameters; labeled ones
+  // bind by name. Incomplete applications yield a closure carrying the
+  // bindings; complete ones evaluate.
+  Value applyValue(const Value& fn,
+                   std::vector<std::pair<std::string, Value>> args,
+                   const CheckedModule& mod) {
+    // Assemble the parameter-name list of whatever we're applying.
+    std::vector<std::string> paramNames;
+    const std::map<std::string, Value>* prevBound = nullptr;
     const FunV* f = std::get_if<FunV>(&fn.v);
-    if (!f) throw EvalError("internal error: applying a non-function value");
-    Env env;
-    for (size_t i = 0; i < f->def->params.size(); i++)
-      env[f->def->params[i].name] = std::move(args[i]);
-    return eval(*f->def->body, env, *f->mod);
+    const PrimClosureV* pc = std::get_if<PrimClosureV>(&fn.v);
+    const PrimSig* sig = nullptr;
+    if (f) {
+      for (auto& p : f->def->params) paramNames.push_back(p.name);
+      prevBound = f->bound.get();
+    } else if (pc) {
+      sig = findPrimitiveById((PrimId)pc->primId);
+      if (!sig) throw EvalError("internal error: unknown primitive id");
+      paramNames = sig->paramNames;
+      prevBound = pc->bound.get();
+    } else {
+      throw EvalError("internal error: applying a non-function value");
+    }
+
+    auto bound = std::make_shared<std::map<std::string, Value>>();
+    if (prevBound) *bound = *prevBound;
+    for (auto& [label, value] : args) {
+      std::string target;
+      if (!label.empty()) {
+        if (bound->count(label))
+          throw EvalError("argument '~" + label + "' provided twice");
+        target = label;
+      } else {
+        for (auto& name : paramNames)
+          if (!bound->count(name)) {
+            target = name;
+            break;
+          }
+        if (target.empty())
+          throw EvalError("internal error: too many arguments");
+      }
+      (*bound)[target] = std::move(value);
+    }
+
+    if (bound->size() < paramNames.size()) {
+      if (f) return Value{FunV{f->def, f->mod, std::move(bound)}};
+      return Value{PrimClosureV{pc->primId, std::move(bound)}};
+    }
+
+    if (f) {
+      Env env;
+      for (auto& name : paramNames) env[name] = (*bound)[name];
+      return eval(*f->def->body, env, *f->mod);
+    }
+    std::vector<Value> ordered;
+    for (auto& name : paramNames) ordered.push_back((*bound)[name]);
+    return applyPrim(*sig, std::move(ordered), mod);
   }
 
   // --- Primitive implementations ----------------------------------------
@@ -248,14 +306,14 @@ class Interp {
         ListV out;
         const Value& f = args[0];
         for (auto& x : std::get<ListV>(args[1].v).items)
-          out.items.push_back(apply(f, {x}));
+          out.items.push_back(apply(f, {x}, mod));
         return Value{std::move(out)};
       }
       case PrimId::Fold: {
         const Value& f = args[0];
         Value acc = args[1];
         for (auto& x : std::get<ListV>(args[2].v).items)
-          acc = apply(f, {acc, x});
+          acc = apply(f, {acc, x}, mod);
         return acc;
       }
     }

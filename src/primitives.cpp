@@ -107,4 +107,10 @@ const PrimSig* findPrimitive(const std::string& name) {
   return nullptr;
 }
 
+const PrimSig* findPrimitiveById(PrimId id) {
+  for (auto& p : primitives())
+    if (p.id == id) return &p;
+  return nullptr;
+}
+
 }  // namespace synth

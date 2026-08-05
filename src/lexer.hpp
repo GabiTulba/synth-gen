@@ -25,6 +25,8 @@ enum class Tok {
   Comma,
   Dot,
   Arrow,      // ->
+  Tilde,      // ~ (labeled parameter/argument marker)
+  PipeGt,     // |>
   Plus,
   Minus,
   Star,

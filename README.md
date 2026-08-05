@@ -90,6 +90,25 @@ Fully annotated, no inference, no Booleans/branching/recursion in v1.
 `render` is the language's only effect. Files are modules (`import A`
 resolves `a.synth` in the same directory).
 
+Two ergonomic features on top of the doc's core: **labeled arguments**
+with label-driven currying, and the **pipe operator**:
+
+```ocaml
+let voice ~amp:Scalar ~freq:Scalar : Scalar Signal = (sine freq) * amp ;;
+let quiet : Scalar -> Scalar Signal = voice ~amp:0.25 ;;   (* curried *)
+
+let warm : Scalar Signal =
+  saw 220.0 |> lowpass ~cutoff:800.0 |> soft_clip 0.8 ;;
+
+let _ = sample warm ~from:0s ~to:2s |> render ~name:"warm" ~rate:48000.0 ;;
+```
+
+Labeled arguments go in any order; providing a subset curries the
+function. Primitive parameters are all labeled with their signature
+names, so any primitive can be called by label or partially applied.
+`x |> f a` desugars to `f a x` (the piped value becomes the final
+positional argument).
+
 ## Repository layout
 
 | Path | Contents |

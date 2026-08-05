@@ -68,3 +68,14 @@ TEST(lexer_operators) {
   CHECK(toks[4].kind == Tok::Slash);
   CHECK(toks[5].kind == Tok::LBracket);
 }
+
+TEST(lexer_tilde_and_pipe) {
+  DiagnosticBag diags;
+  auto toks = lex("~x:1.0 |> f", "t", diags);
+  CHECK(!diags.hasErrors());
+  CHECK(toks[0].kind == Tok::Tilde);
+  CHECK(toks[1].kind == Tok::Ident);
+  CHECK(toks[2].kind == Tok::Colon);
+  CHECK(toks[3].kind == Tok::Number);
+  CHECK(toks[4].kind == Tok::PipeGt);
+}

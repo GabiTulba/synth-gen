@@ -29,10 +29,17 @@ struct Type {
   Kind kind;
   TypePtr elem;                 // Signal / Sample / List
   std::vector<TypePtr> items;   // Tuple members or Fun params
+  // Fun: per-param labels, "" = positional. May be empty (all positional).
+  // Labels drive call-site matching and printing; equality ignores them.
+  std::vector<std::string> labels;
   TypePtr ret;                  // Fun
   int var = 0;                  // Var
 
   explicit Type(Kind k) : kind(k) {}
+
+  std::string labelAt(size_t i) const {
+    return i < labels.size() ? labels[i] : std::string{};
+  }
 };
 
 TypePtr tScalar();
@@ -45,6 +52,8 @@ TypePtr tSample(TypePtr elem);
 TypePtr tList(TypePtr elem);
 TypePtr tTuple(std::vector<TypePtr> items);
 TypePtr tFun(std::vector<TypePtr> params, TypePtr ret);
+TypePtr tFun(std::vector<TypePtr> params, std::vector<std::string> labels,
+             TypePtr ret);
 TypePtr tVar(int id);
 
 bool typeEquals(const TypePtr& a, const TypePtr& b);

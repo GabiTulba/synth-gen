@@ -137,3 +137,51 @@ TEST(parser_module_name_from_path) {
   CHECK(moduleNameForPath("/x/y/pluck.synth") == "Pluck");
   CHECK(moduleNameForPath("a.synth") == "A");
 }
+
+TEST(parser_labeled_params_and_args) {
+  DiagnosticBag diags;
+  auto defs = parseSrc(
+      "let f ~amp:Scalar ~freq:Scalar : Scalar Signal = sine freq * amp ;;\n"
+      "let g : Scalar Signal = f ~freq:440.0 ~amp:0.5 ;;",
+      diags);
+  CHECK(!diags.hasErrors());
+  CHECK(defs[0].params[0].labeled);
+  CHECK(defs[0].params[1].labeled);
+  const Expr& call = *defs[1].body;
+  CHECK(call.kind == Expr::Kind::App);
+  CHECK(call.argLabels.size() == 2);
+  CHECK(call.argLabels[0] == "freq");
+  CHECK(call.argLabels[1] == "amp");
+}
+
+TEST(parser_pipe_desugars_to_application) {
+  DiagnosticBag diags;
+  auto defs = parseSrc(
+      "let x : Scalar Signal = saw 220.0 |> lowpass ~cutoff:800.0 ;;", diags);
+  CHECK(!diags.hasErrors());
+  const Expr& app = *defs[0].body;
+  CHECK(app.kind == Expr::Kind::App);
+  CHECK(app.items[0]->name == "lowpass");
+  // args: ~cutoff:800.0 then the piped (saw 220.0) as final positional.
+  CHECK(app.items.size() == 3);
+  CHECK(app.argLabels[0] == "cutoff");
+  CHECK(app.argLabels[1] == "");
+  CHECK(app.items[2]->kind == Expr::Kind::App);
+  CHECK(app.items[2]->items[0]->name == "saw");
+}
+
+TEST(parser_pipe_chains_left_associative) {
+  DiagnosticBag diags;
+  auto defs = parseSrc(
+      "let x : Scalar Signal = sine 440.0 |> f |> g ;;", diags);
+  CHECK(!diags.hasErrors());
+  const Expr& outer = *defs[0].body;
+  CHECK(outer.items[0]->name == "g");
+  CHECK(outer.items[1]->items[0]->name == "f");
+}
+
+TEST(parser_pipe_rejects_non_application_rhs) {
+  DiagnosticBag diags;
+  parseSrc("let x : Scalar = 1.0 |> 2.0 ;;", diags);
+  CHECK(diags.hasErrors());
+}

@@ -78,10 +78,15 @@ class Parser {
     Span lo = advance().span;  // 'let'
     const Token& name = expect(Tok::Ident, "binding name");
     d.name = name.text;
-    // Parameters: ident ':' type, until ':' (return type) or '='.
-    while (at(Tok::Ident)) {
+    // Parameters: [~]ident ':' type, until ':' (return type) or '='.
+    // A leading '~' declares a labeled parameter.
+    while (at(Tok::Ident) || at(Tok::Tilde)) {
       Param p;
-      const Token& pn = advance();
+      if (at(Tok::Tilde)) {
+        advance();
+        p.labeled = true;
+      }
+      const Token& pn = expect(Tok::Ident, "parameter name");
       p.name = pn.text;
       expect(Tok::Colon, "':' after parameter name");
       p.type = parseParamType();
@@ -177,7 +182,38 @@ class Parser {
 
   // --- Expressions -------------------------------------------------------
 
-  ExprPtr parseExpr() { return parseAdditive(); }
+  ExprPtr parseExpr() { return parsePipe(); }
+
+  // Lowest precedence, left-associative. `x |> f a b` desugars to the
+  // application `f a b x`: the piped value becomes the final positional
+  // argument, so the type checker and evaluator see one ordinary call
+  // (this also lets pipes feed label-curried calls without materializing
+  // an intermediate closure).
+  ExprPtr parsePipe() {
+    ExprPtr left = parseAdditive();
+    while (at(Tok::PipeGt)) {
+      advance();
+      ExprPtr right = parseAdditive();
+      Span span{left->span.lo, right->span.hi};
+      if (right->kind == Expr::Kind::Ident) {
+        auto app = std::make_unique<Expr>(Expr::Kind::App, span);
+        app->items.push_back(std::move(right));
+        app->items.push_back(std::move(left));
+        app->argLabels.push_back("");
+        left = std::move(app);
+      } else if (right->kind == Expr::Kind::App) {
+        right->items.push_back(std::move(left));
+        right->argLabels.push_back("");
+        right->span = span;
+        left = std::move(right);
+      } else {
+        fail(right->span,
+             "the right-hand side of |> must be a function name or "
+             "application");
+      }
+    }
+    return left;
+  }
 
   ExprPtr parseAdditive() {
     ExprPtr left = parseMultiplicative();
@@ -218,12 +254,28 @@ class Parser {
   ExprPtr parseApp() {
     ExprPtr head = parseAtom();
     std::vector<ExprPtr> args;
-    while (startsAtom()) args.push_back(parseAtom());
+    std::vector<std::string> labels;
+    for (;;) {
+      if (at(Tok::Tilde)) {
+        // Labeled argument: ~name:atom
+        advance();
+        const Token& name = expect(Tok::Ident, "label after '~'");
+        expect(Tok::Colon, "':' after argument label");
+        args.push_back(parseAtom());
+        labels.push_back(name.text);
+      } else if (startsAtom()) {
+        args.push_back(parseAtom());
+        labels.push_back("");
+      } else {
+        break;
+      }
+    }
     if (args.empty()) return head;
     auto e = std::make_unique<Expr>(
         Expr::Kind::App, Span{head->span.lo, args.back()->span.hi});
     e->items.push_back(std::move(head));
     for (auto& a : args) e->items.push_back(std::move(a));
+    e->argLabels = std::move(labels);
     return e;
   }
 

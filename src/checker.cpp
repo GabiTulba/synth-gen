@@ -79,33 +79,41 @@ class ModuleChecker {
         return;
       }
       if (!def.retType) fail(def.span, "missing return type annotation");
-      if (!typeEquals(bodyType, def.retType))
+      // A partial application of a polymorphic primitive leaves type
+      // variables in the body type; the declared annotation resolves them.
+      bool matches;
+      if (containsVar(bodyType)) {
+        Subst subst;
+        matches = unify(bodyType, def.retType, subst);
+      } else {
+        matches = typeEquals(bodyType, def.retType);
+      }
+      if (!matches)
         fail(def.body->span, "body has type " + typeName(bodyType) +
                                  " but the signature declares " +
                                  typeName(def.retType));
       if (mod_.defTypes.count(def.name))
         fail(def.span, "duplicate definition of '" + def.name + "'");
-      mod_.defTypes[def.name] =
-          def.params.empty()
-              ? def.retType
-              : [&] {
-                  std::vector<TypePtr> ps;
-                  for (auto& p : def.params) ps.push_back(p.type);
-                  return tFun(std::move(ps), def.retType);
-                }();
+      mod_.defTypes[def.name] = def.params.empty() ? def.retType
+                                                   : defFunType(def);
     } catch (const Abort&) {
       // Diagnostic already recorded; give the binding its declared type so
       // later definitions don't cascade "unknown name" errors.
       if (def.name != "_" && def.retType && !mod_.defTypes.count(def.name)) {
-        if (def.params.empty()) {
-          mod_.defTypes[def.name] = def.retType;
-        } else {
-          std::vector<TypePtr> ps;
-          for (auto& p : def.params) ps.push_back(p.type);
-          mod_.defTypes[def.name] = tFun(std::move(ps), def.retType);
-        }
+        mod_.defTypes[def.name] =
+            def.params.empty() ? def.retType : defFunType(def);
       }
     }
+  }
+
+  static TypePtr defFunType(const TopDef& def) {
+    std::vector<TypePtr> ps;
+    std::vector<std::string> labels;
+    for (auto& p : def.params) {
+      ps.push_back(p.type);
+      labels.push_back(p.labeled ? p.name : "");
+    }
+    return tFun(std::move(ps), std::move(labels), def.retType);
   }
 
   TypePtr check(Expr& e, std::map<std::string, TypePtr>& env) {
@@ -154,7 +162,7 @@ class ModuleChecker {
       auto dt = mod_.defTypes.find(e.name);
       if (dt != mod_.defTypes.end()) return dt->second;
       if (const PrimSig* p = findPrimitive(e.name))
-        return tFun(p->paramTypes, p->retType);
+        return tFun(p->paramTypes, p->paramNames, p->retType);
       fail(e.span, "unknown name '" + e.name + "'");
     }
     if (std::find(mod_.imports.begin(), mod_.imports.end(), e.moduleName) ==
@@ -170,63 +178,128 @@ class ModuleChecker {
     return it->second;
   }
 
+  // Application with labels. Positional arguments fill the leftmost
+  // unfilled parameters in order; labeled arguments (~x:v) fill their
+  // parameter by name, in any order. If every parameter is filled the
+  // call evaluates; if the remaining unfilled parameters are all labeled,
+  // the result is the curried function of those parameters (label-driven
+  // partial application). Unfilled positional parameters are an error.
   TypePtr checkApp(Expr& e, std::map<std::string, TypePtr>& env) {
     Expr& callee = *e.items[0];
     if (callee.kind != Expr::Kind::Ident)
       fail(callee.span, "only named functions can be applied");
 
-    // Check arguments first; user code is monomorphic so they are concrete.
+    // Check arguments first; user code is monomorphic so they are concrete
+    // (a nested partial application of a polymorphic primitive is the one
+    // exception and surfaces as a leftover-variable error below).
     std::vector<TypePtr> argTypes;
     for (size_t i = 1; i < e.items.size(); i++)
       argTypes.push_back(check(*e.items[i], env));
+    auto labelOf = [&](size_t argIdx) {
+      return argIdx < e.argLabels.size() ? e.argLabels[argIdx]
+                                         : std::string{};
+    };
 
-    // Primitive application (unqualified names not shadowed by params/defs).
+    // Resolve the callee to parameter types + labels + return type.
+    // Primitive parameters are all labeled with their signature names.
+    std::vector<TypePtr> paramTypes;
+    std::vector<std::string> paramLabels;
+    TypePtr retType;
     const PrimSig* prim = nullptr;
     if (callee.moduleName.empty() && !env.count(callee.name) &&
         !mod_.defTypes.count(callee.name))
       prim = findPrimitive(callee.name);
-
     if (prim) {
-      callee.type = tFun(prim->paramTypes, prim->retType);
-      if (argTypes.size() != prim->paramTypes.size())
-        fail(e.span, "'" + prim->name + "' expects " +
-                         std::to_string(prim->paramTypes.size()) +
-                         " argument(s), got " +
-                         std::to_string(argTypes.size()));
-      Subst subst;
-      for (size_t i = 0; i < argTypes.size(); i++) {
-        if (!unify(prim->paramTypes[i], argTypes[i], subst))
-          fail(e.items[i + 1]->span,
-               "argument '" + prim->paramNames[i] + "' of '" + prim->name +
-                   "' expects " +
-                   typeName(applySubst(prim->paramTypes[i], subst)) +
-                   ", got " + typeName(argTypes[i]));
+      paramTypes = prim->paramTypes;
+      paramLabels = prim->paramNames;
+      retType = prim->retType;
+      callee.type = tFun(paramTypes, paramLabels, retType);
+    } else {
+      TypePtr fnType = checkIdentIn(callee, env);
+      callee.type = fnType;
+      if (fnType->kind != Type::Kind::Fun)
+        fail(callee.span, "'" + callee.name + "' has type " +
+                              typeName(fnType) + " and cannot be applied");
+      paramTypes = fnType->items;
+      for (size_t i = 0; i < paramTypes.size(); i++)
+        paramLabels.push_back(fnType->labelAt(i));
+      retType = fnType->ret;
+    }
+
+    // Match arguments to parameters.
+    std::vector<int> argForParam(paramTypes.size(), -1);
+    for (size_t j = 0; j < argTypes.size(); j++) {
+      std::string label = labelOf(j);
+      size_t target = paramTypes.size();
+      if (!label.empty()) {
+        for (size_t i = 0; i < paramTypes.size(); i++)
+          if (paramLabels[i] == label && argForParam[i] < 0) {
+            target = i;
+            break;
+          }
+        if (target == paramTypes.size())
+          fail(e.items[j + 1]->span,
+               "'" + callee.name + "' has no unfilled argument labeled '~" +
+                   label + "'");
+      } else {
+        for (size_t i = 0; i < paramTypes.size(); i++)
+          if (argForParam[i] < 0) {
+            target = i;
+            break;
+          }
+        if (target == paramTypes.size())
+          fail(e.span, "'" + callee.name + "' expects " +
+                           std::to_string(paramTypes.size()) +
+                           " argument(s), got " +
+                           std::to_string(argTypes.size()));
       }
-      TypePtr ret = applySubst(prim->retType, subst);
-      if (containsVar(ret))
+      argForParam[target] = (int)j;
+    }
+
+    // Type-check the provided arguments against their parameters.
+    Subst subst;
+    for (size_t i = 0; i < paramTypes.size(); i++) {
+      if (argForParam[i] < 0) continue;
+      size_t j = (size_t)argForParam[i];
+      bool ok = prim ? unify(paramTypes[i], argTypes[j], subst)
+                     : typeEquals(paramTypes[i], argTypes[j]);
+      if (!ok) {
+        std::string label = paramLabels[i].empty()
+                                ? "argument " + std::to_string(i + 1)
+                                : "argument '" + paramLabels[i] + "'";
+        fail(e.items[j + 1]->span,
+             label + " of '" + callee.name + "' expects " +
+                 typeName(applySubst(paramTypes[i], subst)) + ", got " +
+                 typeName(argTypes[j]));
+      }
+    }
+
+    // Fully applied?
+    std::vector<size_t> unfilled;
+    for (size_t i = 0; i < paramTypes.size(); i++)
+      if (argForParam[i] < 0) unfilled.push_back(i);
+    if (unfilled.empty()) {
+      TypePtr ret = applySubst(retType, subst);
+      if (prim && containsVar(ret))
         fail(e.span, "cannot determine the result type of this call to '" +
-                         prim->name + "'");
+                         callee.name + "'");
       return ret;
     }
 
-    TypePtr fnType = checkIdentIn(callee, env);
-    callee.type = fnType;
-    if (fnType->kind != Type::Kind::Fun)
-      fail(callee.span,
-           "'" + callee.name + "' has type " + typeName(fnType) +
-               " and cannot be applied");
-    if (argTypes.size() != fnType->items.size())
-      fail(e.span, "'" + callee.name + "' expects " +
-                       std::to_string(fnType->items.size()) +
-                       " argument(s), got " + std::to_string(argTypes.size()));
-    for (size_t i = 0; i < argTypes.size(); i++) {
-      if (!typeEquals(fnType->items[i], argTypes[i]))
-        fail(e.items[i + 1]->span,
-             "argument " + std::to_string(i + 1) + " of '" + callee.name +
-                 "' expects " + typeName(fnType->items[i]) + ", got " +
-                 typeName(argTypes[i]));
+    // Partial application: every remaining parameter must be labeled.
+    for (size_t i : unfilled)
+      if (paramLabels[i].empty())
+        fail(e.span, "'" + callee.name +
+                         "' is missing positional argument(s); only "
+                         "labeled arguments may be left for later");
+    std::vector<TypePtr> remTypes;
+    std::vector<std::string> remLabels;
+    for (size_t i : unfilled) {
+      remTypes.push_back(applySubst(paramTypes[i], subst));
+      remLabels.push_back(paramLabels[i]);
     }
-    return fnType->ret;
+    return tFun(std::move(remTypes), std::move(remLabels),
+                applySubst(retType, subst));
   }
 
   static bool containsVar(const TypePtr& t) {

@@ -2,8 +2,12 @@
    against each other at 4 Hz, with a 2 Hz sine amplitude modulation
    riding on top. *)
 
-let bitone : Scalar Signal = ((saw 220.0) + (saw 224.0)) * 0.5 ;;
-let modded : Scalar Signal = am bitone (sine 2.0) 0.5 ;;
+let bitone : Scalar Signal = (saw 220.0 + saw 224.0) * 0.5 ;;
+let modded : Scalar Signal = bitone |> am ~modulator:(sine 2.0) ~depth:0.5 ;;
 
-let _ = render "bitonal-saw" 48000.0 (sample (modded * 0.5) 0s 10s) ;;
-let _ = render_vis "bitonal-saw-wave" 48000.0 (sample (modded * 0.5) 0s 10s) ;;
+let _ =
+  modded * 0.5 |> sample ~from:0s ~to:10s
+               |> render ~name:"bitonal-saw" ~rate:48000.0 ;;
+let _ =
+  modded * 0.5 |> sample ~from:0s ~to:10s
+               |> render_vis ~name:"bitonal-saw-wave" ~rate:48000.0 ;;

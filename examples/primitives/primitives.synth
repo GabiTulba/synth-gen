@@ -1,53 +1,100 @@
 (* primitives.synth — one short, audible render target per library
-   primitive. Rendered artifacts are copied into outputs/primitives/ by
+   primitive, written in labeled-argument + pipe style. Rendered
+   artifacts are copied into outputs/primitives/ by
    scripts/render-outputs.sh. Levels are kept below 1.0 to avoid
    clipping in the 16-bit artifacts. *)
 
 (* Generators *)
-let _ = render "sine" 48000.0 (sample ((sine 440.0) * 0.8) 0s 1s) ;;
-let _ = render "saw" 48000.0 (sample ((saw 220.0) * 0.5) 0s 1s) ;;
-let _ = render "square" 48000.0 (sample ((square 220.0) * 0.4) 0s 1s) ;;
-let _ = render "noise" 48000.0 (sample ((noise 2000.0) * 0.5) 0s 1s) ;;
+let _ =
+  sine 440.0 * 0.8 |> sample ~from:0s ~to:1s
+                   |> render ~name:"sine" ~rate:48000.0 ;;
+let _ =
+  saw 220.0 * 0.5 |> sample ~from:0s ~to:1s
+                  |> render ~name:"saw" ~rate:48000.0 ;;
+let _ =
+  square 220.0 * 0.4 |> sample ~from:0s ~to:1s
+                     |> render ~name:"square" ~rate:48000.0 ;;
+let _ =
+  noise 2000.0 * 0.5 |> sample ~from:0s ~to:1s
+                     |> render ~name:"noise" ~rate:48000.0 ;;
 
 (* Envelopes *)
-let _ = render "exp_decay" 48000.0
-  (sample ((sine 440.0) * (exp_decay 3.0) * 0.8) 0s 1500ms) ;;
-let _ = render "adsr" 48000.0
-  (sample ((sine 440.0) * (adsr 60ms 120ms 0.6 350ms 650ms) * 0.8) 0s 1s) ;;
+let _ =
+  sine 440.0 * exp_decay 3.0 * 0.8
+    |> sample ~from:0s ~to:1500ms
+    |> render ~name:"exp_decay" ~rate:48000.0 ;;
+let _ =
+  sine 440.0
+      * (adsr ~attack:60ms ~decay:120ms ~sustain:0.6 ~release:350ms
+              ~hold:650ms)
+      * 0.8
+    |> sample ~from:0s ~to:1s
+    |> render ~name:"adsr" ~rate:48000.0 ;;
 
 (* Filters, on a bright source so the difference is audible *)
-let _ = render "lowpass" 48000.0
-  (sample ((lowpass 600.0 (saw 220.0)) * 0.7) 0s 1s) ;;
-let _ = render "highpass" 48000.0
-  (sample ((highpass 2500.0 (saw 220.0)) * 0.7) 0s 1s) ;;
+let _ =
+  (saw 220.0 |> lowpass ~cutoff:600.0) * 0.7
+    |> sample ~from:0s ~to:1s
+    |> render ~name:"lowpass" ~rate:48000.0 ;;
+let _ =
+  (saw 220.0 |> highpass ~cutoff:2500.0) * 0.7
+    |> sample ~from:0s ~to:1s
+    |> render ~name:"highpass" ~rate:48000.0 ;;
 
 (* Modulation *)
-let _ = render "fm" 48000.0
-  (sample ((fm 220.0 ((sine 110.0) * 180.0)) * 0.6) 0s 1s) ;;
-let _ = render "pm" 48000.0
-  (sample ((pm 220.0 ((sine 110.0) * 2.5)) * 0.6) 0s 1s) ;;
-let _ = render "am" 48000.0
-  (sample ((am (sine 440.0) (sine 4.0) 0.6) * 0.5) 0s 1500ms) ;;
+let _ =
+  (fm ~carrier:220.0 ~modulator:(sine 110.0 * 180.0)) * 0.6
+    |> sample ~from:0s ~to:1s
+    |> render ~name:"fm" ~rate:48000.0 ;;
+let _ =
+  (pm ~carrier:220.0 ~modulator:(sine 110.0 * 2.5)) * 0.6
+    |> sample ~from:0s ~to:1s
+    |> render ~name:"pm" ~rate:48000.0 ;;
+let _ =
+  (sine 440.0 |> am ~modulator:(sine 4.0) ~depth:0.6) * 0.5
+    |> sample ~from:0s ~to:1500ms
+    |> render ~name:"am" ~rate:48000.0 ;;
 
 (* Time effects, fed by a short blip so the tail is obvious *)
 let blip : Scalar Signal =
-  place (sample ((sine 660.0) * (exp_decay 12.0)) 0s 250ms) 0s ;;
-let _ = render "delay" 48000.0
-  (sample ((mix_all [blip; (delay 300ms blip) * 0.5;
-                     (delay 600ms blip) * 0.25]) * 0.7) 0s 1500ms) ;;
-let _ = render "reverb" 48000.0
-  (sample ((reverb 900ms 0.4 0.5 blip) * 0.7) 0s 2s) ;;
+  (sine 660.0 * exp_decay 12.0 |> sample ~from:0s ~to:250ms)
+    |> place ~at:0s ;;
+let _ =
+  (mix_all [blip;
+            (blip |> delay ~by:300ms) * 0.5;
+            (blip |> delay ~by:600ms) * 0.25]) * 0.7
+    |> sample ~from:0s ~to:1500ms
+    |> render ~name:"delay" ~rate:48000.0 ;;
+let _ =
+  (blip |> reverb ~decay:900ms ~damping:0.4 ~mix:0.5) * 0.7
+    |> sample ~from:0s ~to:2s
+    |> render ~name:"reverb" ~rate:48000.0 ;;
 
 (* Combination *)
-let _ = render "channels" 48000.0
-  (sample ((channels [sine 440.0; sine 443.0]) * 0.5) 0s 1500ms) ;;
-let _ = render "mix_all" 48000.0
-  (sample ((mix_all [sine 261.63; sine 329.63; sine 392.0]) * 0.25)
-   0s 1500ms) ;;
+let _ =
+  (channels [sine 440.0; sine 443.0]) * 0.5
+    |> sample ~from:0s ~to:1500ms
+    |> render ~name:"channels" ~rate:48000.0 ;;
+let _ =
+  (mix_all [sine 261.63; sine 329.63; sine 392.0]) * 0.25
+    |> sample ~from:0s ~to:1500ms
+    |> render ~name:"mix_all" ~rate:48000.0 ;;
 
 (* Distortion, on an overdriven sine so the shaping is audible *)
-let hot : Scalar Signal = (sine 220.0) * 3.0 ;;
-let _ = render "hard_clip" 48000.0 (sample (hard_clip 0.5 hot) 0s 1s) ;;
-let _ = render "soft_clip" 48000.0 (sample (soft_clip 0.5 hot) 0s 1s) ;;
-let _ = render_vis "hard_clip-wave" 48000.0 (sample (hard_clip 0.5 hot) 0s 20ms) ;;
-let _ = render_vis "soft_clip-wave" 48000.0 (sample (soft_clip 0.5 hot) 0s 20ms) ;;
+let hot : Scalar Signal = sine 220.0 * 3.0 ;;
+let _ =
+  hot |> hard_clip ~threshold:0.5
+      |> sample ~from:0s ~to:1s
+      |> render ~name:"hard_clip" ~rate:48000.0 ;;
+let _ =
+  hot |> soft_clip ~threshold:0.5
+      |> sample ~from:0s ~to:1s
+      |> render ~name:"soft_clip" ~rate:48000.0 ;;
+let _ =
+  hot |> hard_clip ~threshold:0.5
+      |> sample ~from:0s ~to:20ms
+      |> render_vis ~name:"hard_clip-wave" ~rate:48000.0 ;;
+let _ =
+  hot |> soft_clip ~threshold:0.5
+      |> sample ~from:0s ~to:20ms
+      |> render_vis ~name:"soft_clip-wave" ~rate:48000.0 ;;

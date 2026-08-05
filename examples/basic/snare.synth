@@ -1,8 +1,12 @@
 (* Snare drum: a bright noise rattle over a short tonal body. *)
 
-let body : Scalar Signal = (sine 185.0) * (exp_decay 18.0) * 0.5 ;;
-let rattle : Scalar Signal = (noise 1800.0) * (exp_decay 22.0) ;;
+let body : Scalar Signal = sine 185.0 * exp_decay 18.0 * 0.5 ;;
+let rattle : Scalar Signal = noise 1800.0 * exp_decay 22.0 ;;
 let snare : Scalar Signal = (rattle + body) * 0.6 ;;
 
-let _ = render "snare" 48000.0 (sample snare 0s 350ms) ;;
-let _ = render_vis "snare-wave" 48000.0 (sample snare 0s 350ms) ;;
+let _ =
+  snare |> sample ~from:0s ~to:350ms
+        |> render ~name:"snare" ~rate:48000.0 ;;
+let _ =
+  snare |> sample ~from:0s ~to:350ms
+        |> render_vis ~name:"snare-wave" ~rate:48000.0 ;;

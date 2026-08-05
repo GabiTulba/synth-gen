@@ -2,21 +2,27 @@
    strings are stiff, so overtones run a little sharp) under a
    fast-attack ADSR, doubled by a softly detuned copy, in a small room. *)
 
-let partial freq:Scalar amp:Scalar decay:Scalar : Scalar Signal =
-  (sine freq) * (exp_decay decay) * amp
+let partial ~freq:Scalar ~amp:Scalar ~decay:Scalar : Scalar Signal =
+  sine freq * exp_decay decay * amp
 ;;
 
 let strike root:Scalar : Scalar Signal =
-  mix_all [partial root 1.0 1.1;
-           partial (root * 2.001) 0.50 1.6;
-           partial (root * 3.004) 0.26 2.2;
-           partial (root * 4.009) 0.14 2.9;
-           partial (root * 5.016) 0.07 3.7]
+  mix_all [partial ~freq:root ~amp:1.0 ~decay:1.1;
+           partial ~freq:(root * 2.001) ~amp:0.50 ~decay:1.6;
+           partial ~freq:(root * 3.004) ~amp:0.26 ~decay:2.2;
+           partial ~freq:(root * 4.009) ~amp:0.14 ~decay:2.9;
+           partial ~freq:(root * 5.016) ~amp:0.07 ~decay:3.7]
 ;;
 
-let env : Scalar Signal = adsr 4ms 900ms 0.12 600ms 1200ms ;;
-let note : Scalar Signal = (strike 261.63 + (strike 261.9) * 0.35) * env ;;
-let piano : Scalar Signal = reverb 500ms 0.5 0.2 (note * 0.5) ;;
+let env : Scalar Signal =
+  adsr ~attack:4ms ~decay:900ms ~sustain:0.12 ~release:600ms ~hold:1200ms ;;
+let note : Scalar Signal = (strike 261.63 + strike 261.9 * 0.35) * env ;;
+let piano : Scalar Signal =
+  note * 0.5 |> reverb ~decay:500ms ~damping:0.5 ~mix:0.2 ;;
 
-let _ = render "piano-note" 48000.0 (sample piano 0s 2500ms) ;;
-let _ = render_vis "piano-note-wave" 48000.0 (sample piano 0s 2500ms) ;;
+let _ =
+  piano |> sample ~from:0s ~to:2500ms
+        |> render ~name:"piano-note" ~rate:48000.0 ;;
+let _ =
+  piano |> sample ~from:0s ~to:2500ms
+        |> render_vis ~name:"piano-note-wave" ~rate:48000.0 ;;

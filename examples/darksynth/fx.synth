@@ -28,25 +28,30 @@ let alarm_hit : Scalar Sample =
     |> sample ~from:0s ~to:180ms
 ;;
 
-(* A dark stereo Doppler whoosh (the examples/advanced technique): a
-   rapid 2 s pass, four FM partials swept +/-8% by a cosine half-period,
-   sin^2 proximity swell, and pan gains walking left to right. *)
+(* An engine-like stereo Doppler pass (the examples/advanced technique,
+   roughened): 1.2 s, six FM partials on a low 110 Hz base swept +/-10%
+   by a cosine half-period, with a 27 Hz AM growl and a soft clipper for
+   the motor rasp; sin^2 proximity swell and pan gains crossing left to
+   right. *)
 let dop_shape : Scalar Signal =
-  pm ~carrier:0.25 ~modulator:(exp_decay 0.0 * 1.5707963) ;;
+  pm ~carrier:0.42 ~modulator:(exp_decay 0.0 * 1.5707963) ;;
 
 let dop_partial ~base:Scalar ~i:Scalar : Scalar Signal =
   let n : Scalar = i + 1.0 in
-  (fm ~carrier:(base * n) ~modulator:(dop_shape * (base * n * 0.08)))
+  (fm ~carrier:(base * n) ~modulator:(dop_shape * (base * n * 0.1)))
     * (1.0 / n)
 ;;
 
 let doppler_whoosh : Vector Sample =
-  let tone : Scalar Signal =
-    mix_all (list_init ~n:4.0 ~f:(dop_partial ~base:165.0)) * 0.45 in
+  let raw : Scalar Signal =
+    mix_all (list_init ~n:6.0 ~f:(dop_partial ~base:110.0)) * 0.5 in
+  let engine : Scalar Signal =
+    raw |> am ~modulator:(sine 27.0) ~depth:0.55
+        |> soft_clip ~threshold:0.55 in
   let prox : Scalar Signal =
     (exp_decay 0.0 - dop_shape * dop_shape) * 0.85 + 0.15 in
-  let src : Scalar Signal = tone * prox in
+  let src : Scalar Signal = engine * prox in
   channels [src * ((dop_shape + 1.0) * 0.5);
             src * ((1.0 - dop_shape) * 0.5)]
-    |> sample ~from:0s ~to:2s
+    |> sample ~from:0s ~to:1200ms
 ;;

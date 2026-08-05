@@ -14,13 +14,15 @@ let chug freq:Scalar : Scalar Sample =
     |> sample ~from:0s ~to:180ms
 ;;
 
+(* No clean octave partial here - a pure upper harmonic rings piano-like.
+   Three detuned saws clipped hard snarl instead. *)
 let stab freq:Scalar : Scalar Sample =
   let tone : Scalar Signal =
-    saw freq + saw (freq * 1.015) + square (freq * 2.02) * 0.3
-      |> lowpass ~cutoff:1900.0
-      |> hard_clip ~threshold:0.5 in
+    saw freq + saw (freq * 1.02) + saw (freq * 0.996)
+      |> lowpass ~cutoff:1400.0
+      |> hard_clip ~threshold:0.35 in
   tone
-    * (adsr ~attack:2ms ~decay:160ms ~sustain:0.45 ~release:180ms
-            ~hold:420ms)
-    |> sample ~from:0s ~to:600ms
+    * (adsr ~attack:2ms ~decay:120ms ~sustain:0.4 ~release:120ms
+            ~hold:260ms)
+    |> sample ~from:0s ~to:420ms
 ;;

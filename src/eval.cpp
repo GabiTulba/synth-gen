@@ -210,6 +210,8 @@ class Interp {
         t.sample = std::get<SampleV>(args[2].v);
         t.file = mod.parsed.path;
         t.span = currentDef_ ? currentDef_->span : Span{};
+        t.declModule = currentModule_;
+        t.declDef = currentDef_;
         if (t.name.empty()) throw EvalError("render: empty artifact name");
         if (t.rate <= 0)
           throw EvalError("render: sample rate must be positive");

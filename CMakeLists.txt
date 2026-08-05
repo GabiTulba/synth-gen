@@ -18,6 +18,7 @@ add_library(synthgraph_core
   src/types.cpp
   src/primitives.cpp
   src/checker.cpp
+  src/incremental.cpp
   src/signal.cpp
   src/eval.cpp
   src/wav.cpp

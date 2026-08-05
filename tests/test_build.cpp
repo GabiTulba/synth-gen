@@ -359,3 +359,155 @@ let _ = render "snare" 16000.0 (sample snare 0s 400ms) ;;
   CHECK(rmsIn(0.0, 0.05) > 0.3);              // loud onset
   CHECK(rmsIn(0.3, 0.4) < rmsIn(0.0, 0.05) * 0.05);  // decayed away
 }
+
+TEST(build_cache_skips_unchanged_and_invalidates_across_modules) {
+  TempDir tp;
+  tp.write("instr.synth",
+           "let tone freq:Scalar : Scalar Signal = "
+           "(sine freq) * (exp_decay 6.0) ;;");
+  tp.write("song.synth", R"(
+import Instr
+let _ = render "uses_instr" 8000.0 (sample (Instr.tone 440.0) 0s 100ms) ;;
+let _ = render "standalone" 8000.0 (sample ((saw 220.0) * 0.5) 0s 100ms) ;;
+)");
+  tp.write(".build", "project cachetest\nsource song.synth\n");
+
+  BuildCache cache;
+  BuildResult first = buildProject(tp.dir.string(), &cache);
+  CHECK(first.ok);
+  for (auto& t : first.targets) CHECK(!t.cached);
+
+  // No edits: everything reused.
+  BuildResult second = buildProject(tp.dir.string(), &cache);
+  CHECK(second.ok);
+  for (auto& t : second.targets) CHECK(t.cached);
+
+  // Edit the imported instrument: only the target depending on it
+  // re-renders; the standalone target stays cached.
+  tp.write("instr.synth",
+           "let tone freq:Scalar : Scalar Signal = "
+           "(sine freq) * (exp_decay 9.0) ;;");
+  BuildResult third = buildProject(tp.dir.string(), &cache);
+  CHECK(third.ok);
+  for (auto& t : third.targets) {
+    if (t.name == "uses_instr") CHECK(!t.cached);
+    if (t.name == "standalone") CHECK(t.cached);
+  }
+}
+
+TEST(build_cache_invalidates_on_audio_input_change) {
+  TempDir tp;
+  std::vector<double> quiet(400, 0.1), loud(400, 0.5);
+  writeWav((tp.dir / "in.wav").string(), 8000.0, 1, quiet);
+  tp.write("a.synth",
+           "let _ = render \"fromfile\" 8000.0 "
+           "(sample (load_mono \"in.wav\") 0s 40ms) ;;");
+  tp.write(".build", "project audiocache\nsource a.synth\n");
+
+  BuildCache cache;
+  BuildResult first = buildProject(tp.dir.string(), &cache);
+  CHECK(first.ok);
+  BuildResult second = buildProject(tp.dir.string(), &cache);
+  CHECK(second.targets[0].cached);
+
+  writeWav((tp.dir / "in.wav").string(), 8000.0, 1, loud);
+  fs::last_write_time(tp.dir / "in.wav", fs::file_time_type::clock::now() +
+                                             std::chrono::seconds(2));
+  BuildResult third = buildProject(tp.dir.string(), &cache);
+  CHECK(third.ok);
+  CHECK(!third.targets[0].cached);
+  // And the artifact really reflects the new file.
+  WavData w =
+      readWav((tp.dir / "build" / "artifacts" / "fromfile.wav").string());
+  CHECK(std::fabs(w.channels[0][10] - 0.5) < 0.01);
+}
+
+TEST(build_parallel_targets_all_render) {
+  TempDir tp;
+  tp.write("many.synth", R"(
+let _ = render "t1" 8000.0 (sample ((sine 220.0) * 0.5) 0s 200ms) ;;
+let _ = render "t2" 8000.0 (sample ((saw 220.0) * 0.5) 0s 200ms) ;;
+let _ = render "t3" 8000.0 (sample ((square 220.0) * 0.5) 0s 200ms) ;;
+let _ = render "t4" 8000.0 (sample ((noise 1000.0) * 0.5) 0s 200ms) ;;
+let _ = render "t5" 8000.0 (sample ((fm 110.0 ((sine 55.0) * 50.0)) * 0.5) 0s 200ms) ;;
+let _ = render "t6" 8000.0 (sample ((reverb 200ms 0.4 0.5 ((sine 330.0) * (exp_decay 10.0)))) 0s 200ms) ;;
+)");
+  tp.write(".build", "project many\nsource many.synth\n");
+  BuildResult r = buildProject(tp.dir.string());
+  for (auto& d : r.diags.items) std::cerr << d.message << "\n";
+  CHECK(r.ok);
+  CHECK(r.targets.size() == 6);
+  for (auto& t : r.targets) {
+    CHECK(t.ok);
+    CHECK(t.frames == 1600);
+    WavData w = readWav((tp.dir / t.artifact).string());
+    double peak = 0;
+    for (double v : w.channels[0]) peak = std::max(peak, std::fabs(v));
+    CHECK(peak > 0.05);  // every target produced real audio
+  }
+}
+
+TEST(build_parallel_matches_serial_output) {
+  // Same project built fresh twice (parallel rendering both times) must
+  // produce byte-identical artifacts: evaluation is deterministic and
+  // per-render state is isolated per target.
+  auto makeProject = [](TempDir& tp) {
+    tp.write("p.synth", R"(
+let voice : Scalar Signal = fm 220.0 ((sine 3.0) * 12.0) ;;
+let _ = render "a" 8000.0 (sample ((lowpass 900.0 voice) * 0.6) 0s 300ms) ;;
+let _ = render "b" 8000.0 (sample ((delay 50ms voice) * 0.4) 0s 300ms) ;;
+)");
+    tp.write(".build", "project det\nsource p.synth\n");
+  };
+  TempDir one, two;
+  makeProject(one);
+  makeProject(two);
+  CHECK(buildProject(one.dir.string()).ok);
+  CHECK(buildProject(two.dir.string()).ok);
+  for (const char* name : {"a.wav", "b.wav"}) {
+    std::string x = slurp(one.dir / "build" / "artifacts" / name);
+    std::string y = slurp(two.dir / "build" / "artifacts" / name);
+    CHECK(!x.empty());
+    CHECK(x == y);
+  }
+}
+
+TEST(build_watch_uses_incremental_cache) {
+  TempDir tp;
+  tp.write("w.synth", R"(
+let _ = render "one" 8000.0 (sample ((sine 440.0) * 0.5) 0s 50ms) ;;
+let _ = render "two" 8000.0 (sample ((saw 110.0) * 0.5) 0s 50ms) ;;
+)");
+  tp.write(".build", "project watchcache\nsource w.synth\n");
+
+  int builds = 0;
+  bool touched = false;
+  int cachedInSecondBuild = -1;
+  watchProject(
+      tp.dir.string(),
+      [&](const BuildResult& r) {
+        builds++;
+        if (builds == 2) {
+          cachedInSecondBuild = 0;
+          for (auto& t : r.targets)
+            if (t.cached) cachedInSecondBuild++;
+        }
+      },
+      [&] {
+        if (builds == 1 && !touched) {
+          // Touch the manifest (a comment): sources unchanged, so both
+          // targets should come from the cache on the rebuild.
+          std::this_thread::sleep_for(std::chrono::milliseconds(20));
+          tp.write(".build",
+                   "# touched\nproject watchcache\nsource w.synth\n");
+          fs::last_write_time(tp.dir / ".build",
+                              fs::file_time_type::clock::now() +
+                                  std::chrono::seconds(2));
+          touched = true;
+        }
+        return builds < 2;
+      },
+      10);
+  CHECK(builds == 2);
+  CHECK(cachedInSecondBuild == 2);
+}

@@ -1,5 +1,7 @@
 #pragma once
+#include <cstdint>
 #include <functional>
+#include <map>
 #include <string>
 #include <vector>
 
@@ -30,7 +32,22 @@ struct TargetInfo {
   int64_t frames = 0;
   double durationSeconds = 0;
   bool ok = false;
-  std::string error;  // per-target failure, if any
+  bool cached = false;  // reused from a previous build (Epic 8)
+  std::string error;    // per-target failure, if any
+};
+
+// Cross-build cache (Epic 8). Purely automatic: keys are content hashes of
+// each target's dependency closure (plus audio-input stamps and an engine
+// version salt); a target whose key is unchanged and whose artifact still
+// exists is not re-rendered. Bounded by construction - one entry per
+// current render target; entries for removed targets are pruned each
+// build. The daemon owns one of these across rebuilds.
+struct BuildCache {
+  struct Entry {
+    uint64_t key = 0;
+    TargetInfo info;
+  };
+  std::map<std::string, Entry> targets;  // by render name
 };
 
 struct BuildResult {
@@ -49,8 +66,11 @@ struct BuildResult {
 // sources, validate project rules, evaluate render targets, write artifacts
 // to <projectDir>/build/artifacts/<name>.wav and metadata to
 // <projectDir>/build/metadata.json. Metadata is written even for failed
-// builds (§6.3-style error surfacing).
-BuildResult buildProject(const std::string& projectDir);
+// builds (§6.3-style error surfacing). Independent targets render in
+// parallel across a thread pool (Epic 9). When `cache` is given it is
+// consulted and updated (Epic 8); pass nullptr for a full rebuild.
+BuildResult buildProject(const std::string& projectDir,
+                         BuildCache* cache = nullptr);
 
 // Front-end only (lint): parse + type-check the given files and their
 // imports; no evaluation, no artifacts.

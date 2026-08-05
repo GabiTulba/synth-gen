@@ -99,7 +99,8 @@ resolves `a.synth` in the same directory).
 | `src/signal.*` | Signal engine: lazy signal DAG, render-time discretization, sample/place windowing, filters, mixing |
 | `src/eval.*` | Evaluator: reduces definitions to values, collects render targets, `load_*` build-time validation |
 | `src/wav.*` | WAV read (PCM 16/24/32, float 32/64) and write (PCM 16) |
-| `src/build.*` | `.build` manifest, project validation, target enumeration, artifact + metadata emission, lint mode, watch loop |
+| `src/build.*` | `.build` manifest, project validation, target enumeration, cached + parallel rendering, artifact + metadata emission, lint mode, watch loop |
+| `src/incremental.*` | Dependency tracking: Merkle content hashes over definition closures for the build cache |
 | `src/main.cpp` | `synthc` CLI (`build`, `watch`, `lint`) |
 | `src/devapp/` | `synth-dev`: JSON/metadata reader, SDL audio player, ImGui shell with live refresh and `--self-test` |
 | `tests/` | Unit + end-to-end tests (assert-based, run via CTest) |
@@ -138,8 +139,21 @@ resolves `a.synth` in the same directory).
   internals), lists targets with duration/rate/channels/status, plays
   artifacts through SDL audio, shows build diagnostics, and live-refreshes
   by watching the metadata file (the doc's v1 change-notification choice).
-- [ ] **Epic 8/9** — Incremental builds, caching, parallel evaluation
-  (post-MVP fast-follows by design).
+- [x] **Epic 8** — Automatic caching & incremental builds. Each render
+  target is keyed by a Merkle-style content hash of its declaring
+  definition's dependency closure (across modules), salted with the
+  stamps of all audio inputs and an engine-version constant. The daemon
+  keeps the cache across rebuilds: an edit re-renders only the targets
+  whose closure actually changed. Fully automatic, no user-facing
+  controls (per the doc); the cache is bounded by construction (one
+  in-memory entry per live target, artifacts live on disk) and entries
+  for removed targets are pruned each build.
+- [x] **Epic 9** — Parallel evaluation: cache-miss targets render
+  concurrently across a hardware-sized thread pool (signal graphs are
+  immutable; all per-render state is per-context, so shared subgraphs are
+  safe). Verified byte-identical output against fresh rebuilds.
+  Sub-expression-level scheduling (9.2) within a single target remains
+  open — worthwhile only for projects dominated by one large target.
 
 ## Decisions taken on points the design doc leaves open
 

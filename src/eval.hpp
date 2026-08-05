@@ -43,6 +43,10 @@ struct RenderTarget {
   SampleV sample;
   std::string file;  // source file that declared it (for diagnostics)
   Span span{};
+  // The top-level definition whose evaluation declared this target -
+  // the root of its dependency closure for incremental rebuilds (Epic 8).
+  const CheckedModule* declModule = nullptr;
+  const TopDef* declDef = nullptr;
 };
 
 // Evaluates every module of a checked program in dependency order and

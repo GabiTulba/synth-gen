@@ -1,0 +1,18 @@
+(* Harsh bass drum: same 250 ms ADSR skeleton and attack-noise layer as
+   the soft bass drum (bassdrum.synth), but the tone is FM-modulated by a
+   square wave that acts as the pitch switch: the square's half-period
+   spans half the note, so the oscillator runs high (125 Hz) through the
+   attack/decay side and drops low (55 Hz) for the sustain/release side.
+   hard_clip flat-tops the sum for grit instead of soft_clip's rounding. *)
+
+let env : Scalar Signal = adsr 25ms 60ms 0.5 50ms 200ms ;;
+let pitch_switch : Scalar Signal = (square 4.0) * 35.0 ;;
+let tone : Scalar Signal = (fm 90.0 pitch_switch) * env ;;
+let attack_noise : Scalar Signal =
+  (lowpass 900.0 (noise 700.0)) * (exp_decay 45.0) * 0.18 ;;
+let bass_drum_harsh : Scalar Signal =
+  hard_clip 0.55 (tone * 0.9 + attack_noise) ;;
+
+let _ = render "bass-drum-harsh" 48000.0 (sample bass_drum_harsh 0s 300ms) ;;
+let _ = render_vis "bass-drum-harsh-wave" 48000.0
+  (sample bass_drum_harsh 0s 300ms) ;;

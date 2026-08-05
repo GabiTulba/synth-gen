@@ -1,8 +1,11 @@
 (* Bitonal sawtooth: two saw tones 4 Hz apart (220 + 224 Hz), which beat
    against each other at 4 Hz, with a 2 Hz sine amplitude modulation
-   riding on top. *)
+   riding on top. The AM modulator is itself FM-modulated by a 1 Hz
+   signal (+/-1 Hz deviation), so the tremolo rate breathes between
+   1 Hz and 3 Hz once per second. *)
 
 let bitone : Scalar Signal = ((saw 220.0) + (saw 224.0)) * 0.5 ;;
-let modded : Scalar Signal = am bitone (sine 2.0) 0.5 ;;
+let wobbly_trem : Scalar Signal = fm 2.0 ((sine 1.0) * 1.0) ;;
+let modded : Scalar Signal = am bitone wobbly_trem 0.5 ;;
 
-let _ = render "bitonal-saw" 48000.0 (sample (modded * 0.5) 0s 3s) ;;
+let _ = render "bitonal-saw" 48000.0 (sample (modded * 0.5) 0s 10s) ;;

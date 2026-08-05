@@ -576,3 +576,31 @@ let _ = render_vis "same" 8000.0 (sample (sine 440.0) 0s 100ms) ;;
   CHECK(!r.ok);
   CHECK(r.diags.hasErrors());
 }
+
+TEST(build_distortion_end_to_end) {
+  TempDir tp;
+  tp.write("dist.synth", R"(
+let hot : Scalar Signal = (sine 220.0) * 3.0 ;;
+let _ = render "hard" 8000.0 (sample (hard_clip 0.5 hot) 0s 250ms) ;;
+let _ = render "soft" 8000.0 (sample (soft_clip 0.5 hot) 0s 250ms) ;;
+)");
+  tp.write(".build", "project dist\nsource dist.synth\n");
+  BuildResult r = buildProject(tp.dir.string());
+  for (auto& d : r.diags.items) std::cerr << d.message << "\n";
+  CHECK(r.ok);
+  WavData hard = readWav((tp.dir / "build" / "artifacts" / "hard.wav").string());
+  WavData soft = readWav((tp.dir / "build" / "artifacts" / "soft.wav").string());
+  double hardPeak = 0, softPeak = 0;
+  int flatHard = 0;
+  for (int64_t i = 0; i < hard.frames(); i++) {
+    double h = std::fabs(hard.channels[0][(size_t)i]);
+    hardPeak = std::max(hardPeak, h);
+    if (h > 0.499) flatHard++;
+    softPeak = std::max(softPeak, std::fabs(soft.channels[0][(size_t)i]));
+  }
+  CHECK_NEAR(hardPeak, 0.5, 0.01);
+  CHECK(softPeak <= 0.5 + 0.01);
+  // A heavily hard-clipped sine spends a large share of its period flat
+  // against the rails; tanh soft clip does not sit flat.
+  CHECK(flatHard > hard.frames() / 4);
+}

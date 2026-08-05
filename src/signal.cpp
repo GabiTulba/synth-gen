@@ -1,5 +1,6 @@
 #include "signal.hpp"
 
+#include <algorithm>
 #include <cmath>
 
 namespace synth {
@@ -369,6 +370,36 @@ struct FilterNode final : SigNode {
   }
 };
 
+// --- Distortion ------------------------------------------------------------
+
+struct ClipNode final : SigNode {
+  ClipKind kind;
+  double threshold;
+  SigPtr input;
+  ClipNode(ClipKind k, double t, SigPtr in)
+      : kind(k), threshold(t), input(std::move(in)) {
+    if (threshold <= 0)
+      throw EngineError(
+          (kind == ClipKind::Hard ? std::string("hard_clip")
+                                  : std::string("soft_clip")) +
+          ": threshold must be positive");
+  }
+  int channels() const override { return input->channels(); }
+  Frame compute(RenderCtx& ctx, NodeState&, int64_t n) const override {
+    Frame in = input->get(ctx, n);
+    Frame out;
+    out.ch = in.ch;
+    int count = in.ch == -1 ? 1 : in.ch;
+    for (int i = 0; i < count; i++) {
+      double x = chanAt(in, i);
+      out.v[i] = kind == ClipKind::Hard
+                     ? std::clamp(x, -threshold, threshold)
+                     : threshold * std::tanh(x / threshold);
+    }
+    return out;
+  }
+};
+
 // --- Combination -----------------------------------------------------------
 
 struct BinOpNode final : SigNode {
@@ -543,6 +574,9 @@ SigPtr makeAdsr(double a, double d, double s, double r, double hold) {
 SigPtr makeConst(double v) { return std::make_shared<ConstNode>(v); }
 SigPtr makeFilter(FilterKind kind, double cutoff, SigPtr input) {
   return std::make_shared<FilterNode>(kind, cutoff, std::move(input));
+}
+SigPtr makeClip(ClipKind kind, double threshold, SigPtr input) {
+  return std::make_shared<ClipNode>(kind, threshold, std::move(input));
 }
 SigPtr makeBinOp(SigBinOp op, SigPtr l, SigPtr r) {
   return std::make_shared<BinOpNode>(op, std::move(l), std::move(r));

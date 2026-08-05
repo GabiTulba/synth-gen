@@ -175,6 +175,12 @@ class Interp {
       case PrimId::Highpass:
         return Value{makeFilter(FilterKind::Highpass, scalarArg(args[0]),
                                 signalArg(args[1]))};
+      case PrimId::HardClip:
+        return Value{makeClip(ClipKind::Hard, scalarArg(args[0]),
+                              signalArg(args[1]))};
+      case PrimId::SoftClip:
+        return Value{makeClip(ClipKind::Soft, scalarArg(args[0]),
+                              signalArg(args[1]))};
       case PrimId::MixAll: {
         std::vector<SigPtr> items;
         for (auto& x : std::get<ListV>(args[0].v).items)

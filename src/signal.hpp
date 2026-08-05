@@ -95,6 +95,10 @@ SigPtr makeAdsr(double attack, double decay, double sustain, double release,
                 double hold);
 SigPtr makeConst(double value);  // broadcast scalar
 SigPtr makeFilter(FilterKind kind, double cutoff, SigPtr input);
+enum class ClipKind { Hard, Soft };
+// Distortion: hard clamps flat at +/-threshold; soft saturates smoothly as
+// threshold*tanh(x/threshold). threshold must be positive.
+SigPtr makeClip(ClipKind kind, double threshold, SigPtr input);
 SigPtr makeBinOp(SigBinOp op, SigPtr l, SigPtr r);
 SigPtr makeMix(std::vector<SigPtr> items);
 SigPtr makeChannels(std::vector<SigPtr> monoItems);

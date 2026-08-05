@@ -21,6 +21,8 @@ enum class PrimId {
   Adsr,
   Lowpass,
   Highpass,
+  HardClip,
+  SoftClip,
   MixAll,
   Channels,
   Sample,

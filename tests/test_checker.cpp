@@ -346,3 +346,28 @@ TEST(checker_render_vis_primitive) {
   checkProject({g}, diags2);
   CHECK(diags2.hasErrors());
 }
+
+TEST(checker_clip_primitives) {
+  TempProject tp;
+  std::string f = tp.write("ok.synth", R"(
+let crunchy : Scalar Signal = hard_clip 0.6 ((sine 220.0) * 2.0) ;;
+let warm : Scalar Signal = soft_clip 0.8 ((saw 110.0) * 3.0) ;;
+let wide : Vector Signal =
+  soft_clip 0.5 (channels [sine 440.0; sine 442.0]) ;;
+)");
+  DiagnosticBag diags;
+  Program prog = checkProject({f}, diags);
+  for (auto& d : diags.items)
+    std::cerr << renderDiagnostic(d, prog.modules.empty()
+                                         ? std::string{}
+                                         : prog.modules[0].parsed.source);
+  CHECK(!diags.hasErrors());
+  CHECK(typeEquals(prog.modules[0].defTypes.at("wide"), tSignal(tVector())));
+
+  // threshold is a Scalar, not a Timestamp.
+  std::string g = tp.write(
+      "bad.synth", "let x : Scalar Signal = hard_clip 1s (sine 440.0) ;;");
+  DiagnosticBag diags2;
+  checkProject({g}, diags2);
+  CHECK(diags2.hasErrors());
+}

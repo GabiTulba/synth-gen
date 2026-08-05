@@ -165,6 +165,10 @@ val adsr      : attack:Timestamp -> decay:Timestamp -> sustain:Scalar
 val lowpass   : cutoff:Scalar -> input:'a Signal -> 'a Signal
 val highpass  : cutoff:Scalar -> input:'a Signal -> 'a Signal
 
+(* distortion *)
+val hard_clip : threshold:Scalar -> input:'a Signal -> 'a Signal  (* clamp at +/-threshold *)
+val soft_clip : threshold:Scalar -> input:'a Signal -> 'a Signal  (* threshold*tanh(x/threshold) *)
+
 (* modulation *)
 val fm        : carrier:Scalar -> modulator:Scalar Signal -> Scalar Signal
 val pm        : carrier:Scalar -> modulator:Scalar Signal -> Scalar Signal

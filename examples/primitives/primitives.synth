@@ -44,3 +44,10 @@ let _ = render "channels" 48000.0
 let _ = render "mix_all" 48000.0
   (sample ((mix_all [sine 261.63; sine 329.63; sine 392.0]) * 0.25)
    0s 1500ms) ;;
+
+(* Distortion, on an overdriven sine so the shaping is audible *)
+let hot : Scalar Signal = (sine 220.0) * 3.0 ;;
+let _ = render "hard_clip" 48000.0 (sample (hard_clip 0.5 hot) 0s 1s) ;;
+let _ = render "soft_clip" 48000.0 (sample (soft_clip 0.5 hot) 0s 1s) ;;
+let _ = render_vis "hard_clip-wave" 48000.0 (sample (hard_clip 0.5 hot) 0s 20ms) ;;
+let _ = render_vis "soft_clip-wave" 48000.0 (sample (soft_clip 0.5 hot) 0s 20ms) ;;

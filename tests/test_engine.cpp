@@ -413,3 +413,70 @@ TEST(engine_noise_rejects_nonpositive_frequency) {
   try { makeNoise(-100.0); } catch (const EngineError&) { threw++; }
   CHECK(threw == 2);
 }
+
+TEST(engine_hard_clip_clamps_flat) {
+  // A unit sine hard-clipped at 0.5: peaks sit exactly at 0.5, values
+  // inside the threshold pass through untouched.
+  SigPtr clipped = makeClip(ClipKind::Hard, 0.5, makeOsc(OscKind::Sine, 100.0));
+  Rendered r = renderWindow(clipped, 0.0, 0.1, 48000.0);
+  Rendered dry = renderWindow(makeOsc(OscKind::Sine, 100.0), 0.0, 0.1, 48000.0);
+  double peak = 0;
+  for (size_t i = 0; i < r.interleaved.size(); i++) {
+    peak = std::max(peak, std::fabs(r.interleaved[i]));
+    if (std::fabs(dry.interleaved[i]) <= 0.5)
+      CHECK_NEAR(r.interleaved[i], dry.interleaved[i], 1e-12);
+    else
+      CHECK_NEAR(std::fabs(r.interleaved[i]), 0.5, 1e-12);
+  }
+  CHECK_NEAR(peak, 0.5, 1e-12);
+}
+
+TEST(engine_hard_clip_below_threshold_is_identity) {
+  SigPtr src = makeBinOp(SigBinOp::Mul, makeOsc(OscKind::Sine, 440.0),
+                         makeConst(0.4));
+  Rendered a = renderWindow(makeClip(ClipKind::Hard, 0.8, src), 0.0, 0.05,
+                            48000.0);
+  Rendered b = renderWindow(src, 0.0, 0.05, 48000.0);
+  for (size_t i = 0; i < a.interleaved.size(); i++)
+    CHECK_NEAR(a.interleaved[i], b.interleaved[i], 1e-12);
+}
+
+TEST(engine_soft_clip_saturates_smoothly) {
+  // Bounded strictly below the threshold, near-identity for small
+  // signals, and approaching the cap for large drive.
+  SigPtr quiet = makeBinOp(SigBinOp::Mul, makeOsc(OscKind::Sine, 440.0),
+                           makeConst(0.05));
+  Rendered smallIn = renderWindow(quiet, 0.0, 0.05, 48000.0);
+  Rendered smallOut =
+      renderWindow(makeClip(ClipKind::Soft, 1.0, quiet), 0.0, 0.05, 48000.0);
+  for (size_t i = 0; i < smallIn.interleaved.size(); i++)
+    CHECK_NEAR(smallOut.interleaved[i], smallIn.interleaved[i], 1e-4);
+
+  SigPtr driven = makeBinOp(SigBinOp::Mul, makeOsc(OscKind::Sine, 440.0),
+                            makeConst(10.0));
+  Rendered hot = renderWindow(makeClip(ClipKind::Soft, 0.5, driven), 0.0,
+                              0.05, 48000.0);
+  double peak = 0;
+  for (double v : hot.interleaved) {
+    CHECK(std::fabs(v) < 0.5 + 1e-12);  // never exceeds the cap
+    peak = std::max(peak, std::fabs(v));
+  }
+  CHECK(peak > 0.49);  // but drives right up against it
+}
+
+TEST(engine_clip_preserves_channels) {
+  SigPtr stereo = makeChannels({makeConst(0.9), makeConst(-0.9)});
+  SigPtr c = makeClip(ClipKind::Hard, 0.5, stereo);
+  CHECK(c->channels() == 2);
+  Rendered r = renderWindow(c, 0.0, 0.01, 8000.0);
+  CHECK_NEAR(r.interleaved[0], 0.5, 1e-12);
+  CHECK_NEAR(r.interleaved[1], -0.5, 1e-12);
+}
+
+TEST(engine_clip_rejects_nonpositive_threshold) {
+  int threw = 0;
+  SigPtr src = makeOsc(OscKind::Sine, 440.0);
+  try { makeClip(ClipKind::Hard, 0.0, src); } catch (const EngineError&) { threw++; }
+  try { makeClip(ClipKind::Soft, -0.5, src); } catch (const EngineError&) { threw++; }
+  CHECK(threw == 2);
+}

@@ -57,6 +57,13 @@ const std::vector<PrimSig>& primitives() {
         {tScalar(), tSignal(a)}, tSignal(a));
     add(PrimId::Highpass, "highpass", {"cutoff", "input"},
         {tScalar(), tSignal(a)}, tSignal(a));
+    // Distortion. hard_clip clamps flat at +/-threshold; soft_clip is
+    // smooth saturation threshold*tanh(x/threshold) - near-identity for
+    // small signals, approaching the cap asymptotically.
+    add(PrimId::HardClip, "hard_clip", {"threshold", "input"},
+        {tScalar(), tSignal(a)}, tSignal(a));
+    add(PrimId::SoftClip, "soft_clip", {"threshold", "input"},
+        {tScalar(), tSignal(a)}, tSignal(a));
     // Combination
     add(PrimId::MixAll, "mix_all", {"signals"}, {tList(tSignal(a))},
         tSignal(a));

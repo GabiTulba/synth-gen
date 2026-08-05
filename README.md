@@ -127,8 +127,8 @@ resolves `a.synth` in the same directory).
   `channels`/`mix_all`/`map`/`fold`, `load_mono`/`load_multi` with
   build-time channel validation. Beyond the v1 roster: `fm`/`pm`/`am`
   modulation primitives, the feedforward `delay` the doc left under
-  consideration, a Schroeder `reverb`, and a deterministic FM-based
-  `noise` generator.
+  consideration, a Schroeder `reverb`, a deterministic FM-based
+  `noise` generator, and `hard_clip`/`soft_clip` distortion.
 - [x] **Epic 5** — One-shot build system: manifest, project validation,
   target enumeration, metadata emission, `synthc build` + `synthc lint`.
 - [x] **Epic 6** — Build daemon: `synthc watch` rebuilds on changes to
@@ -211,6 +211,15 @@ follows (all easy to revisit):
   inside the primitive's per-render state — the *language-level* signal
   graph stays acyclic, exactly like the stateful one-pole filters.
   Parameters are validated at graph construction.
+- **`hard_clip threshold:Scalar input:'a Signal : 'a Signal`** and
+  **`soft_clip threshold:Scalar input:'a Signal : 'a Signal`** —
+  distortion by amplitude capping. `hard_clip` clamps flat at
+  ±threshold (harsh, buzzy — flat-tops the wave). `soft_clip` is smooth
+  saturation `threshold·tanh(x/threshold)`: near-identity for signals
+  well under the threshold, compressing progressively toward the cap
+  (warm, tube-like), never quite reaching it. Both are pointwise,
+  polymorphic in the element type, and reject non-positive thresholds at
+  graph construction. Drive is the ordinary idiom: `soft_clip 0.5 (x * 3.0)`.
 - **`render_vis name:String rate:Scalar sample:'a Sample : unit`** — a
   second effect alongside `render`: declares a build target whose artifact
   is a waveform *image* (`build/artifacts/<name>.svg`) of the discretized

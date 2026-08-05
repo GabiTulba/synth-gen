@@ -20,7 +20,11 @@ cmake --build build
 ctest --test-dir build          # run the test suite
 ```
 
-Requires a C++20 compiler and CMake ≥ 3.20. No third-party dependencies.
+Requires a C++20 compiler and CMake ≥ 3.20. The compiler, build system
+and daemon have no third-party dependencies. The dev app (`synth-dev`)
+additionally needs SDL2 (`scripts/install-deps.sh`); Dear ImGui is
+vendored. Without SDL2 the dev app is skipped and everything else still
+builds.
 
 ## Usage
 
@@ -36,6 +40,10 @@ build/synthc watch examples/pluck
 
 # Front-end checks only (for editor integration):
 build/synthc lint path/to/file.synth
+
+# Dev app: browse and play a project's rendered artifacts; live-updates
+# whenever a build rewrites the metadata (pair it with `synthc watch`):
+build/synth-dev examples/pluck
 ```
 
 ### The `.build` manifest (v1)
@@ -93,6 +101,7 @@ resolves `a.synth` in the same directory).
 | `src/wav.*` | WAV read (PCM 16/24/32, float 32/64) and write (PCM 16) |
 | `src/build.*` | `.build` manifest, project validation, target enumeration, artifact + metadata emission, lint mode, watch loop |
 | `src/main.cpp` | `synthc` CLI (`build`, `watch`, `lint`) |
+| `src/devapp/` | `synth-dev`: JSON/metadata reader, SDL audio player, ImGui shell with live refresh and `--self-test` |
 | `tests/` | Unit + end-to-end tests (assert-based, run via CTest) |
 | `examples/pluck/` | The design doc's §3.4 example as a buildable project |
 | `examples/primitives/` | One short, audible render target per library primitive |
@@ -124,7 +133,11 @@ resolves `a.synth` in the same directory).
   sources, the manifest, and imported audio files (polling-based,
   whole-project rebuild — the acceptable v1 per §12). Partial-failure
   error surfacing goes through the same metadata file as one-shot builds.
-- [ ] **Epic 7** — Dev app (SDL2 + Dear ImGui artifact browser/player).
+- [x] **Epic 7** — Dev app: `synth-dev`, an SDL2 + Dear ImGui artifact
+  browser/player. Reads build metadata (pure consumer — no compiler
+  internals), lists targets with duration/rate/channels/status, plays
+  artifacts through SDL audio, shows build diagnostics, and live-refreshes
+  by watching the metadata file (the doc's v1 change-notification choice).
 - [ ] **Epic 8/9** — Incremental builds, caching, parallel evaluation
   (post-MVP fast-follows by design).
 

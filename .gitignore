@@ -6,3 +6,4 @@ compile_commands.json
 !tests/data/*.wav
 # Committed showcase renders (refresh with scripts/render-outputs.sh)
 !outputs/**/*.wav
+imgui.ini

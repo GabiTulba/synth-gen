@@ -1,0 +1,21 @@
+(* Piano note (C4): slightly inharmonic additive partials (real piano
+   strings are stiff, so overtones run a little sharp) under a
+   fast-attack ADSR, doubled by a softly detuned copy, in a small room. *)
+
+let partial freq:Scalar amp:Scalar decay:Scalar : Scalar Signal =
+  (sine freq) * (exp_decay decay) * amp
+;;
+
+let strike root:Scalar : Scalar Signal =
+  mix_all [partial root 1.0 1.1;
+           partial (root * 2.001) 0.50 1.6;
+           partial (root * 3.004) 0.26 2.2;
+           partial (root * 4.009) 0.14 2.9;
+           partial (root * 5.016) 0.07 3.7]
+;;
+
+let env : Scalar Signal = adsr 4ms 900ms 0.12 600ms 1200ms ;;
+let note : Scalar Signal = (strike 261.63 + (strike 261.9) * 0.35) * env ;;
+let piano : Scalar Signal = reverb 500ms 0.5 0.2 (note * 0.5) ;;
+
+let _ = render "piano-note" 48000.0 (sample piano 0s 2500ms) ;;

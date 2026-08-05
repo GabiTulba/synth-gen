@@ -1,0 +1,46 @@
+(* primitives.synth — one short, audible render target per library
+   primitive. Rendered artifacts are copied into outputs/primitives/ by
+   scripts/render-outputs.sh. Levels are kept below 1.0 to avoid
+   clipping in the 16-bit artifacts. *)
+
+(* Generators *)
+let _ = render "sine" 48000.0 (sample ((sine 440.0) * 0.8) 0s 1s) ;;
+let _ = render "saw" 48000.0 (sample ((saw 220.0) * 0.5) 0s 1s) ;;
+let _ = render "square" 48000.0 (sample ((square 220.0) * 0.4) 0s 1s) ;;
+let _ = render "noise" 48000.0 (sample ((noise 2000.0) * 0.5) 0s 1s) ;;
+
+(* Envelopes *)
+let _ = render "exp_decay" 48000.0
+  (sample ((sine 440.0) * (exp_decay 3.0) * 0.8) 0s 1500ms) ;;
+let _ = render "adsr" 48000.0
+  (sample ((sine 440.0) * (adsr 60ms 120ms 0.6 350ms 650ms) * 0.8) 0s 1s) ;;
+
+(* Filters, on a bright source so the difference is audible *)
+let _ = render "lowpass" 48000.0
+  (sample ((lowpass 600.0 (saw 220.0)) * 0.7) 0s 1s) ;;
+let _ = render "highpass" 48000.0
+  (sample ((highpass 2500.0 (saw 220.0)) * 0.7) 0s 1s) ;;
+
+(* Modulation *)
+let _ = render "fm" 48000.0
+  (sample ((fm 220.0 ((sine 110.0) * 180.0)) * 0.6) 0s 1s) ;;
+let _ = render "pm" 48000.0
+  (sample ((pm 220.0 ((sine 110.0) * 2.5)) * 0.6) 0s 1s) ;;
+let _ = render "am" 48000.0
+  (sample ((am (sine 440.0) (sine 4.0) 0.6) * 0.5) 0s 1500ms) ;;
+
+(* Time effects, fed by a short blip so the tail is obvious *)
+let blip : Scalar Signal =
+  place (sample ((sine 660.0) * (exp_decay 12.0)) 0s 250ms) 0s ;;
+let _ = render "delay" 48000.0
+  (sample ((mix_all [blip; (delay 300ms blip) * 0.5;
+                     (delay 600ms blip) * 0.25]) * 0.7) 0s 1500ms) ;;
+let _ = render "reverb" 48000.0
+  (sample ((reverb 900ms 0.4 0.5 blip) * 0.7) 0s 2s) ;;
+
+(* Combination *)
+let _ = render "channels" 48000.0
+  (sample ((channels [sine 440.0; sine 443.0]) * 0.5) 0s 1500ms) ;;
+let _ = render "mix_all" 48000.0
+  (sample ((mix_all [sine 261.63; sine 329.63; sine 392.0]) * 0.25)
+   0s 1500ms) ;;

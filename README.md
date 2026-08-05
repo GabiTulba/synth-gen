@@ -95,6 +95,9 @@ resolves `a.synth` in the same directory).
 | `src/main.cpp` | `synthc` CLI (`build`, `watch`, `lint`) |
 | `tests/` | Unit + end-to-end tests (assert-based, run via CTest) |
 | `examples/pluck/` | The design doc's §3.4 example as a buildable project |
+| `examples/primitives/` | One short, audible render target per library primitive |
+| `examples/basic/` | Basic instrument samples: snare, kick, guitar pluck, piano note |
+| `outputs/` | Committed renders of the showcase projects (`outputs/primitives/`, `outputs/basic/`) — listen without building anything; refresh with `scripts/render-outputs.sh` |
 
 ## Implementation status (design doc §12)
 

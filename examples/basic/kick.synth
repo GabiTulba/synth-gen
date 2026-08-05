@@ -1,0 +1,10 @@
+(* Kick drum: an FM sine whose pitch falls fast from ~170 Hz down to
+   50 Hz (the modulator is a decaying envelope, in Hz), plus a soft
+   noise click at the very start. *)
+
+let pitch_drop : Scalar Signal = (exp_decay 25.0) * 120.0 ;;
+let thump : Scalar Signal = fm 50.0 pitch_drop ;;
+let click : Scalar Signal = (noise 4000.0) * (exp_decay 90.0) * 0.3 ;;
+let kick : Scalar Signal = (thump * (exp_decay 7.0) + click) * 0.7 ;;
+
+let _ = render "kick" 48000.0 (sample kick 0s 500ms) ;;

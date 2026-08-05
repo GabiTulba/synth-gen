@@ -1,0 +1,3 @@
+# Primitive showcase: one artifact per audible library primitive.
+project primitives
+source primitives.synth

@@ -1,0 +1,6 @@
+# Basic instrument samples: one artifact per instrument.
+project basic-samples
+source snare.synth
+source kick.synth
+source guitar.synth
+source piano.synth

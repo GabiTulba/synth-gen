@@ -1,0 +1,22 @@
+(* pluck.synth — the complete example from the design doc (§3.4).
+   Builds one artifact named "demo": two seconds of audio containing
+   four decaying 440 Hz plucks. *)
+
+let pluck freq:Scalar : Scalar Signal =
+  (sine freq) * (exp_decay 6.0)
+;;
+
+let pluck_sample freq:Scalar : Scalar Sample =
+  sample (pluck freq) 0s 800ms
+;;
+
+let place_pluck at:Timestamp : Scalar Signal =
+  place (pluck_sample 440.0) at
+;;
+
+let song : Scalar Signal =
+  mix_all (map place_pluck [0s; 500ms; 1s; 1500ms])
+;;
+
+let _ = render "demo" 48000.0 (sample song 0s 2s)
+;;

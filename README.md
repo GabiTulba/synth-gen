@@ -1,0 +1,142 @@
+# SynthGraph
+
+A functional, text-first language and build system for creating audio
+samples and full songs through composable, pure mathematical
+transformations on sound.
+
+The full design is in [`docs/synthgraph-design-v2.pdf`](docs/synthgraph-design-v2.pdf).
+In short: a sound — from a short sample up to a fully arranged song — is an
+ordinary source file (`.synth`), a composition of pure functions that
+generate, transform, slice, and arrange signals. A project is compiled by a
+build system; the resulting audio artifacts are browsed and played in a
+companion dev app. No editor is shipped — the product surface is a
+compiler, a linter, and a build daemon.
+
+## Building
+
+```sh
+cmake -B build -G Ninja
+cmake --build build
+ctest --test-dir build          # run the test suite
+```
+
+Requires a C++20 compiler and CMake ≥ 3.20. No third-party dependencies.
+
+## Usage
+
+```sh
+# One-shot build of a project directory (contains a .build manifest):
+build/synthc build examples/pluck
+# -> examples/pluck/build/artifacts/demo.wav
+# -> examples/pluck/build/metadata.json
+
+# Front-end checks only (for editor integration):
+build/synthc lint path/to/file.synth
+```
+
+### The `.build` manifest (v1)
+
+```
+# comment
+project pluck-demo
+source pluck.synth
+source other.synth
+```
+
+### Build outputs
+
+Artifacts are written to `<project>/build/artifacts/<name>.wav` (16-bit
+PCM). Build metadata — the machine-readable index the dev app consumes — is
+written to `<project>/build/metadata.json` and is emitted for failed builds
+too, with diagnostics included.
+
+## Language at a glance
+
+```ocaml
+(* pluck.synth *)
+let pluck freq:Scalar : Scalar Signal =
+  (sine freq) * (exp_decay 6.0)
+;;
+
+let pluck_sample freq:Scalar : Scalar Sample =
+  sample (pluck freq) 0s 800ms
+;;
+
+let place_pluck at:Timestamp : Scalar Signal =
+  place (pluck_sample 440.0) at
+;;
+
+let song : Scalar Signal =
+  mix_all (map place_pluck [0s; 500ms; 1s; 1500ms])
+;;
+
+let _ = render "demo" 48000.0 (sample song 0s 2s)
+;;
+```
+
+Fully annotated, no inference, no Booleans/branching/recursion in v1.
+`render` is the language's only effect. Files are modules (`import A`
+resolves `a.synth` in the same directory).
+
+## Repository layout
+
+| Path | Contents |
+|------|----------|
+| `src/lexer.*`, `src/parser.*`, `src/ast.hpp` | Language front-end: tokens (incl. timestamp unit-suffix literals), OCaml-like parser, AST with source spans |
+| `src/types.*`, `src/primitives.*`, `src/checker.*` | Type system, primitive signatures, fully-annotated checker with polymorphic primitive instantiation, module resolution |
+| `src/signal.*` | Signal engine: lazy signal DAG, render-time discretization, sample/place windowing, filters, mixing |
+| `src/eval.*` | Evaluator: reduces definitions to values, collects render targets, `load_*` build-time validation |
+| `src/wav.*` | WAV read (PCM 16/24/32, float 32/64) and write (PCM 16) |
+| `src/build.*` | `.build` manifest, project validation, target enumeration, artifact + metadata emission, lint mode |
+| `src/main.cpp` | `synthc` CLI (`build`, `lint`) |
+| `tests/` | Unit + end-to-end tests (assert-based, run via CTest) |
+| `examples/pluck/` | The design doc's §3.4 example as a buildable project |
+
+## Implementation status (design doc §12)
+
+- [x] **Epic 0** — Repo structure, build system, C++ toolchain. (0.2, the
+  standalone grammar/type-rules spec document, still pending.)
+- [x] **Epic 1** — Lexer, parser, AST, source spans, module resolution,
+  parse diagnostics.
+- [x] **Epic 2** — Type checker: primitive/parameterized types, annotated
+  checking, primitive instantiation, higher-order arguments, operator
+  typing with broadcasting, typed diagnostics.
+- [x] **Epic 3** — Evaluator & signal engine: signal representation,
+  pure-expression evaluation, `sample`/`place` semantics, render-time
+  discretization, `.wav` writing.
+- [x] **Epic 4** — Primitive library: `sine`/`saw`/`square`, ADSR +
+  exponential decay, `lowpass`/`highpass`, operators + broadcasting,
+  `channels`/`mix_all`/`map`/`fold`, `load_mono`/`load_multi` with
+  build-time channel validation.
+- [x] **Epic 5** — One-shot build system: manifest, project validation,
+  target enumeration, metadata emission, `synthc build` + `synthc lint`.
+- [ ] **Epic 6** — Build daemon (watch mode).
+- [ ] **Epic 7** — Dev app (SDL2 + Dear ImGui artifact browser/player).
+- [ ] **Epic 8/9** — Incremental builds, caching, parallel evaluation
+  (post-MVP fast-follows by design).
+
+## Decisions taken on points the design doc leaves open
+
+These are the "low-confidence" items from the doc, resolved for v1 as
+follows (all easy to revisit):
+
+- **`adsr` signature**: `adsr attack:Timestamp decay:Timestamp
+  sustain:Scalar release:Timestamp hold:Timestamp : Scalar Signal`.
+  Durations are Timestamps, the sustain level is a Scalar, and `hold` is
+  the gate length: the envelope sustains until `hold`, then releases.
+- **Higher-order arguments are named functions only** — no lambdas in v1,
+  as the doc leans. Any user function whose signature matches may be
+  passed (e.g. to `map`/`fold`).
+- **Vector channel-count mismatches** are a build error, raised at graph
+  construction time (before any audio is computed). Channel counts are
+  static once audio files are read, so this never happens mid-render.
+  v1 caps signals at 16 channels.
+- **Audio file paths** in `load_mono`/`load_multi` resolve relative to the
+  source file that mentions them.
+- **`let _ = ...`** bindings must have type `unit` (they exist to declare
+  render targets).
+- **Module-level definitions must precede use** (consistent with "no
+  recursion" — this also rules out mutually recursive definitions).
+- **Filters** are one-pole 6 dB/oct designs evaluated statefully from the
+  epoch; a placed sample's filters warm up from the source signal's own
+  timeline, preserving "signals are defined from t = 0" semantics.

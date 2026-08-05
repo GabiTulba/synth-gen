@@ -1,0 +1,354 @@
+#include "signal.hpp"
+
+#include <cmath>
+
+namespace synth {
+
+namespace {
+constexpr double kPi = 3.14159265358979323846;
+
+Frame scalarFrame(double v) {
+  Frame f;
+  f.ch = -1;
+  f.v[0] = v;
+  return f;
+}
+
+int mergeChannels(int a, int b, const char* what) {
+  if (a == -1) return b;
+  if (b == -1) return a;
+  if (a != b)
+    throw EngineError(std::string(what) + ": channel count mismatch (" +
+                      std::to_string(a) + " vs " + std::to_string(b) + ")");
+  return a;
+}
+
+double applyOp(SigBinOp op, double a, double b) {
+  switch (op) {
+    case SigBinOp::Add: return a + b;
+    case SigBinOp::Sub: return a - b;
+    case SigBinOp::Mul: return a * b;
+    case SigBinOp::Div: return a / b;
+  }
+  return 0;
+}
+
+// Broadcast-aware element access: a frame with ch == -1 supplies its single
+// value for every channel.
+double chanAt(const Frame& f, int i) { return f.ch == -1 ? f.v[0] : f.v[i]; }
+
+}  // namespace
+
+NodeState& RenderCtx::stateFor(const SigNode& node) {
+  auto it = states.find(&node);
+  if (it == states.end())
+    it = states.emplace(&node, node.makeState()).first;
+  return *it->second;
+}
+
+Frame SigNode::get(RenderCtx& ctx, int64_t n) const {
+  NodeState& st = ctx.stateFor(*this);
+  if (n == st.lastN) return st.last;
+  if (stateful()) {
+    if (n < st.lastN)
+      throw EngineError("internal error: stateful node queried backwards");
+    for (int64_t m = st.lastN + 1; m <= n; m++) st.last = compute(ctx, st, m);
+  } else {
+    st.last = compute(ctx, st, n);
+  }
+  st.lastN = n;
+  return st.last;
+}
+
+// --- Generators ------------------------------------------------------------
+
+struct OscNode final : SigNode {
+  OscKind kind;
+  double freq;
+  OscNode(OscKind k, double f) : kind(k), freq(f) {}
+  int channels() const override { return 1; }
+  Frame compute(RenderCtx& ctx, NodeState&, int64_t n) const override {
+    double t = (double)n / ctx.rate;
+    double phase = freq * t;
+    double frac = phase - std::floor(phase);
+    Frame f;
+    f.ch = 1;
+    switch (kind) {
+      case OscKind::Sine: f.v[0] = std::sin(2.0 * kPi * phase); break;
+      case OscKind::Saw: f.v[0] = 2.0 * frac - 1.0; break;
+      case OscKind::Square: f.v[0] = frac < 0.5 ? 1.0 : -1.0; break;
+    }
+    return f;
+  }
+};
+
+struct ExpDecayNode final : SigNode {
+  double rate;
+  explicit ExpDecayNode(double r) : rate(r) {}
+  int channels() const override { return 1; }
+  Frame compute(RenderCtx& ctx, NodeState&, int64_t n) const override {
+    double t = (double)n / ctx.rate;
+    Frame f;
+    f.ch = 1;
+    f.v[0] = std::exp(-rate * t);
+    return f;
+  }
+};
+
+// Envelope shape: linear attack to 1 over [0, a); linear decay to `sustain`
+// over [a, a+d); sustain until `hold`; linear release to 0 over
+// [hold, hold+r); 0 afterwards.
+struct AdsrNode final : SigNode {
+  double a, d, s, r, hold;
+  AdsrNode(double a_, double d_, double s_, double r_, double h)
+      : a(a_), d(d_), s(s_), r(r_), hold(h) {}
+  int channels() const override { return 1; }
+  Frame compute(RenderCtx& ctx, NodeState&, int64_t n) const override {
+    double t = (double)n / ctx.rate;
+    double v;
+    double releaseStart = std::max(hold, a + d);
+    if (t < 0) v = 0;
+    else if (t < a) v = a > 0 ? t / a : 1.0;
+    else if (t < a + d) v = d > 0 ? 1.0 - (1.0 - s) * ((t - a) / d) : s;
+    else if (t < releaseStart) v = s;
+    else if (t < releaseStart + r)
+      v = r > 0 ? s * (1.0 - (t - releaseStart) / r) : 0.0;
+    else v = 0;
+    Frame f;
+    f.ch = 1;
+    f.v[0] = v;
+    return f;
+  }
+};
+
+struct ConstNode final : SigNode {
+  double value;
+  explicit ConstNode(double v) : value(v) {}
+  int channels() const override { return -1; }
+  Frame compute(RenderCtx&, NodeState&, int64_t) const override {
+    return scalarFrame(value);
+  }
+};
+
+// --- Filters ---------------------------------------------------------------
+
+struct FilterState final : NodeState {
+  std::array<double, kMaxChannels> lp{};   // low-pass accumulator
+  std::array<double, kMaxChannels> lastIn{};
+  bool primed = false;
+};
+
+// One-pole filters, stepped sequentially from the epoch.
+struct FilterNode final : SigNode {
+  FilterKind kind;
+  double cutoff;
+  SigPtr input;
+  FilterNode(FilterKind k, double c, SigPtr in)
+      : kind(k), cutoff(c), input(std::move(in)) {}
+  int channels() const override { return input->channels(); }
+  bool stateful() const override { return true; }
+  std::unique_ptr<NodeState> makeState() const override {
+    return std::make_unique<FilterState>();
+  }
+  Frame compute(RenderCtx& ctx, NodeState& st0, int64_t n) const override {
+    auto& st = static_cast<FilterState&>(st0);
+    Frame in = input->get(ctx, n);
+    int ch = in.ch == -1 ? 1 : in.ch;
+    double alpha = 1.0 - std::exp(-2.0 * kPi * cutoff / ctx.rate);
+    if (alpha > 1.0) alpha = 1.0;
+    Frame out;
+    out.ch = ch;
+    for (int i = 0; i < ch; i++) {
+      double x = chanAt(in, i);
+      if (!st.primed) st.lp[i] = kind == FilterKind::Lowpass ? x : 0.0;
+      st.lp[i] += alpha * (x - st.lp[i]);
+      out.v[i] = kind == FilterKind::Lowpass ? st.lp[i] : x - st.lp[i];
+    }
+    st.primed = true;
+    return out;
+  }
+};
+
+// --- Combination -----------------------------------------------------------
+
+struct BinOpNode final : SigNode {
+  SigBinOp op;
+  SigPtr l, r;
+  int ch;
+  BinOpNode(SigBinOp o, SigPtr l_, SigPtr r_)
+      : op(o), l(std::move(l_)), r(std::move(r_)),
+        ch(mergeChannels(l->channels(), r->channels(), "signal arithmetic")) {}
+  int channels() const override { return ch; }
+  Frame compute(RenderCtx& ctx, NodeState&, int64_t n) const override {
+    Frame a = l->get(ctx, n);
+    Frame b = r->get(ctx, n);
+    Frame out;
+    out.ch = ch;
+    int count = ch == -1 ? 1 : ch;
+    for (int i = 0; i < count; i++)
+      out.v[i] = applyOp(op, chanAt(a, i), chanAt(b, i));
+    return out;
+  }
+};
+
+struct MixNode final : SigNode {
+  std::vector<SigPtr> items;
+  int ch;
+  explicit MixNode(std::vector<SigPtr> xs) : items(std::move(xs)), ch(-1) {
+    for (auto& x : items) ch = mergeChannels(ch, x->channels(), "mix_all");
+  }
+  int channels() const override { return ch; }
+  Frame compute(RenderCtx& ctx, NodeState&, int64_t n) const override {
+    Frame out;
+    out.ch = ch;
+    int count = ch == -1 ? 1 : ch;
+    for (int i = 0; i < count; i++) out.v[i] = 0;
+    for (auto& x : items) {
+      Frame f = x->get(ctx, n);
+      for (int i = 0; i < count; i++) out.v[i] += chanAt(f, i);
+    }
+    return out;
+  }
+};
+
+struct ChannelsNode final : SigNode {
+  std::vector<SigPtr> items;
+  explicit ChannelsNode(std::vector<SigPtr> xs) : items(std::move(xs)) {
+    if (items.empty()) throw EngineError("channels: empty channel list");
+    if ((int)items.size() > kMaxChannels)
+      throw EngineError("channels: more than " +
+                        std::to_string(kMaxChannels) +
+                        " channels are not supported in v1");
+    for (auto& x : items) {
+      int c = x->channels();
+      if (c != 1 && c != -1)
+        throw EngineError("channels: every input must be mono");
+    }
+  }
+  int channels() const override { return (int)items.size(); }
+  Frame compute(RenderCtx& ctx, NodeState&, int64_t n) const override {
+    Frame out;
+    out.ch = (int)items.size();
+    for (size_t i = 0; i < items.size(); i++)
+      out.v[i] = chanAt(items[i]->get(ctx, n), 0);
+    return out;
+  }
+};
+
+// --- Placement -------------------------------------------------------------
+
+struct PlaceNode final : SigNode {
+  SigPtr source;
+  double from, to, at;
+  PlaceNode(SigPtr src, double f, double t, double a)
+      : source(std::move(src)), from(f), to(t), at(a) {
+    if (f < 0 || t < f)
+      throw EngineError("sample: invalid window [" + std::to_string(f) +
+                        "s, " + std::to_string(t) + "s)");
+    if (a < 0)
+      throw EngineError("place: negative timestamp");
+  }
+  int channels() const override { return source->channels(); }
+  Frame compute(RenderCtx& ctx, NodeState&, int64_t n) const override {
+    int64_t nAt = llround(at * ctx.rate);
+    int64_t nFrom = llround(from * ctx.rate);
+    int64_t len = llround((to - from) * ctx.rate);
+    if (n < nAt || n >= nAt + len) {
+      Frame silence;
+      silence.ch = channels();
+      int count = silence.ch == -1 ? 1 : silence.ch;
+      for (int i = 0; i < count; i++) silence.v[i] = 0;
+      return silence;
+    }
+    return source->get(ctx, n - nAt + nFrom);
+  }
+};
+
+// --- File signals ----------------------------------------------------------
+
+struct FileNode final : SigNode {
+  std::vector<std::vector<double>> data;  // per channel
+  double fileRate;
+  FileNode(std::vector<std::vector<double>> d, double r)
+      : data(std::move(d)), fileRate(r) {
+    if (data.empty()) throw EngineError("audio file has no channels");
+    if ((int)data.size() > kMaxChannels)
+      throw EngineError("audio files with more than " +
+                        std::to_string(kMaxChannels) +
+                        " channels are not supported in v1");
+  }
+  int channels() const override { return (int)data.size(); }
+  Frame compute(RenderCtx& ctx, NodeState&, int64_t n) const override {
+    double t = (double)n / ctx.rate;
+    double pos = t * fileRate;
+    size_t i0 = (size_t)pos;
+    double frac = pos - (double)i0;
+    Frame out;
+    out.ch = (int)data.size();
+    for (size_t c = 0; c < data.size(); c++) {
+      const auto& buf = data[c];
+      double v = 0;
+      if (i0 < buf.size()) {
+        double s0 = buf[i0];
+        double s1 = i0 + 1 < buf.size() ? buf[i0 + 1] : 0.0;
+        v = s0 + (s1 - s0) * frac;
+      }
+      out.v[c] = v;
+    }
+    return out;
+  }
+};
+
+// --- Factories -------------------------------------------------------------
+
+SigPtr makeOsc(OscKind kind, double freq) {
+  return std::make_shared<OscNode>(kind, freq);
+}
+SigPtr makeExpDecay(double rate) { return std::make_shared<ExpDecayNode>(rate); }
+SigPtr makeAdsr(double a, double d, double s, double r, double hold) {
+  return std::make_shared<AdsrNode>(a, d, s, r, hold);
+}
+SigPtr makeConst(double v) { return std::make_shared<ConstNode>(v); }
+SigPtr makeFilter(FilterKind kind, double cutoff, SigPtr input) {
+  return std::make_shared<FilterNode>(kind, cutoff, std::move(input));
+}
+SigPtr makeBinOp(SigBinOp op, SigPtr l, SigPtr r) {
+  return std::make_shared<BinOpNode>(op, std::move(l), std::move(r));
+}
+SigPtr makeMix(std::vector<SigPtr> items) {
+  return std::make_shared<MixNode>(std::move(items));
+}
+SigPtr makeChannels(std::vector<SigPtr> monoItems) {
+  return std::make_shared<ChannelsNode>(std::move(monoItems));
+}
+SigPtr makePlace(SigPtr source, double from, double to, double at) {
+  return std::make_shared<PlaceNode>(std::move(source), from, to, at);
+}
+SigPtr makeFileSignal(std::vector<std::vector<double>> channelData,
+                      double fileRate) {
+  return std::make_shared<FileNode>(std::move(channelData), fileRate);
+}
+
+// --- Rendering -------------------------------------------------------------
+
+Rendered renderWindow(const SigPtr& node, double from, double to,
+                      double rate) {
+  if (rate <= 0) throw EngineError("render: sample rate must be positive");
+  if (from < 0 || to < from)
+    throw EngineError("render: invalid sample window");
+  Rendered out;
+  out.channels = node->channels() == -1 ? 1 : node->channels();
+  int64_t nFrom = llround(from * rate);
+  int64_t nTo = llround(to * rate);
+  out.frames = nTo - nFrom;
+  out.interleaved.resize((size_t)(out.frames * out.channels));
+  RenderCtx ctx(rate);
+  for (int64_t n = nFrom; n < nTo; n++) {
+    Frame f = node->get(ctx, n);
+    for (int c = 0; c < out.channels; c++)
+      out.interleaved[(size_t)((n - nFrom) * out.channels + c)] = chanAt(f, c);
+  }
+  return out;
+}
+
+}  // namespace synth

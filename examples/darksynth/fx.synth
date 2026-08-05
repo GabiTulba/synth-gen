@@ -18,3 +18,35 @@ let impact : Scalar Sample =
     |> reverb ~decay:900ms ~damping:0.5 ~mix:0.35
     |> sample ~from:0s ~to:2500ms
 ;;
+
+(* Blinking alarm pluck for the intro: a bright square blip. The song
+   places it on a strong/weak 500 ms blink grid with a touch of delay. *)
+let alarm_hit : Scalar Sample =
+  let tone : Scalar Signal = square 880.0 * 0.6 + sine 1760.0 * 0.25 in
+  (tone |> highpass ~cutoff:500.0 |> soft_clip ~threshold:0.6)
+    * (adsr ~attack:2ms ~decay:90ms ~sustain:0.25 ~release:60ms ~hold:120ms)
+    |> sample ~from:0s ~to:180ms
+;;
+
+(* A dark stereo Doppler whoosh (the examples/advanced technique): a
+   rapid 2 s pass, four FM partials swept +/-8% by a cosine half-period,
+   sin^2 proximity swell, and pan gains walking left to right. *)
+let dop_shape : Scalar Signal =
+  pm ~carrier:0.25 ~modulator:(exp_decay 0.0 * 1.5707963) ;;
+
+let dop_partial ~base:Scalar ~i:Scalar : Scalar Signal =
+  let n : Scalar = i + 1.0 in
+  (fm ~carrier:(base * n) ~modulator:(dop_shape * (base * n * 0.08)))
+    * (1.0 / n)
+;;
+
+let doppler_whoosh : Vector Sample =
+  let tone : Scalar Signal =
+    mix_all (list_init ~n:4.0 ~f:(dop_partial ~base:165.0)) * 0.45 in
+  let prox : Scalar Signal =
+    (exp_decay 0.0 - dop_shape * dop_shape) * 0.85 + 0.15 in
+  let src : Scalar Signal = tone * prox in
+  channels [src * ((dop_shape + 1.0) * 0.5);
+            src * ((1.0 - dop_shape) * 0.5)]
+    |> sample ~from:0s ~to:2s
+;;

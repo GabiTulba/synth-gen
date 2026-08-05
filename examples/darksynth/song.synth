@@ -1,13 +1,17 @@
 (* Darksynth: ~91 s at 120 BPM (beat 500ms, bar 2s), A minor with the
    harmonic-minor E. Two drops.
 
-   0-16s   INTRO      pad + held bass, riser from 12s
+   0-16s   INTRO      blinking alarm pluck over pad + held bass, riser
    16-32s  BUILD      four-floor kick, hats, bass eighths, snare roll,
                       riser from 28s; everything cuts at 31.5s (the gap)
-   32-48s  DROP 1     full kit, driving bass, distorted guitar chugs+stabs
-   48-64s  BREAKDOWN  pad + held bass; kick re-enters 56s, riser from 60s
-   64-88s  DROP 2     extended: six chord segments of the full wall
-   88-91s  OUTRO      impact + final held bass under the pad tail *)
+   32-48s  DROP 1     hard-clipped grind bass (sixteenths for the first
+                      segment right after the hit), full kit, guitar
+   48-64s  BREAKDOWN  pad + held bass; Doppler whoosh crosses at 54s,
+                      kick re-enters 56s, riser from 60s
+   64-88s  DROP 2     extended: six grind segments (sixteenth burst
+                      after the hit again)
+   88-91s  OUTRO      impact + final held bass; a last Doppler whoosh
+                      crosses the field as the pad dies *)
 
 import Drums
 import Bass
@@ -40,9 +44,29 @@ let drum_line : Scalar Signal =
   kick_line + snare_line * 0.85 + hat_line * 0.4
 ;;
 
+(* ---------- alarm: blinking pluck through the intro ---------- *)
+let alarm_line : Scalar Signal =
+  let strong : Scalar Signal =
+    place_multi Fx.alarm_hit (time_steps ~start:0s ~step:1s ~count:14.0) in
+  let weak : Scalar Signal =
+    place_multi Fx.alarm_hit (time_steps ~start:500ms ~step:1s ~count:14.0) in
+  let dry : Scalar Signal = strong + weak * 0.45 in
+  dry + (dry |> delay ~by:250ms) * 0.3
+;;
+
 (* ---------- bass (roots: A1, F1, D2, E1) ---------- *)
 let eighths ~freq:Scalar ~start:Timestamp ~count:Scalar : Scalar Signal =
   place_multi (Bass.pulse freq) (time_steps ~start:start ~step:250ms ~count:count)
+;;
+
+(* Drop bass: the hard-clipped grind voice. The first chord segment
+   right after each drop hit runs sixteenths - the most aggressive bar
+   of the song - before settling into grinding eighths. *)
+let grind_eighths ~freq:Scalar ~start:Timestamp ~count:Scalar : Scalar Signal =
+  place_multi (Bass.grind freq) (time_steps ~start:start ~step:250ms ~count:count)
+;;
+let grind_sixteenths ~freq:Scalar ~start:Timestamp : Scalar Signal =
+  place_multi (Bass.grind freq) (time_steps ~start:start ~step:125ms ~count:32.0)
 ;;
 
 let bass_line : Scalar Signal =
@@ -57,22 +81,22 @@ let bass_line : Scalar Signal =
              eighths ~freq:73.42 ~start:24s ~count:16.0;
              eighths ~freq:41.2 ~start:28s ~count:14.0] in
   let drop1 : Scalar Signal =
-    mix_all [eighths ~freq:55.0 ~start:32s ~count:16.0;
-             eighths ~freq:43.65 ~start:36s ~count:16.0;
-             eighths ~freq:73.42 ~start:40s ~count:16.0;
-             eighths ~freq:41.2 ~start:44s ~count:16.0] in
+    mix_all [grind_sixteenths ~freq:55.0 ~start:32s;
+             grind_eighths ~freq:43.65 ~start:36s ~count:16.0;
+             grind_eighths ~freq:73.42 ~start:40s ~count:16.0;
+             grind_eighths ~freq:41.2 ~start:44s ~count:16.0] in
   let breakdown : Scalar Signal =
     mix_all [place_multi (Bass.held 55.0) [48s; 50s];
              place_multi (Bass.held 43.65) [52s; 54s];
              place_multi (Bass.held 73.42) [56s; 58s];
              place_multi (Bass.held 41.2) [60s; 62s]] in
   let drop2 : Scalar Signal =
-    mix_all [eighths ~freq:55.0 ~start:64s ~count:16.0;
-             eighths ~freq:43.65 ~start:68s ~count:16.0;
-             eighths ~freq:73.42 ~start:72s ~count:16.0;
-             eighths ~freq:41.2 ~start:76s ~count:16.0;
-             eighths ~freq:55.0 ~start:80s ~count:16.0;
-             eighths ~freq:43.65 ~start:84s ~count:16.0] in
+    mix_all [grind_sixteenths ~freq:55.0 ~start:64s;
+             grind_eighths ~freq:43.65 ~start:68s ~count:16.0;
+             grind_eighths ~freq:73.42 ~start:72s ~count:16.0;
+             grind_eighths ~freq:41.2 ~start:76s ~count:16.0;
+             grind_eighths ~freq:55.0 ~start:80s ~count:16.0;
+             grind_eighths ~freq:43.65 ~start:84s ~count:16.0] in
   let outro : Scalar Signal = Bass.held 55.0 |> place ~at:88s in
   intro * 0.8 + build + drop1 + breakdown * 0.8 + drop2 + outro
 ;;
@@ -137,8 +161,13 @@ let pad_bus : Vector Signal =
 let guitar_bus : Vector Signal =
   channels [chug_part * 0.62 + stab_part * 0.38;
             chug_part * 0.44 + stab_part * 0.55] ;;
+(* Alarm sits slightly left; the stereo Doppler whooshes cross the field
+   mid-breakdown and over the very end. *)
 let fx_bus : Vector Signal =
-  channels [fx_line * 0.5; fx_line * 0.5] ;;
+  channels [fx_line * 0.5 + alarm_line * 0.4;
+            fx_line * 0.5 + alarm_line * 0.28]
+  + (Fx.doppler_whoosh |> place ~at:54s) * 0.8
+  + (Fx.doppler_whoosh |> place ~at:88500ms) * 0.9 ;;
 
 let master : Vector Signal =
   pad_bus + drum_bus + bass_bus + guitar_bus + fx_bus

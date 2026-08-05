@@ -20,3 +20,16 @@ let held freq:Scalar : Scalar Sample =
             ~hold:1550ms)
     |> sample ~from:0s ~to:1900ms
 ;;
+
+(* Drop bass: the same voice driven much harder - a square doubling the
+   fundamental, a much brighter filter, and a hard clipper instead of
+   the soft one, so the clipping harmonics actually reach the ear. *)
+let grind freq:Scalar : Scalar Sample =
+  let tone : Scalar Signal =
+    saw freq + saw (freq * 1.009) + square freq * 0.5
+      |> lowpass ~cutoff:950.0
+      |> hard_clip ~threshold:0.5 in
+  tone
+    * (adsr ~attack:2ms ~decay:100ms ~sustain:0.55 ~release:50ms ~hold:180ms)
+    |> sample ~from:0s ~to:230ms
+;;

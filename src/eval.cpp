@@ -158,6 +158,9 @@ class Interp {
                             scalarArg(args[2]))};
       case PrimId::Delay:
         return Value{makeDelay(timeArg(args[0]), signalArg(args[1]))};
+      case PrimId::Reverb:
+        return Value{makeReverb(timeArg(args[0]), scalarArg(args[1]),
+                                scalarArg(args[2]), signalArg(args[3]))};
       case PrimId::ExpDecay:
         return Value{makeExpDecay(scalarArg(args[0]))};
       case PrimId::Adsr:

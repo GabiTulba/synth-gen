@@ -82,6 +82,10 @@ SigPtr makePm(double carrier, SigPtr modulator);
 SigPtr makeAm(SigPtr carrier, SigPtr modulator, double depth);
 // Feedforward delay: input shifted `by` seconds later; silence before.
 SigPtr makeDelay(double by, SigPtr input);
+// Schroeder reverb. decay: RT60-style tail length in seconds; damping and
+// mix in [0,1]. Per-channel filter banks; the feedback lives inside the
+// node's state, not in the (acyclic) signal graph.
+SigPtr makeReverb(double decay, double damping, double mix, SigPtr input);
 SigPtr makeExpDecay(double rate);
 SigPtr makeAdsr(double attack, double decay, double sustain, double release,
                 double hold);

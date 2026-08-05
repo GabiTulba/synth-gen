@@ -309,3 +309,30 @@ let _ = render "echo" 8000.0 (sample echoed 0s 600ms) ;;
   // Silence between hit and first echo (decay rate 30 kills it fast).
   CHECK(peakAround(0.15) < 0.05);
 }
+
+TEST(build_reverb_end_to_end) {
+  TempDir tp;
+  tp.write("verb.synth", R"(
+let hit : Scalar Signal =
+  place (sample ((sine 660.0) * (exp_decay 40.0)) 0s 100ms) 0s ;;
+let roomy : Scalar Signal = reverb 500ms 0.3 0.6 hit ;;
+let _ = render "roomy" 8000.0 (sample roomy 0s 1s) ;;
+)");
+  tp.write(".build", "project verb\nsource verb.synth\n");
+  BuildResult r = buildProject(tp.dir.string());
+  for (auto& d : r.diags.items) std::cerr << d.message << "\n";
+  CHECK(r.ok);
+  WavData w = readWav((tp.dir / "build" / "artifacts" / "roomy.wav").string());
+  auto peakAround = [&](double t0, double t1) {
+    double peak = 0;
+    for (int64_t i = (int64_t)(t0 * 8000.0);
+         i < (int64_t)(t1 * 8000.0) && i < w.frames(); i++)
+      peak = std::max(peak, std::fabs(w.channels[0][(size_t)i]));
+    return peak;
+  };
+  CHECK(peakAround(0.0, 0.1) > 0.3);    // the hit itself
+  // The dry hit is dead by 100ms (decay rate 40), but the reverb tail
+  // keeps ringing, then fades out.
+  CHECK(peakAround(0.2, 0.4) > 0.01);
+  CHECK(peakAround(0.2, 0.4) > peakAround(0.7, 1.0) * 3.0);
+}

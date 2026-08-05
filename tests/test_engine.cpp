@@ -293,3 +293,72 @@ TEST(engine_delay_negative_is_error) {
   }
   CHECK(threw);
 }
+
+namespace {
+// A one-frame unit impulse as a signal (via the file-signal node).
+SigPtr impulseSignal() {
+  std::vector<std::vector<double>> chans{{1.0}};
+  return makeFileSignal(std::move(chans), 8000.0);
+}
+double peakIn(const Rendered& r, double rate, double t0, double t1) {
+  double peak = 0;
+  for (int64_t i = (int64_t)(t0 * rate);
+       i < (int64_t)(t1 * rate) && i < (int64_t)r.interleaved.size(); i++)
+    peak = std::max(peak, std::fabs(r.interleaved[(size_t)i]));
+  return peak;
+}
+}  // namespace
+
+TEST(engine_reverb_produces_decaying_tail) {
+  // An impulse through a fully-wet reverb: energy appears after the input
+  // is gone and decays roughly per the RT60 rule.
+  double rate = 8000.0;
+  SigPtr rev = makeReverb(0.4, 0.2, 1.0, impulseSignal());
+  Rendered r = renderWindow(rev, 0.0, 2.0, rate);
+  double early = peakIn(r, rate, 0.05, 0.15);
+  double mid = peakIn(r, rate, 0.4, 0.5);
+  double late = peakIn(r, rate, 1.5, 2.0);
+  CHECK(early > 0.05);          // a tail exists after the 1-frame impulse
+  CHECK(mid < early * 0.5);     // and it decays
+  CHECK(late < early * 0.01);   // ~gone well past the decay time
+}
+
+TEST(engine_reverb_dry_mix_is_identity) {
+  SigPtr src = makeOsc(OscKind::Sine, 440.0);
+  Rendered a = renderWindow(makeReverb(0.5, 0.5, 0.0, src), 0.0, 0.05, 8000.0);
+  Rendered b = renderWindow(src, 0.0, 0.05, 8000.0);
+  for (size_t i = 0; i < a.interleaved.size(); i++)
+    CHECK_NEAR(a.interleaved[i], b.interleaved[i], 1e-12);
+}
+
+TEST(engine_reverb_longer_decay_longer_tail) {
+  double rate = 8000.0;
+  Rendered shortTail =
+      renderWindow(makeReverb(0.1, 0.2, 1.0, impulseSignal()), 0.0, 1.0, rate);
+  Rendered longTail =
+      renderWindow(makeReverb(1.0, 0.2, 1.0, impulseSignal()), 0.0, 1.0, rate);
+  double s = peakIn(shortTail, rate, 0.5, 0.8);
+  double l = peakIn(longTail, rate, 0.5, 0.8);
+  CHECK(l > s * 10.0);
+}
+
+TEST(engine_reverb_preserves_channels) {
+  SigPtr stereo = makeChannels({makeOsc(OscKind::Sine, 440.0),
+                                makeOsc(OscKind::Sine, 220.0)});
+  SigPtr rev = makeReverb(0.3, 0.5, 0.4, stereo);
+  CHECK(rev->channels() == 2);
+  Rendered r = renderWindow(rev, 0.0, 0.1, 8000.0);
+  CHECK(r.channels == 2);
+  double peak = 0;
+  for (double v : r.interleaved) peak = std::max(peak, std::fabs(v));
+  CHECK(peak > 0.1);
+}
+
+TEST(engine_reverb_validates_parameters) {
+  SigPtr src = makeOsc(OscKind::Sine, 440.0);
+  int threw = 0;
+  try { makeReverb(-0.1, 0.5, 0.5, src); } catch (const EngineError&) { threw++; }
+  try { makeReverb(0.5, 1.5, 0.5, src); } catch (const EngineError&) { threw++; }
+  try { makeReverb(0.5, 0.5, -0.1, src); } catch (const EngineError&) { threw++; }
+  CHECK(threw == 3);
+}

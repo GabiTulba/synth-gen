@@ -279,3 +279,29 @@ let wide : Vector Signal = delay 10ms (channels [sine 440.0; sine 442.0]) ;;
   checkProject({g}, diags2);
   CHECK(diags2.hasErrors());
 }
+
+TEST(checker_reverb_primitive) {
+  TempProject tp;
+  std::string f = tp.write("ok.synth", R"(
+let dry : Scalar Signal = (sine 440.0) * (exp_decay 6.0) ;;
+let wet : Scalar Signal = reverb 800ms 0.4 0.3 dry ;;
+let hall : Vector Signal =
+  reverb 2s 0.6 0.5 (channels [sine 440.0; sine 442.0]) ;;
+)");
+  DiagnosticBag diags;
+  Program prog = checkProject({f}, diags);
+  for (auto& d : diags.items)
+    std::cerr << renderDiagnostic(d, prog.modules.empty()
+                                         ? std::string{}
+                                         : prog.modules[0].parsed.source);
+  CHECK(!diags.hasErrors());
+  CHECK(typeEquals(prog.modules[0].defTypes.at("hall"), tSignal(tVector())));
+
+  // decay must be a Timestamp.
+  std::string g = tp.write(
+      "bad.synth",
+      "let x : Scalar Signal = reverb 0.8 0.4 0.3 (sine 440.0) ;;");
+  DiagnosticBag diags2;
+  checkProject({g}, diags2);
+  CHECK(diags2.hasErrors());
+}

@@ -112,8 +112,8 @@ resolves `a.synth` in the same directory).
   exponential decay, `lowpass`/`highpass`, operators + broadcasting,
   `channels`/`mix_all`/`map`/`fold`, `load_mono`/`load_multi` with
   build-time channel validation. Beyond the v1 roster: `fm`/`pm`/`am`
-  modulation primitives and the feedforward `delay` the doc left under
-  consideration.
+  modulation primitives, the feedforward `delay` the doc left under
+  consideration, and a Schroeder `reverb`.
 - [x] **Epic 5** — One-shot build system: manifest, project validation,
   target enumeration, metadata emission, `synthc build` + `synthc lint`.
 - [x] **Epic 6** — Build daemon: `synthc watch` rebuilds on changes to
@@ -170,3 +170,12 @@ follows (all easy to revisit):
   with a ring buffer so a subgraph shared between dry and delayed paths
   keeps its stateful nodes (filters, `fm`) consistent. Feedforward only —
   feedback/IIR delays remain future work per §13.
+- **`reverb decay:Timestamp damping:Scalar mix:Scalar input:'a Signal :
+  'a Signal`** — Schroeder reverb: four parallel feedback comb filters
+  (damped, mutually detuned delays) into two series allpass diffusers, per
+  channel. `decay` is the RT60-style tail length (comb feedback gains
+  follow `g = 10^(-3d/decay)`), `damping` ∈ [0,1] rolls off highs in the
+  tail, `mix` blends dry (0) to fully wet (1). The feedback loops live
+  inside the primitive's per-render state — the *language-level* signal
+  graph stays acyclic, exactly like the stateful one-pole filters.
+  Parameters are validated at graph construction.

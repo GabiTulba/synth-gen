@@ -198,6 +198,90 @@ struct DelayNode final : SigNode {
   }
 };
 
+// Schroeder reverb: four parallel feedback comb filters (mutually detuned
+// delays, damped feedback) followed by two series allpass diffusers, per
+// channel. Feedback gains follow the RT60 rule g = 10^(-3 d / decay) so
+// `decay` is the time for the tail to fall by ~60 dB.
+constexpr double kCombDelays[4] = {0.0297, 0.0371, 0.0411, 0.0437};
+constexpr double kAllpassDelays[2] = {0.0050, 0.0017};
+constexpr double kAllpassGain = 0.5;
+
+struct ReverbState final : NodeState {
+  struct ChannelBank {
+    std::vector<double> comb[4];
+    double combFilt[4] = {0, 0, 0, 0};  // damping lowpass state
+    std::vector<double> allpass[2];
+  };
+  std::vector<ChannelBank> banks;  // one per channel
+  int64_t combLen[4] = {0, 0, 0, 0};
+  int64_t allpassLen[2] = {0, 0};
+  bool ready = false;
+};
+
+struct ReverbNode final : SigNode {
+  double decay, damping, mix;
+  SigPtr input;
+  ReverbNode(double dec, double damp, double m, SigPtr in)
+      : decay(dec), damping(damp), mix(m), input(std::move(in)) {
+    if (decay < 0) throw EngineError("reverb: negative decay time");
+    if (damping < 0 || damping > 1)
+      throw EngineError("reverb: damping must be in [0, 1]");
+    if (mix < 0 || mix > 1)
+      throw EngineError("reverb: mix must be in [0, 1]");
+  }
+  int channels() const override { return input->channels(); }
+  bool stateful() const override { return true; }
+  std::unique_ptr<NodeState> makeState() const override {
+    return std::make_unique<ReverbState>();
+  }
+  Frame compute(RenderCtx& ctx, NodeState& st0, int64_t n) const override {
+    auto& st = static_cast<ReverbState&>(st0);
+    Frame in = input->get(ctx, n);
+    int count = in.ch == -1 ? 1 : in.ch;
+    if (!st.ready) {
+      for (int i = 0; i < 4; i++)
+        st.combLen[i] = std::max<int64_t>(1, llround(kCombDelays[i] * ctx.rate));
+      for (int i = 0; i < 2; i++)
+        st.allpassLen[i] =
+            std::max<int64_t>(1, llround(kAllpassDelays[i] * ctx.rate));
+      st.banks.resize(count);
+      for (auto& b : st.banks) {
+        for (int i = 0; i < 4; i++) b.comb[i].assign((size_t)st.combLen[i], 0.0);
+        for (int i = 0; i < 2; i++)
+          b.allpass[i].assign((size_t)st.allpassLen[i], 0.0);
+      }
+      st.ready = true;
+    }
+    Frame out;
+    out.ch = in.ch;
+    for (int c = 0; c < count; c++) {
+      auto& b = st.banks[(size_t)c];
+      double x = chanAt(in, c);
+      double wet = 0;
+      for (int i = 0; i < 4; i++) {
+        size_t pos = (size_t)(n % st.combLen[i]);
+        double read = b.comb[i][pos];
+        // Damped feedback: a one-pole lowpass inside the loop.
+        b.combFilt[i] = read * (1.0 - damping) + b.combFilt[i] * damping;
+        double g = decay > 0
+                       ? std::pow(10.0, -3.0 * kCombDelays[i] / decay)
+                       : 0.0;
+        b.comb[i][pos] = x + b.combFilt[i] * g;
+        wet += read;
+      }
+      wet *= 0.25;
+      for (int i = 0; i < 2; i++) {
+        size_t pos = (size_t)(n % st.allpassLen[i]);
+        double buffered = b.allpass[i][pos];
+        b.allpass[i][pos] = wet + buffered * kAllpassGain;
+        wet = buffered - wet;
+      }
+      out.v[c] = x * (1.0 - mix) + wet * mix;
+    }
+    return out;
+  }
+};
+
 struct ExpDecayNode final : SigNode {
   double rate;
   explicit ExpDecayNode(double r) : rate(r) {}
@@ -432,6 +516,9 @@ SigPtr makeAm(SigPtr carrier, SigPtr modulator, double depth) {
 }
 SigPtr makeDelay(double by, SigPtr input) {
   return std::make_shared<DelayNode>(by, std::move(input));
+}
+SigPtr makeReverb(double decay, double damping, double mix, SigPtr input) {
+  return std::make_shared<ReverbNode>(decay, damping, mix, std::move(input));
 }
 SigPtr makeExpDecay(double rate) { return std::make_shared<ExpDecayNode>(rate); }
 SigPtr makeAdsr(double a, double d, double s, double r, double hold) {

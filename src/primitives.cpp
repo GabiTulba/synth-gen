@@ -32,6 +32,12 @@ const std::vector<PrimSig>& primitives() {
     // silence before it. Echoes are delay + arithmetic + mix_all.
     add(PrimId::Delay, "delay", {"by", "signal"},
         {tTimestamp(), tSignal(a)}, tSignal(a));
+    // Reverb: Schroeder-style (parallel feedback combs + series allpasses,
+    // internal to the primitive - the *language* stays acyclic). decay is
+    // the RT60-style tail length, damping in [0,1] rolls off highs in the
+    // tail, mix in [0,1] blends dry (0) to fully wet (1).
+    add(PrimId::Reverb, "reverb", {"decay", "damping", "mix", "input"},
+        {tTimestamp(), tScalar(), tScalar(), tSignal(a)}, tSignal(a));
     // Envelopes
     add(PrimId::ExpDecay, "exp_decay", {"rate"}, {tScalar()},
         tSignal(tScalar()));

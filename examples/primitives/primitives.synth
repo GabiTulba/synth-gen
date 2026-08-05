@@ -98,3 +98,20 @@ let _ =
   hot |> soft_clip ~threshold:0.5
       |> sample ~from:0s ~to:20ms
       |> render_vis ~name:"soft_clip-wave" ~rate:48000.0 ;;
+
+(* List builders: list_init generating an additive harmonic stack, and
+   time_steps feeding place_multi with an even pattern. (repeat has no
+   audible demo of its own - n copies mix to a plain gain change.) *)
+let harmonic i:Scalar : Scalar Signal =
+  sine (110.0 * (i + 1.0)) * (1.0 / (i + 1.0)) ;;
+let _ =
+  mix_all (list_init 6.0 harmonic) * 0.3
+    |> sample ~from:0s ~to:1500ms
+    |> render ~name:"list_init" ~rate:48000.0 ;;
+
+let tick : Scalar Sample =
+  sine 880.0 * exp_decay 25.0 |> sample ~from:0s ~to:120ms ;;
+let _ =
+  place_multi tick (time_steps ~start:0s ~step:250ms ~count:6.0)
+    |> sample ~from:0s ~to:1600ms
+    |> render ~name:"time_steps" ~rate:48000.0 ;;

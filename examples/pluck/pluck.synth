@@ -11,7 +11,8 @@ let pluck_sample freq:Scalar : Scalar Sample =
 ;;
 
 let song : Scalar Signal =
-  place_multi (pluck_sample 440.0) [0s; 500ms; 1s; 1500ms]
+  place_multi (pluck_sample 440.0)
+              (time_steps ~start:0s ~step:500ms ~count:4.0)
 ;;
 
 let _ =

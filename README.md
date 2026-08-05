@@ -111,7 +111,8 @@ resolves `a.synth` in the same directory).
 - [x] **Epic 4** — Primitive library: `sine`/`saw`/`square`, ADSR +
   exponential decay, `lowpass`/`highpass`, operators + broadcasting,
   `channels`/`mix_all`/`map`/`fold`, `load_mono`/`load_multi` with
-  build-time channel validation.
+  build-time channel validation. Beyond the v1 roster: `fm`/`pm`/`am`
+  modulation primitives.
 - [x] **Epic 5** — One-shot build system: manifest, project validation,
   target enumeration, metadata emission, `synthc build` + `synthc lint`.
 - [x] **Epic 6** — Build daemon: `synthc watch` rebuilds on changes to
@@ -147,3 +148,17 @@ follows (all easy to revisit):
 - **Filters** are one-pole 6 dB/oct designs evaluated statefully from the
   epoch; a placed sample's filters warm up from the source signal's own
   timeline, preserving "signals are defined from t = 0" semantics.
+- **Modulation primitives** (an addition beyond the doc's v1 roster):
+  - `fm carrier:Scalar modulator:Scalar Signal : Scalar Signal` — sine
+    oscillator whose instantaneous frequency is `carrier + modulator(t)`
+    Hz. The phase is integrated sample-by-sample from the epoch, so
+    modulation depth is the modulator's amplitude (in Hz) and FM operators
+    cascade (`fm 440.0 ((fm 110.0 ...) * 200.0)`).
+  - `pm carrier:Scalar modulator:Scalar Signal : Scalar Signal` —
+    `sin(2π·carrier·t + modulator(t))`; the modulator is in radians.
+  - `am carrier:'a Signal modulator:Scalar Signal depth:Scalar :
+    'a Signal` — classic AM, `carrier · (1 + depth·modulator)`; a mono
+    modulator applies to every channel of a multi-channel carrier
+    (ring modulation stays plain `carrier * modulator`).
+  - Modulators must be mono signals; that is checked when the signal
+    graph is built.

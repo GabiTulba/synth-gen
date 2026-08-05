@@ -82,6 +82,81 @@ struct OscNode final : SigNode {
   }
 };
 
+// --- Modulation ------------------------------------------------------------
+
+struct FmState final : NodeState {
+  double phase = 0;  // cycles
+};
+
+// Phase-integrating sine VCO: the catch-up stepping of stateful nodes makes
+// the integral run from the epoch, so placement/window semantics match every
+// other signal. With a constant-zero modulator this is exactly `sine`.
+struct FmNode final : SigNode {
+  double carrier;
+  SigPtr modulator;
+  FmNode(double c, SigPtr m) : carrier(c), modulator(std::move(m)) {
+    int mc = modulator->channels();
+    if (mc != 1 && mc != -1)
+      throw EngineError("fm: the modulator must be a mono signal");
+  }
+  int channels() const override { return 1; }
+  bool stateful() const override { return true; }
+  std::unique_ptr<NodeState> makeState() const override {
+    return std::make_unique<FmState>();
+  }
+  Frame compute(RenderCtx& ctx, NodeState& st0, int64_t n) const override {
+    auto& st = static_cast<FmState&>(st0);
+    Frame f;
+    f.ch = 1;
+    f.v[0] = std::sin(2.0 * kPi * st.phase);
+    double freq = carrier + chanAt(modulator->get(ctx, n), 0);
+    st.phase += freq / ctx.rate;
+    st.phase -= std::floor(st.phase);  // keep precision over long renders
+    return f;
+  }
+};
+
+struct PmNode final : SigNode {
+  double carrier;
+  SigPtr modulator;
+  PmNode(double c, SigPtr m) : carrier(c), modulator(std::move(m)) {
+    int mc = modulator->channels();
+    if (mc != 1 && mc != -1)
+      throw EngineError("pm: the modulator must be a mono signal");
+  }
+  int channels() const override { return 1; }
+  Frame compute(RenderCtx& ctx, NodeState&, int64_t n) const override {
+    double t = (double)n / ctx.rate;
+    Frame f;
+    f.ch = 1;
+    f.v[0] = std::sin(2.0 * kPi * carrier * t +
+                      chanAt(modulator->get(ctx, n), 0));
+    return f;
+  }
+};
+
+struct AmNode final : SigNode {
+  SigPtr carrier;
+  SigPtr modulator;
+  double depth;
+  AmNode(SigPtr c, SigPtr m, double d)
+      : carrier(std::move(c)), modulator(std::move(m)), depth(d) {
+    int mc = modulator->channels();
+    if (mc != 1 && mc != -1)
+      throw EngineError("am: the modulator must be a mono signal");
+  }
+  int channels() const override { return carrier->channels(); }
+  Frame compute(RenderCtx& ctx, NodeState&, int64_t n) const override {
+    Frame c = carrier->get(ctx, n);
+    double gain = 1.0 + depth * chanAt(modulator->get(ctx, n), 0);
+    Frame out;
+    out.ch = c.ch;
+    int count = c.ch == -1 ? 1 : c.ch;
+    for (int i = 0; i < count; i++) out.v[i] = chanAt(c, i) * gain;
+    return out;
+  }
+};
+
 struct ExpDecayNode final : SigNode {
   double rate;
   explicit ExpDecayNode(double r) : rate(r) {}
@@ -303,6 +378,16 @@ struct FileNode final : SigNode {
 
 SigPtr makeOsc(OscKind kind, double freq) {
   return std::make_shared<OscNode>(kind, freq);
+}
+SigPtr makeFm(double carrier, SigPtr modulator) {
+  return std::make_shared<FmNode>(carrier, std::move(modulator));
+}
+SigPtr makePm(double carrier, SigPtr modulator) {
+  return std::make_shared<PmNode>(carrier, std::move(modulator));
+}
+SigPtr makeAm(SigPtr carrier, SigPtr modulator, double depth) {
+  return std::make_shared<AmNode>(std::move(carrier), std::move(modulator),
+                                  depth);
 }
 SigPtr makeExpDecay(double rate) { return std::make_shared<ExpDecayNode>(rate); }
 SigPtr makeAdsr(double a, double d, double s, double r, double hold) {

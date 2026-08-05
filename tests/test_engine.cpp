@@ -145,3 +145,89 @@ TEST(engine_file_signal_silence_after_end) {
   CHECK_NEAR(r.interleaved[3], 0.5, 1e-9);
   CHECK_NEAR(r.interleaved[5], 0.0, 1e-9);  // past the file's end
 }
+
+TEST(engine_fm_zero_modulator_matches_sine) {
+  SigPtr fm = makeFm(440.0, makeConst(0.0));
+  SigPtr sine = makeOsc(OscKind::Sine, 440.0);
+  Rendered a = renderWindow(fm, 0.0, 0.1, 48000.0);
+  Rendered b = renderWindow(sine, 0.0, 0.1, 48000.0);
+  for (size_t i = 0; i < a.interleaved.size(); i++)
+    CHECK_NEAR(a.interleaved[i], b.interleaved[i], 1e-6);
+}
+
+TEST(engine_fm_constant_offset_shifts_frequency) {
+  // carrier 100 Hz + constant 50 Hz modulator == a 150 Hz sine.
+  SigPtr fm = makeFm(100.0, makeConst(50.0));
+  SigPtr sine = makeOsc(OscKind::Sine, 150.0);
+  Rendered a = renderWindow(fm, 0.0, 0.2, 48000.0);
+  Rendered b = renderWindow(sine, 0.0, 0.2, 48000.0);
+  for (size_t i = 0; i < a.interleaved.size(); i++)
+    CHECK_NEAR(a.interleaved[i], b.interleaved[i], 1e-4);
+}
+
+TEST(engine_fm_vibrato_stays_bounded_and_periodic) {
+  // 440 Hz carrier with +/-20 Hz vibrato at 5 Hz: output stays in [-1, 1]
+  // and still oscillates near the carrier rate (zero crossings).
+  SigPtr mod = makeBinOp(SigBinOp::Mul, makeOsc(OscKind::Sine, 5.0),
+                         makeConst(20.0));
+  SigPtr fm = makeFm(440.0, mod);
+  Rendered r = renderWindow(fm, 0.0, 1.0, 48000.0);
+  int crossings = 0;
+  for (size_t i = 1; i < r.interleaved.size(); i++) {
+    CHECK(std::fabs(r.interleaved[i]) <= 1.0 + 1e-9);
+    if ((r.interleaved[i - 1] < 0) != (r.interleaved[i] < 0)) crossings++;
+  }
+  // ~2 crossings per cycle at ~440 Hz over 1 s.
+  CHECK(crossings > 850 && crossings < 910);
+}
+
+TEST(engine_pm_zero_modulator_matches_sine) {
+  SigPtr pm = makePm(440.0, makeConst(0.0));
+  SigPtr sine = makeOsc(OscKind::Sine, 440.0);
+  Rendered a = renderWindow(pm, 0.0, 0.1, 48000.0);
+  Rendered b = renderWindow(sine, 0.0, 0.1, 48000.0);
+  for (size_t i = 0; i < a.interleaved.size(); i++)
+    CHECK_NEAR(a.interleaved[i], b.interleaved[i], 1e-9);
+}
+
+TEST(engine_pm_constant_phase_offset) {
+  // Zero-frequency carrier with a constant pi/2 phase: sin(pi/2) == 1.
+  SigPtr pm = makePm(0.0, makeConst(3.14159265358979323846 / 2.0));
+  Rendered r = renderWindow(pm, 0.0, 0.01, 8000.0);
+  for (double v : r.interleaved) CHECK_NEAR(v, 1.0, 1e-9);
+}
+
+TEST(engine_am_depth_and_formula) {
+  // Constant carrier 1.0, constant modulator 0.5, depth 0.8:
+  // out = 1 * (1 + 0.8 * 0.5) = 1.4.
+  SigPtr am = makeAm(makeExpDecay(0.0), makeConst(0.5), 0.8);
+  Rendered r = renderWindow(am, 0.0, 0.01, 8000.0);
+  for (double v : r.interleaved) CHECK_NEAR(v, 1.4, 1e-9);
+}
+
+TEST(engine_am_mono_modulator_broadcasts_over_stereo) {
+  SigPtr stereo = makeChannels({makeConst(0.5), makeConst(-0.5)});
+  SigPtr am = makeAm(stereo, makeConst(1.0), 1.0);  // gain 2.0
+  CHECK(am->channels() == 2);
+  Rendered r = renderWindow(am, 0.0, 0.01, 8000.0);
+  CHECK(r.channels == 2);
+  CHECK_NEAR(r.interleaved[0], 1.0, 1e-9);
+  CHECK_NEAR(r.interleaved[1], -1.0, 1e-9);
+}
+
+TEST(engine_modulators_must_be_mono) {
+  SigPtr stereo = makeChannels({makeConst(0.1), makeConst(0.2)});
+  bool threwFm = false, threwAm = false;
+  try {
+    makeFm(440.0, stereo);
+  } catch (const EngineError&) {
+    threwFm = true;
+  }
+  try {
+    makeAm(makeConst(1.0), stereo, 1.0);
+  } catch (const EngineError&) {
+    threwAm = true;
+  }
+  CHECK(threwFm);
+  CHECK(threwAm);
+}

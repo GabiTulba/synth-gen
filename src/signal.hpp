@@ -72,6 +72,14 @@ enum class FilterKind { Lowpass, Highpass };
 enum class SigBinOp { Add, Sub, Mul, Div };
 
 SigPtr makeOsc(OscKind kind, double freq);
+// FM: sine with instantaneous frequency carrier + modulator(t) Hz,
+// integrated sample-by-sample from the epoch (stateful).
+SigPtr makeFm(double carrier, SigPtr modulator);
+// PM: sin(2*pi*carrier*t + modulator(t)); modulator in radians.
+SigPtr makePm(double carrier, SigPtr modulator);
+// AM: carrier * (1 + depth * modulator). The modulator must be mono (or a
+// broadcast constant); it applies to every carrier channel.
+SigPtr makeAm(SigPtr carrier, SigPtr modulator, double depth);
 SigPtr makeExpDecay(double rate);
 SigPtr makeAdsr(double attack, double decay, double sustain, double release,
                 double hold);

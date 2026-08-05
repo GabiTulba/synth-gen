@@ -149,6 +149,13 @@ class Interp {
         return Value{makeOsc(OscKind::Saw, scalarArg(args[0]))};
       case PrimId::Square:
         return Value{makeOsc(OscKind::Square, scalarArg(args[0]))};
+      case PrimId::Fm:
+        return Value{makeFm(scalarArg(args[0]), signalArg(args[1]))};
+      case PrimId::Pm:
+        return Value{makePm(scalarArg(args[0]), signalArg(args[1]))};
+      case PrimId::Am:
+        return Value{makeAm(signalArg(args[0]), signalArg(args[1]),
+                            scalarArg(args[2]))};
       case PrimId::ExpDecay:
         return Value{makeExpDecay(scalarArg(args[0]))};
       case PrimId::Adsr:

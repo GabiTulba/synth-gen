@@ -260,3 +260,22 @@ TEST(build_watch_rebuilds_on_change) {
       10);
   CHECK(builds == 2);
 }
+
+TEST(build_modulation_end_to_end) {
+  TempDir tp;
+  tp.write("modul.synth", R"(
+let vibrato : Scalar Signal = fm 440.0 ((sine 5.0) * 20.0) ;;
+let tremolo : Scalar Signal = am vibrato (sine 4.0) 0.5 ;;
+let bell : Scalar Signal = pm 220.0 ((sine 110.0) * 2.0) ;;
+let _ = render "voice" 48000.0 (sample (tremolo * 0.5 + bell * 0.3) 0s 250ms) ;;
+)");
+  tp.write(".build", "project modulation\nsource modul.synth\n");
+  BuildResult r = buildProject(tp.dir.string());
+  for (auto& d : r.diags.items) std::cerr << d.message << "\n";
+  CHECK(r.ok);
+  WavData w = readWav((tp.dir / "build" / "artifacts" / "voice.wav").string());
+  CHECK(w.frames() == 12000);
+  double peak = 0;
+  for (double v : w.channels[0]) peak = std::max(peak, std::fabs(v));
+  CHECK(peak > 0.3);  // audibly non-silent
+}

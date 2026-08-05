@@ -16,6 +16,17 @@ const std::vector<PrimSig>& primitives() {
     add(PrimId::Sine, "sine", {"freq"}, {tScalar()}, tSignal(tScalar()));
     add(PrimId::Saw, "saw", {"freq"}, {tScalar()}, tSignal(tScalar()));
     add(PrimId::Square, "square", {"freq"}, {tScalar()}, tSignal(tScalar()));
+    // Modulation. fm: sine oscillator whose instantaneous frequency is
+    // carrier + modulator(t) Hz (phase-integrated, so operators cascade).
+    // pm: sin(2*pi*carrier*t + modulator(t)), modulator in radians.
+    // am: carrier * (1 + depth * modulator); a mono modulator broadcasts
+    // across a multi-channel carrier.
+    add(PrimId::Fm, "fm", {"carrier", "modulator"},
+        {tScalar(), tSignal(tScalar())}, tSignal(tScalar()));
+    add(PrimId::Pm, "pm", {"carrier", "modulator"},
+        {tScalar(), tSignal(tScalar())}, tSignal(tScalar()));
+    add(PrimId::Am, "am", {"carrier", "modulator", "depth"},
+        {tSignal(a), tSignal(tScalar()), tScalar()}, tSignal(a));
     // Envelopes
     add(PrimId::ExpDecay, "exp_decay", {"rate"}, {tScalar()},
         tSignal(tScalar()));

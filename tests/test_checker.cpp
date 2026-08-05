@@ -216,3 +216,41 @@ TEST(checker_empty_list_rejected) {
   checkProject({f}, diags);
   CHECK(diags.hasErrors());
 }
+
+TEST(checker_modulation_primitives) {
+  TempProject tp;
+  std::string f = tp.write("ok.synth", R"(
+let vibrato : Scalar Signal = fm 440.0 ((sine 5.0) * 20.0) ;;
+let bell : Scalar Signal = pm 440.0 ((sine 220.0) * 3.0) ;;
+let tremolo : Scalar Signal = am (sine 440.0) (sine 4.0) 0.5 ;;
+let wide : Vector Signal =
+  am (channels [sine 440.0; sine 442.0]) (sine 4.0) 0.5 ;;
+)");
+  DiagnosticBag diags;
+  Program prog = checkProject({f}, diags);
+  for (auto& d : diags.items)
+    std::cerr << renderDiagnostic(d, prog.modules.empty()
+                                         ? std::string{}
+                                         : prog.modules[0].parsed.source);
+  CHECK(!diags.hasErrors());
+  CHECK(typeEquals(prog.modules[0].defTypes.at("wide"), tSignal(tVector())));
+}
+
+TEST(checker_modulation_type_errors) {
+  TempProject tp;
+  // fm's modulator must be a Scalar Signal, not a Scalar.
+  std::string f =
+      tp.write("bad.synth", "let x : Scalar Signal = fm 440.0 20.0 ;;");
+  DiagnosticBag diags;
+  checkProject({f}, diags);
+  CHECK(diags.hasErrors());
+
+  // am's element type propagates: declaring Scalar Signal for a Vector
+  // carrier is an error.
+  std::string g = tp.write("bad2.synth",
+                           "let y : Scalar Signal = "
+                           "am (channels [sine 1.0; sine 2.0]) (sine 4.0) 0.5 ;;");
+  DiagnosticBag diags2;
+  checkProject({g}, diags2);
+  CHECK(diags2.hasErrors());
+}

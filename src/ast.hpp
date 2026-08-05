@@ -23,6 +23,7 @@ struct Expr {
     BinOp,     // op, items[0], items[1]
     ListLit,   // items
     TupleLit,  // items (size >= 2)
+    Let,       // name, declType; items[0] = bound expr, items[1] = body
   };
   Kind kind;
   Span span{};
@@ -34,6 +35,8 @@ struct Expr {
   std::vector<ExprPtr> items;
   // App only: label per argument, parallel to items[1..]; "" = positional.
   std::vector<std::string> argLabels;
+  // Let only: the local binding's annotation.
+  TypePtr declType;
 
   // Filled in by the type checker.
   TypePtr type;

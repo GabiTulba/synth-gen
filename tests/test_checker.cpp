@@ -545,3 +545,81 @@ let xs : Scalar Signal list = list_init 3.0 g ;;
   checkProject({g}, d2);
   CHECK(d2.hasErrors());
 }
+
+TEST(checker_let_in_basic) {
+  TempProject tp;
+  std::string f = tp.write("ok.synth", R"(
+let song : Scalar Signal =
+  let hit : Scalar Sample = sine 440.0 |> sample ~from:0s ~to:100ms in
+  let beats : Timestamp list = time_steps ~start:0s ~step:200ms ~count:5.0 in
+  place_multi hit beats
+;;
+)");
+  DiagnosticBag diags;
+  Program prog = checkProject({f}, diags);
+  for (auto& d : diags.items)
+    std::cerr << renderDiagnostic(d, prog.modules.empty()
+                                         ? std::string{}
+                                         : prog.modules[0].parsed.source);
+  CHECK(!diags.hasErrors());
+  CHECK(typeEquals(prog.modules[0].defTypes.at("song"), tSignal(tScalar())));
+}
+
+TEST(checker_let_in_shadowing_and_scope) {
+  TempProject tp;
+  std::string f = tp.write("ok.synth", R"(
+let x : Scalar = 1.0 ;;
+let shadowed p:Scalar : Scalar =
+  let x : Scalar = p + 10.0 in
+  let p : Scalar = x * 2.0 in
+  p + x
+;;
+let outer_still_scalar : Scalar = x + 1.0 ;;
+)");
+  DiagnosticBag diags;
+  Program prog = checkProject({f}, diags);
+  for (auto& d : diags.items)
+    std::cerr << renderDiagnostic(d, prog.modules.empty()
+                                         ? std::string{}
+                                         : prog.modules[0].parsed.source);
+  CHECK(!diags.hasErrors());
+}
+
+TEST(checker_let_in_annotation_mismatch) {
+  TempProject tp;
+  std::string f = tp.write(
+      "bad.synth",
+      "let x : Scalar = let y : Timestamp = 1.0 in 2.0 ;;");
+  DiagnosticBag diags;
+  checkProject({f}, diags);
+  CHECK(diags.hasErrors());
+}
+
+TEST(checker_let_in_scope_ends_at_in) {
+  TempProject tp;
+  // `y` must not leak out of the let-in into a sibling expression.
+  std::string f = tp.write("bad.synth", R"(
+let a : Scalar = (let y : Scalar = 1.0 in y) + y ;;
+)");
+  DiagnosticBag diags;
+  checkProject({f}, diags);
+  CHECK(diags.hasErrors());
+}
+
+TEST(checker_let_in_local_partial_application) {
+  TempProject tp;
+  // A label-curried polymorphic primitive bound locally, then called.
+  std::string f = tp.write("ok.synth", R"(
+let warm : Scalar Signal =
+  let damp : Scalar Signal -> Scalar Signal = lowpass ~cutoff:600.0 in
+  damp (saw 220.0)
+;;
+)");
+  DiagnosticBag diags;
+  Program prog = checkProject({f}, diags);
+  for (auto& d : diags.items)
+    std::cerr << renderDiagnostic(d, prog.modules.empty()
+                                         ? std::string{}
+                                         : prog.modules[0].parsed.source);
+  CHECK(!diags.hasErrors());
+}

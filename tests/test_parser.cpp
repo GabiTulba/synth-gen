@@ -185,3 +185,33 @@ TEST(parser_pipe_rejects_non_application_rhs) {
   parseSrc("let x : Scalar = 1.0 |> 2.0 ;;", diags);
   CHECK(diags.hasErrors());
 }
+
+TEST(parser_let_in) {
+  DiagnosticBag diags;
+  auto defs = parseSrc(R"(
+let song : Scalar Signal =
+  let hit : Scalar Sample = sine 440.0 |> sample ~from:0s ~to:100ms in
+  let beats : Timestamp list = time_steps ~start:0s ~step:200ms ~count:5.0 in
+  place_multi hit beats
+;;
+)",
+                       diags);
+  CHECK(!diags.hasErrors());
+  const Expr& outer = *defs[0].body;
+  CHECK(outer.kind == Expr::Kind::Let);
+  CHECK(outer.name == "hit");
+  CHECK(outer.declType->kind == Type::Kind::Sample);
+  const Expr& inner = *outer.items[1];
+  CHECK(inner.kind == Expr::Kind::Let);
+  CHECK(inner.name == "beats");
+  CHECK(inner.items[1]->kind == Expr::Kind::App);
+}
+
+TEST(parser_let_in_requires_annotation_and_in) {
+  DiagnosticBag d1;
+  parseSrc("let x : Scalar = let y = 1.0 in y ;;", d1);
+  CHECK(d1.hasErrors());
+  DiagnosticBag d2;
+  parseSrc("let x : Scalar = let y : Scalar = 1.0 y ;;", d2);
+  CHECK(d2.hasErrors());
+}

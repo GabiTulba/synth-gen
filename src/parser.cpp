@@ -182,7 +182,31 @@ class Parser {
 
   // --- Expressions -------------------------------------------------------
 
-  ExprPtr parseExpr() { return parsePipe(); }
+  ExprPtr parseExpr() {
+    if (at(Tok::Let)) return parseLetIn();
+    return parsePipe();
+  }
+
+  // Local binding: let name : Type = expr in body. Annotated like every
+  // other binding; value bindings only (no parameters) in v1.
+  ExprPtr parseLetIn() {
+    Span lo = advance().span;  // 'let'
+    const Token& name = expect(Tok::Ident, "binding name");
+    expect(Tok::Colon,
+           "':' (local bindings are annotated: let name : Type = ... in ...)");
+    TypePtr ty = parseType();
+    expect(Tok::Equals, "'='");
+    ExprPtr bound = parseExpr();
+    expect(Tok::In, "'in' to close the local binding");
+    ExprPtr body = parseExpr();
+    auto e = std::make_unique<Expr>(Expr::Kind::Let,
+                                    Span{lo.lo, body->span.hi});
+    e->name = name.text;
+    e->declType = std::move(ty);
+    e->items.push_back(std::move(bound));
+    e->items.push_back(std::move(body));
+    return e;
+  }
 
   // Lowest precedence, left-associative. `x |> f a b` desugars to the
   // application `f a b x`: the piped value becomes the final positional

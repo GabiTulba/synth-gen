@@ -803,3 +803,65 @@ let _ = mix_all (repeat 1.0 (sine 1.0)) |> sample ~from:0s ~to:10ms
   CHECK(!rb.ok);
   CHECK(rb.diags.hasErrors());
 }
+
+TEST(build_let_in_matches_flat_version) {
+  // The sub-let version and the top-level-lets version of the same
+  // program must produce byte-identical artifacts.
+  TempDir nested, flat;
+  nested.write("p.synth", R"(
+let song : Scalar Signal =
+  let hit : Scalar Sample = sine 440.0 * exp_decay 12.0
+                            |> sample ~from:0s ~to:150ms in
+  let beats : Timestamp list = time_steps ~start:0s ~step:200ms ~count:5.0 in
+  place_multi hit beats
+;;
+let _ = song |> sample ~from:0s ~to:1s |> render ~name:"out" ~rate:8000.0 ;;
+)");
+  nested.write(".build", "project n\nsource p.synth\n");
+  flat.write("p.synth", R"(
+let hit : Scalar Sample = sine 440.0 * exp_decay 12.0
+                          |> sample ~from:0s ~to:150ms ;;
+let beats : Timestamp list = time_steps ~start:0s ~step:200ms ~count:5.0 ;;
+let song : Scalar Signal = place_multi hit beats ;;
+let _ = song |> sample ~from:0s ~to:1s |> render ~name:"out" ~rate:8000.0 ;;
+)");
+  flat.write(".build", "project f\nsource p.synth\n");
+  BuildResult rn = buildProject(nested.dir.string());
+  BuildResult rf = buildProject(flat.dir.string());
+  for (auto& d : rn.diags.items) std::cerr << d.message << "\n";
+  CHECK(rn.ok);
+  CHECK(rf.ok);
+  std::string a = slurp(nested.dir / "build" / "artifacts" / "out.wav");
+  std::string b = slurp(flat.dir / "build" / "artifacts" / "out.wav");
+  CHECK(!a.empty());
+  CHECK(a == b);
+}
+
+TEST(build_let_in_shadowing_cache_precision) {
+  // A local binding shadowing a module definition must not create a
+  // dependency on it: editing the (shadowed, unused) top-level `gain`
+  // leaves the target cached.
+  TempDir tp;
+  tp.write("p.synth", R"(
+let gain : Scalar = 0.9 ;;
+let voice : Scalar Signal =
+  let gain : Scalar = 0.5 in
+  sine 440.0 * gain
+;;
+let _ = voice |> sample ~from:0s ~to:50ms |> render ~name:"out" ~rate:8000.0 ;;
+)");
+  tp.write(".build", "project shadow\nsource p.synth\n");
+  BuildCache cache;
+  CHECK(buildProject(tp.dir.string(), &cache).ok);
+  tp.write("p.synth", R"(
+let gain : Scalar = 0.1 ;;
+let voice : Scalar Signal =
+  let gain : Scalar = 0.5 in
+  sine 440.0 * gain
+;;
+let _ = voice |> sample ~from:0s ~to:50ms |> render ~name:"out" ~rate:8000.0 ;;
+)");
+  BuildResult r = buildProject(tp.dir.string(), &cache);
+  CHECK(r.ok);
+  CHECK(r.targets[0].cached);  // the edit touched only the shadowed def
+}

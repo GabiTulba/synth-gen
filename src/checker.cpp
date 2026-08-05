@@ -5,6 +5,7 @@
 #include <filesystem>
 #include <fstream>
 #include <functional>
+#include <optional>
 #include <set>
 #include <sstream>
 
@@ -148,6 +149,32 @@ class ModuleChecker {
         std::vector<TypePtr> items;
         for (auto& x : e.items) items.push_back(check(*x, env));
         return tTuple(std::move(items));
+      }
+      case Expr::Kind::Let: {
+        TypePtr boundT = check(*e.items[0], env);
+        // Same rule as top-level bindings: a var-carrying partial
+        // application resolves against the annotation.
+        bool ok;
+        if (containsVar(boundT)) {
+          Subst subst;
+          ok = unify(boundT, e.declType, subst);
+        } else {
+          ok = typeEquals(boundT, e.declType);
+        }
+        if (!ok)
+          fail(e.items[0]->span,
+               "local binding '" + e.name + "' has type " +
+                   typeName(boundT) + " but is annotated as " +
+                   typeName(e.declType));
+        // Bind (shadowing whatever was visible), check the body, restore.
+        auto prev = env.find(e.name);
+        std::optional<TypePtr> saved;
+        if (prev != env.end()) saved = prev->second;
+        env[e.name] = e.declType;
+        TypePtr bodyT = check(*e.items[1], env);
+        if (saved) env[e.name] = *saved;
+        else env.erase(e.name);
+        return bodyT;
       }
     }
     fail(e.span, "internal error: unknown expression kind");

@@ -90,8 +90,9 @@ Fully annotated, no inference, no Booleans/branching/recursion in v1.
 `render` is the language's only effect. Files are modules (`import A`
 resolves `a.synth` in the same directory).
 
-Two ergonomic features on top of the doc's core: **labeled arguments**
-with label-driven currying, and the **pipe operator**:
+Three ergonomic features on top of the doc's core: **labeled arguments**
+with label-driven currying, the **pipe operator**, and **local
+`let ... in` bindings**:
 
 ```ocaml
 let voice ~amp:Scalar ~freq:Scalar : Scalar Signal = (sine freq) * amp ;;
@@ -100,7 +101,12 @@ let quiet : Scalar -> Scalar Signal = voice ~amp:0.25 ;;   (* curried *)
 let warm : Scalar Signal =
   saw 220.0 |> lowpass ~cutoff:800.0 |> soft_clip 0.8 ;;
 
-let _ = sample warm ~from:0s ~to:2s |> render ~name:"warm" ~rate:48000.0 ;;
+let pattern : Scalar Signal =
+  let hit : Scalar Sample = warm |> sample ~from:0s ~to:100ms in
+  let beats : Timestamp list = time_steps ~start:0s ~step:200ms ~count:5.0 in
+  place_multi hit beats ;;
+
+let _ = sample pattern ~from:0s ~to:2s |> render ~name:"warm" ~rate:48000.0 ;;
 ```
 
 Labeled arguments go in any order; providing a subset curries the

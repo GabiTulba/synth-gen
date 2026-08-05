@@ -41,7 +41,8 @@ postfix-type::= atom-type { "Signal" | "Sample" | "list" }
 atom-type   ::= "Scalar" | "Vector" | "Timestamp" | "String" | "unit"
               | "(" type { "," type } ")"           (tuple if >1 element)
 
-expr        ::= pipe
+expr        ::= let-in | pipe
+let-in      ::= "let" Ident ":" type "=" expr "in" expr
 pipe        ::= additive { "|>" additive }          (lowest, left-assoc)
 additive    ::= multiplicative { ("+" | "-") multiplicative }
 multiplicative ::= unary { ("*" | "/") unary }
@@ -67,6 +68,19 @@ Notes:
   is a parse but not a type — see §3.
 - Function-typed parameters require parentheses:
   `f:(Timestamp -> Scalar Signal)`.
+- **Local bindings**: `let name : Type = e in body` is an expression;
+  the binding is annotated like every other binding, binds a *value*
+  (no parameters in v1), scopes over `body` only, and may shadow
+  parameters, module definitions, or outer locals. Chained sub-lets nest
+  naturally:
+
+  ```
+  let song : Scalar Signal =
+    let hit : Scalar Sample = sine 440.0 |> sample ~from:0s ~to:100ms in
+    let beats : Timestamp list = time_steps ~start:0s ~step:200ms ~count:5.0 in
+    place_multi hit beats
+  ;;
+  ```
 - **Pipe**: `x |> f a b` desugars to the application `f a b x` — the
   piped value becomes the final positional argument. The right-hand side
   must be a function name or application; chains are left-associative:
@@ -89,7 +103,12 @@ Rules:
 - **Definition before use, no recursion.** A definition may reference
   only parameters, *earlier* definitions of its module, imported modules'
   definitions (qualified), and primitives. Name resolution order for
-  unqualified names: parameter → earlier module definition → primitive.
+  unqualified names: local binding/parameter (innermost first) → earlier
+  module definition → primitive.
+- **Local bindings** type-check like top-level ones: the bound expression
+  must match the annotation (a var-carrying partial application of a
+  polymorphic primitive resolves against it), and the name is visible
+  only in the body of the `in`.
 - **Labeled arguments & label-driven currying.** A parameter declared
   `~name:Type` is *labeled*; primitive parameters are all labeled with
   their signature names. At a call site, positional arguments fill the

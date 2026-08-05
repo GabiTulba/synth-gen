@@ -3,6 +3,7 @@
 #include <cmath>
 #include <filesystem>
 #include <map>
+#include <optional>
 #include <stdexcept>
 
 #include "primitives.hpp"
@@ -96,6 +97,17 @@ class Interp {
         TupleV out;
         for (auto& x : e.items) out.items.push_back(eval(*x, env, mod));
         return Value{std::move(out)};
+      }
+      case Expr::Kind::Let: {
+        Value bound = eval(*e.items[0], env, mod);
+        auto prev = env.find(e.name);
+        std::optional<Value> saved;
+        if (prev != env.end()) saved = prev->second;
+        env[e.name] = std::move(bound);
+        Value out = eval(*e.items[1], env, mod);
+        if (saved) env[e.name] = std::move(*saved);
+        else env.erase(e.name);
+        return out;
       }
     }
     throw EvalError("internal error: unknown expression kind");

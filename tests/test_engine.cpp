@@ -231,3 +231,65 @@ TEST(engine_modulators_must_be_mono) {
   CHECK(threwFm);
   CHECK(threwAm);
 }
+
+TEST(engine_delay_shifts_and_pads_with_silence) {
+  // exp_decay(1.0) delayed by 0.5s at rate 2: frame 0 silent, then the
+  // source's own values from its epoch.
+  SigPtr d = makeDelay(0.5, makeExpDecay(1.0));
+  Rendered r = renderWindow(d, 0.0, 2.0, 2.0);
+  CHECK_NEAR(r.interleaved[0], 0.0, 1e-9);            // t=0: before
+  CHECK_NEAR(r.interleaved[1], 1.0, 1e-9);            // in(0)
+  CHECK_NEAR(r.interleaved[2], std::exp(-0.5), 1e-9); // in(0.5)
+  CHECK_NEAR(r.interleaved[3], std::exp(-1.0), 1e-9); // in(1)
+}
+
+TEST(engine_delay_zero_is_identity) {
+  SigPtr src = makeOsc(OscKind::Sine, 440.0);
+  Rendered a = renderWindow(makeDelay(0.0, src), 0.0, 0.05, 8000.0);
+  Rendered b = renderWindow(src, 0.0, 0.05, 8000.0);
+  for (size_t i = 0; i < a.interleaved.size(); i++)
+    CHECK_NEAR(a.interleaved[i], b.interleaved[i], 1e-12);
+}
+
+TEST(engine_delay_preserves_channels) {
+  SigPtr stereo = makeChannels({makeConst(0.3), makeConst(-0.3)});
+  SigPtr d = makeDelay(0.25, stereo);
+  CHECK(d->channels() == 2);
+  Rendered r = renderWindow(d, 0.0, 1.0, 4.0);
+  CHECK(r.channels == 2);
+  CHECK_NEAR(r.interleaved[0], 0.0, 1e-9);   // t=0: silent, both channels
+  CHECK_NEAR(r.interleaved[1], 0.0, 1e-9);
+  CHECK_NEAR(r.interleaved[2], 0.3, 1e-9);   // t=0.25 onward: passthrough
+  CHECK_NEAR(r.interleaved[3], -0.3, 1e-9);
+}
+
+TEST(engine_delay_echo_shares_stateful_subgraph) {
+  // The echo idiom with a *stateful* shared source (fm): dry + delayed
+  // copies of the same subgraph must not corrupt its state, and the result
+  // must equal the manual sum of the shifted dry renders.
+  double rate = 8000.0;
+  int64_t shift = 400;  // 50ms
+  auto mkVoice = [] {
+    return makeFm(220.0, makeBinOp(SigBinOp::Mul, makeOsc(OscKind::Sine, 3.0),
+                                   makeConst(10.0)));
+  };
+  SigPtr shared = mkVoice();
+  SigPtr echo = makeMix({shared, makeDelay(0.05, shared)});
+  Rendered e = renderWindow(echo, 0.0, 0.2, rate);
+  Rendered dry = renderWindow(mkVoice(), 0.0, 0.2, rate);
+  for (size_t i = 0; i < e.interleaved.size(); i++) {
+    double expect = dry.interleaved[i] +
+                    (i >= (size_t)shift ? dry.interleaved[i - shift] : 0.0);
+    CHECK_NEAR(e.interleaved[i], expect, 1e-9);
+  }
+}
+
+TEST(engine_delay_negative_is_error) {
+  bool threw = false;
+  try {
+    makeDelay(-0.1, makeOsc(OscKind::Sine, 440.0));
+  } catch (const EngineError&) {
+    threw = true;
+  }
+  CHECK(threw);
+}

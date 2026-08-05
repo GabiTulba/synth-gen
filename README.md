@@ -112,7 +112,8 @@ resolves `a.synth` in the same directory).
   exponential decay, `lowpass`/`highpass`, operators + broadcasting,
   `channels`/`mix_all`/`map`/`fold`, `load_mono`/`load_multi` with
   build-time channel validation. Beyond the v1 roster: `fm`/`pm`/`am`
-  modulation primitives.
+  modulation primitives and the feedforward `delay` the doc left under
+  consideration.
 - [x] **Epic 5** — One-shot build system: manifest, project validation,
   target enumeration, metadata emission, `synthc build` + `synthc lint`.
 - [x] **Epic 6** — Build daemon: `synthc watch` rebuilds on changes to
@@ -162,3 +163,10 @@ follows (all easy to revisit):
     (ring modulation stays plain `carrier * modulator`).
   - Modulators must be mono signals; that is checked when the signal
     graph is built.
+- **`delay by:Timestamp signal:'a Signal : 'a Signal`** — the feedforward
+  delay the doc lists as under consideration (§6), adopted with exactly
+  that signature: the input shifted `by` later in time, silence before it.
+  Echoes are `mix_all [dry; (delay 250ms dry) * 0.5; ...]`. Implemented
+  with a ring buffer so a subgraph shared between dry and delayed paths
+  keeps its stateful nodes (filters, `fm`) consistent. Feedforward only —
+  feedback/IIR delays remain future work per §13.

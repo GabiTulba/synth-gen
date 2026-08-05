@@ -279,3 +279,33 @@ let _ = render "voice" 48000.0 (sample (tremolo * 0.5 + bell * 0.3) 0s 250ms) ;;
   for (double v : w.channels[0]) peak = std::max(peak, std::fabs(v));
   CHECK(peak > 0.3);  // audibly non-silent
 }
+
+TEST(build_delay_echo_end_to_end) {
+  TempDir tp;
+  tp.write("echo.synth", R"(
+let hit : Scalar Signal =
+  place (sample ((sine 660.0) * (exp_decay 30.0)) 0s 100ms) 0s ;;
+let echoed : Scalar Signal =
+  mix_all [hit; (delay 200ms hit) * 0.5; (delay 400ms hit) * 0.25] ;;
+let _ = render "echo" 8000.0 (sample echoed 0s 600ms) ;;
+)");
+  tp.write(".build", "project echo\nsource echo.synth\n");
+  BuildResult r = buildProject(tp.dir.string());
+  for (auto& d : r.diags.items) std::cerr << d.message << "\n";
+  CHECK(r.ok);
+  WavData w = readWav((tp.dir / "build" / "artifacts" / "echo.wav").string());
+  auto peakAround = [&](double t) {
+    int64_t c = (int64_t)(t * 8000.0);
+    double peak = 0;
+    for (int64_t i = c; i < c + 400 && i < w.frames(); i++)
+      peak = std::max(peak, std::fabs(w.channels[0][(size_t)i]));
+    return peak;
+  };
+  double p0 = peakAround(0.0), p1 = peakAround(0.2), p2 = peakAround(0.4);
+  CHECK(p0 > 0.5);
+  // Each echo is roughly half the previous one.
+  CHECK_NEAR(p1, p0 * 0.5, 0.1);
+  CHECK_NEAR(p2, p0 * 0.25, 0.1);
+  // Silence between hit and first echo (decay rate 30 kills it fast).
+  CHECK(peakAround(0.15) < 0.05);
+}

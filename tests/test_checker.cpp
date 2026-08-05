@@ -254,3 +254,28 @@ TEST(checker_modulation_type_errors) {
   checkProject({g}, diags2);
   CHECK(diags2.hasErrors());
 }
+
+TEST(checker_delay_primitive) {
+  TempProject tp;
+  std::string f = tp.write("ok.synth", R"(
+let dry : Scalar Signal = sine 440.0 ;;
+let echo : Scalar Signal =
+  mix_all [dry; (delay 250ms dry) * 0.5; (delay 500ms dry) * 0.25] ;;
+let wide : Vector Signal = delay 10ms (channels [sine 440.0; sine 442.0]) ;;
+)");
+  DiagnosticBag diags;
+  Program prog = checkProject({f}, diags);
+  for (auto& d : diags.items)
+    std::cerr << renderDiagnostic(d, prog.modules.empty()
+                                         ? std::string{}
+                                         : prog.modules[0].parsed.source);
+  CHECK(!diags.hasErrors());
+  CHECK(typeEquals(prog.modules[0].defTypes.at("wide"), tSignal(tVector())));
+
+  // Delay time must be a Timestamp, not a Scalar.
+  std::string g = tp.write("bad.synth",
+                           "let x : Scalar Signal = delay 0.25 (sine 440.0) ;;");
+  DiagnosticBag diags2;
+  checkProject({g}, diags2);
+  CHECK(diags2.hasErrors());
+}

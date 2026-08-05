@@ -80,6 +80,8 @@ SigPtr makePm(double carrier, SigPtr modulator);
 // AM: carrier * (1 + depth * modulator). The modulator must be mono (or a
 // broadcast constant); it applies to every carrier channel.
 SigPtr makeAm(SigPtr carrier, SigPtr modulator, double depth);
+// Feedforward delay: input shifted `by` seconds later; silence before.
+SigPtr makeDelay(double by, SigPtr input);
 SigPtr makeExpDecay(double rate);
 SigPtr makeAdsr(double attack, double decay, double sustain, double release,
                 double hold);

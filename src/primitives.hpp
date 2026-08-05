@@ -14,6 +14,7 @@ enum class PrimId {
   Fm,
   Pm,
   Am,
+  Delay,
   ExpDecay,
   Adsr,
   Lowpass,

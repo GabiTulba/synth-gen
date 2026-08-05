@@ -27,6 +27,11 @@ const std::vector<PrimSig>& primitives() {
         {tScalar(), tSignal(tScalar())}, tSignal(tScalar()));
     add(PrimId::Am, "am", {"carrier", "modulator", "depth"},
         {tSignal(a), tSignal(tScalar()), tScalar()}, tSignal(a));
+    // Feedforward delay (the convenience primitive the design doc leaves
+    // under consideration, §6): the input shifted later in time by `by`,
+    // silence before it. Echoes are delay + arithmetic + mix_all.
+    add(PrimId::Delay, "delay", {"by", "signal"},
+        {tTimestamp(), tSignal(a)}, tSignal(a));
     // Envelopes
     add(PrimId::ExpDecay, "exp_decay", {"rate"}, {tScalar()},
         tSignal(tScalar()));

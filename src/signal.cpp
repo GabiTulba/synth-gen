@@ -157,6 +157,47 @@ struct AmNode final : SigNode {
   }
 };
 
+// Feedforward delay: out(t) = in(t - by) for t >= by, silence before.
+// Implemented with a ring buffer rather than by querying the input at
+// shifted indices: the input is pulled at the same monotonically increasing
+// frame as every other consumer, so a subgraph shared between dry and
+// delayed paths (the echo idiom) keeps its stateful nodes consistent.
+struct DelayState final : NodeState {
+  std::vector<double> ring;  // shiftFrames * channelCount doubles, zeroed
+};
+
+struct DelayNode final : SigNode {
+  double by;
+  SigPtr input;
+  DelayNode(double b, SigPtr in) : by(b), input(std::move(in)) {
+    if (by < 0) throw EngineError("delay: negative delay time");
+  }
+  int channels() const override { return input->channels(); }
+  bool stateful() const override { return true; }
+  std::unique_ptr<NodeState> makeState() const override {
+    return std::make_unique<DelayState>();
+  }
+  Frame compute(RenderCtx& ctx, NodeState& st0, int64_t n) const override {
+    auto& st = static_cast<DelayState&>(st0);
+    Frame in = input->get(ctx, n);
+    int64_t shift = llround(by * ctx.rate);
+    if (shift == 0) return in;
+    int count = in.ch == -1 ? 1 : in.ch;
+    if (st.ring.empty()) st.ring.assign((size_t)(shift * count), 0.0);
+    size_t slot = (size_t)((n % shift) * count);
+    Frame out;
+    out.ch = in.ch;
+    // The slot still holds the frame written `shift` steps ago (zero for
+    // the first `shift` frames); read it, then overwrite with the current
+    // input for the future read.
+    for (int i = 0; i < count; i++) {
+      out.v[i] = st.ring[slot + (size_t)i];
+      st.ring[slot + (size_t)i] = chanAt(in, i);
+    }
+    return out;
+  }
+};
+
 struct ExpDecayNode final : SigNode {
   double rate;
   explicit ExpDecayNode(double r) : rate(r) {}
@@ -388,6 +429,9 @@ SigPtr makePm(double carrier, SigPtr modulator) {
 SigPtr makeAm(SigPtr carrier, SigPtr modulator, double depth) {
   return std::make_shared<AmNode>(std::move(carrier), std::move(modulator),
                                   depth);
+}
+SigPtr makeDelay(double by, SigPtr input) {
+  return std::make_shared<DelayNode>(by, std::move(input));
 }
 SigPtr makeExpDecay(double rate) { return std::make_shared<ExpDecayNode>(rate); }
 SigPtr makeAdsr(double a, double d, double s, double r, double hold) {

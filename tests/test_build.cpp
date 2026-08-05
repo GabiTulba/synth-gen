@@ -604,3 +604,72 @@ let _ = render "soft" 8000.0 (sample (soft_clip 0.5 hot) 0s 250ms) ;;
   // against the rails; tanh soft clip does not sit flat.
   CHECK(flatHard > hard.frames() / 4);
 }
+
+TEST(build_place_multi_matches_mixed_places) {
+  // place_multi must be exactly mix_all of individual placements -
+  // byte-identical artifacts.
+  auto write = [](TempDir& tp, const char* body) {
+    tp.write("p.synth", body);
+    tp.write(".build", "project pm\nsource p.synth\n");
+  };
+  TempDir multi, manual;
+  write(multi, R"(
+let hit : Scalar Sample = sample ((sine 660.0) * (exp_decay 15.0)) 0s 150ms ;;
+let _ = render "out" 8000.0
+  (sample (place_multi hit [0s; 200ms; 400ms]) 0s 700ms) ;;
+)");
+  write(manual, R"(
+let hit : Scalar Sample = sample ((sine 660.0) * (exp_decay 15.0)) 0s 150ms ;;
+let _ = render "out" 8000.0
+  (sample (mix_all [place hit 0s; place hit 200ms; place hit 400ms])
+   0s 700ms) ;;
+)");
+  CHECK(buildProject(multi.dir.string()).ok);
+  CHECK(buildProject(manual.dir.string()).ok);
+  std::string a = slurp(multi.dir / "build" / "artifacts" / "out.wav");
+  std::string b = slurp(manual.dir / "build" / "artifacts" / "out.wav");
+  CHECK(!a.empty());
+  CHECK(a == b);
+}
+
+TEST(build_place_multi_overlaps_sum) {
+  // Two placements of a constant-ish sample overlapping halfway: the
+  // overlap region carries double amplitude.
+  TempDir tp;
+  tp.write("o.synth", R"(
+let level : Scalar Sample = sample (exp_decay 0.0) 0s 200ms ;;
+let _ = render "out" 8000.0
+  (sample ((place_multi level [0s; 100ms]) * 0.4) 0s 400ms) ;;
+)");
+  tp.write(".build", "project overlap\nsource o.synth\n");
+  BuildResult r = buildProject(tp.dir.string());
+  for (auto& d : r.diags.items) std::cerr << d.message << "\n";
+  CHECK(r.ok);
+  WavData w = readWav((tp.dir / "build" / "artifacts" / "out.wav").string());
+  auto at = [&](double t) { return w.channels[0][(size_t)(t * 8000.0)]; };
+  CHECK_NEAR(at(0.05), 0.4, 0.01);   // one placement
+  CHECK_NEAR(at(0.15), 0.8, 0.01);   // overlap: both sum
+  CHECK_NEAR(at(0.25), 0.4, 0.01);   // only the second remains
+  CHECK_NEAR(at(0.35), 0.0, 0.01);   // both finished
+}
+
+TEST(build_place_multi_with_stateful_sample) {
+  // A reverb-carrying sample placed at several timestamps: every
+  // placement replays the same content (state isolation end to end).
+  TempDir tp;
+  tp.write("s.synth", R"(
+let wet : Scalar Sample =
+  sample (reverb 100ms 0.3 0.5 ((sine 440.0) * (exp_decay 30.0))) 0s 150ms ;;
+let _ = render "out" 8000.0 (sample (place_multi wet [0s; 300ms]) 0s 600ms) ;;
+)");
+  tp.write(".build", "project statepm\nsource s.synth\n");
+  BuildResult r = buildProject(tp.dir.string());
+  for (auto& d : r.diags.items) std::cerr << d.message << "\n";
+  CHECK(r.ok);
+  WavData w = readWav((tp.dir / "build" / "artifacts" / "out.wav").string());
+  int64_t shift = 2400;  // 300ms
+  int64_t len = 1200;    // 150ms
+  for (int64_t i = 0; i < len; i++)
+    CHECK_NEAR(w.channels[0][(size_t)i], w.channels[0][(size_t)(i + shift)],
+               2.0 / 32768.0);  // identical up to 16-bit quantization
+}

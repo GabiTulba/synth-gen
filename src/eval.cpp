@@ -209,6 +209,13 @@ class Interp {
         double at = timeArg(args[1]);
         return Value{makePlace(s.sig, s.from, s.to, at)};
       }
+      case PrimId::PlaceMulti: {
+        const SampleV& s = std::get<SampleV>(args[0].v);
+        std::vector<SigPtr> placed;
+        for (auto& t : std::get<ListV>(args[1].v).items)
+          placed.push_back(makePlace(s.sig, s.from, s.to, timeArg(t)));
+        return Value{makeMix(std::move(placed))};
+      }
       case PrimId::Render:
       case PrimId::RenderVis: {
         RenderTarget t;

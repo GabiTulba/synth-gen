@@ -371,3 +371,29 @@ let wide : Vector Signal =
   checkProject({g}, diags2);
   CHECK(diags2.hasErrors());
 }
+
+TEST(checker_place_multi_primitive) {
+  TempProject tp;
+  std::string f = tp.write("ok.synth", R"(
+let hit : Scalar Sample = sample ((sine 440.0) * (exp_decay 8.0)) 0s 200ms ;;
+let pattern : Scalar Signal = place_multi hit [0s; 250ms; 500ms; 1s] ;;
+let wide : Vector Signal =
+  place_multi (sample (channels [sine 440.0; sine 442.0]) 0s 100ms) [0s; 1s] ;;
+)");
+  DiagnosticBag diags;
+  Program prog = checkProject({f}, diags);
+  for (auto& d : diags.items)
+    std::cerr << renderDiagnostic(d, prog.modules.empty()
+                                         ? std::string{}
+                                         : prog.modules[0].parsed.source);
+  CHECK(!diags.hasErrors());
+  CHECK(typeEquals(prog.modules[0].defTypes.at("wide"), tSignal(tVector())));
+
+  // The list must be Timestamps, not Scalars.
+  std::string g = tp.write("bad.synth",
+                           "let x : Scalar Signal = place_multi "
+                           "(sample (sine 440.0) 0s 100ms) [0.0; 1.0] ;;");
+  DiagnosticBag diags2;
+  checkProject({g}, diags2);
+  CHECK(diags2.hasErrors());
+}

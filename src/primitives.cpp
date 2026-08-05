@@ -74,6 +74,12 @@ const std::vector<PrimSig>& primitives() {
         {tSignal(a), tTimestamp(), tTimestamp()}, tSample(a));
     add(PrimId::Place, "place", {"sample", "at"}, {tSample(a), tTimestamp()},
         tSignal(a));
+    // place_multi: place one sample at every timestamp in the list and mix
+    // the placements (overlaps sum). Equivalent to mapping `place` over
+    // the list - which v1 cannot express directly, since partial
+    // application does not exist.
+    add(PrimId::PlaceMulti, "place_multi", {"sample", "ats"},
+        {tSample(a), tList(tTimestamp())}, tSignal(a));
     // The effects: render writes an audio artifact; render_vis writes a
     // waveform image (SVG) of the same discretized window instead. Both
     // declare build targets and share the project-wide name space.

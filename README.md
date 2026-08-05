@@ -211,6 +211,15 @@ follows (all easy to revisit):
   inside the primitive's per-render state — the *language-level* signal
   graph stays acyclic, exactly like the stateful one-pole filters.
   Parameters are validated at graph construction.
+- **`place_multi sample:'a Sample ats:Timestamp list : 'a Signal`** —
+  places one sample at every timestamp in the list and mixes the
+  placements (overlaps sum): `place_multi kick [0s; 500ms; 1s]`. This is
+  the pattern/rhythm workhorse `mix_all (map (place s) ats)` would be —
+  which v1 cannot write directly, since partial application doesn't
+  exist. Each placement replays the sample from its own state, so
+  stateful content (filters, `fm`, `reverb`) sounds identical at every
+  timestamp — a guarantee `place` itself now also provides when the same
+  sample value is placed repeatedly.
 - **`hard_clip threshold:Scalar input:'a Signal : 'a Signal`** and
   **`soft_clip threshold:Scalar input:'a Signal : 'a Signal`** —
   distortion by amplitude capping. `hard_clip` clamps flat at

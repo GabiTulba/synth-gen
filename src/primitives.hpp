@@ -27,6 +27,7 @@ enum class PrimId {
   Channels,
   Sample,
   Place,
+  PlaceMulti,
   Render,
   RenderVis,
   LoadMono,

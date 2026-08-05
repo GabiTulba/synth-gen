@@ -480,3 +480,23 @@ TEST(engine_clip_rejects_nonpositive_threshold) {
   try { makeClip(ClipKind::Soft, -0.5, src); } catch (const EngineError&) { threw++; }
   CHECK(threw == 2);
 }
+
+TEST(engine_shared_stateful_sample_placed_twice) {
+  // The canonical `mix_all [place k 0s; place k 500ms]` idiom with a
+  // *stateful* shared source: per-placement state isolation must make
+  // both placements replay identical content.
+  double rate = 8000.0;
+  SigPtr voice = makeFilter(FilterKind::Lowpass, 800.0,
+                            makeOsc(OscKind::Saw, 220.0));
+  SigPtr p1 = makePlace(voice, 0.0, 0.25, 0.0);
+  SigPtr p2 = makePlace(voice, 0.0, 0.25, 0.5);
+  Rendered r = renderWindow(makeMix({p1, p2}), 0.0, 1.0, rate);
+  int64_t shift = 4000;  // 0.5s
+  int64_t len = 2000;    // 0.25s
+  for (int64_t i = 0; i < len; i++)
+    CHECK_NEAR(r.interleaved[(size_t)i], r.interleaved[(size_t)(i + shift)],
+               1e-12);
+  // Silence in the gap between the placements.
+  for (int64_t i = len; i < shift; i++)
+    CHECK_NEAR(r.interleaved[(size_t)i], 0.0, 1e-12);
+}

@@ -468,6 +468,16 @@ struct ChannelsNode final : SigNode {
 
 // --- Placement -------------------------------------------------------------
 
+// Each placement owns a private evaluation context for its source subtree:
+// a Sample is a fixed finite slice, so every placement of it must replay
+// identical content. Isolating state per placement makes that hold even
+// when the source contains stateful nodes (filters, fm, delay) and the
+// same sample value is placed at several timestamps - the canonical
+// `mix_all [place k 0s; place k 500ms]` idiom (§5.1).
+struct PlaceState final : NodeState {
+  std::unique_ptr<RenderCtx> sub;
+};
+
 struct PlaceNode final : SigNode {
   SigPtr source;
   double from, to, at;
@@ -480,7 +490,10 @@ struct PlaceNode final : SigNode {
       throw EngineError("place: negative timestamp");
   }
   int channels() const override { return source->channels(); }
-  Frame compute(RenderCtx& ctx, NodeState&, int64_t n) const override {
+  std::unique_ptr<NodeState> makeState() const override {
+    return std::make_unique<PlaceState>();
+  }
+  Frame compute(RenderCtx& ctx, NodeState& st0, int64_t n) const override {
     int64_t nAt = llround(at * ctx.rate);
     int64_t nFrom = llround(from * ctx.rate);
     int64_t len = llround((to - from) * ctx.rate);
@@ -491,7 +504,9 @@ struct PlaceNode final : SigNode {
       for (int i = 0; i < count; i++) silence.v[i] = 0;
       return silence;
     }
-    return source->get(ctx, n - nAt + nFrom);
+    auto& st = static_cast<PlaceState&>(st0);
+    if (!st.sub) st.sub = std::make_unique<RenderCtx>(ctx.rate);
+    return source->get(*st.sub, n - nAt + nFrom);
   }
 };
 

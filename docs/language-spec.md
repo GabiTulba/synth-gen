@@ -186,6 +186,7 @@ val channels  : chans:Scalar Signal list -> Vector Signal
 (* slicing & arrangement *)
 val sample    : signal:'a Signal -> from:Timestamp -> to:Timestamp -> 'a Sample
 val place     : sample:'a Sample -> at:Timestamp -> 'a Signal
+val place_multi : sample:'a Sample -> ats:Timestamp list -> 'a Signal  (* mix of placements *)
 
 (* the effects *)
 val render    : name:String -> rate:Scalar -> sample:'a Sample -> unit

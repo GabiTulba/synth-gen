@@ -12,13 +12,16 @@ fi
 
 "$BUILD_DIR/synthc" build examples/primitives
 "$BUILD_DIR/synthc" build examples/basic
+"$BUILD_DIR/synthc" build examples/advanced
 "$BUILD_DIR/synthc" build examples/song
 
-mkdir -p outputs/primitives outputs/basic outputs/song
+mkdir -p outputs/primitives outputs/basic outputs/advanced outputs/song
 cp examples/primitives/build/artifacts/*.wav outputs/primitives/ 2>/dev/null || true
 cp examples/primitives/build/artifacts/*.svg outputs/primitives/ 2>/dev/null || true
 cp examples/basic/build/artifacts/*.wav outputs/basic/ 2>/dev/null || true
 cp examples/basic/build/artifacts/*.svg outputs/basic/ 2>/dev/null || true
+cp examples/advanced/build/artifacts/*.wav outputs/advanced/ 2>/dev/null || true
+cp examples/advanced/build/artifacts/*.svg outputs/advanced/ 2>/dev/null || true
 # Only the master + waveform are committed; the per-instrument stems
 # (song-drums/pad/piano/guitar.wav, ~3 MB each) build locally.
 cp examples/song/build/artifacts/song.wav outputs/song/ 2>/dev/null || true

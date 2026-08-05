@@ -20,8 +20,9 @@ struct EvalError : std::runtime_error {
 class Interp {
  public:
   Interp(const Program& prog, std::vector<RenderTarget>& targets,
-         DiagnosticBag& diags)
-      : prog_(prog), targets_(targets), diags_(diags) {}
+         DiagnosticBag& diags, std::vector<std::string>* loadedFiles)
+      : prog_(prog), targets_(targets), diags_(diags),
+        loadedFiles_(loadedFiles) {}
 
   bool run() {
     bool ok = true;
@@ -59,6 +60,7 @@ class Interp {
   DiagnosticBag& diags_;
   const CheckedModule* currentModule_ = nullptr;
   const TopDef* currentDef_ = nullptr;
+  std::vector<std::string>* loadedFiles_ = nullptr;
   std::map<std::string, Env> globals_;             // module -> name -> value
   std::map<std::string, SigPtr> fileCache_;        // absolute path -> signal
 
@@ -238,6 +240,7 @@ class Interp {
     std::string key = p.lexically_normal().string();
     auto it = fileCache_.find(key);
     if (it != fileCache_.end()) return it->second;
+    if (loadedFiles_) loadedFiles_->push_back(key);
     WavData wav;
     try {
       wav = readWav(key);
@@ -316,8 +319,9 @@ class Interp {
 }  // namespace
 
 bool evaluateProgram(const Program& prog, std::vector<RenderTarget>& targets,
-                     DiagnosticBag& diags) {
-  return Interp(prog, targets, diags).run();
+                     DiagnosticBag& diags,
+                     std::vector<std::string>* loadedFiles) {
+  return Interp(prog, targets, diags, loadedFiles).run();
 }
 
 }  // namespace synth

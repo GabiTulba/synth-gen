@@ -1,9 +1,12 @@
 #include "build.hpp"
 
+#include <algorithm>
+#include <chrono>
 #include <filesystem>
 #include <fstream>
 #include <map>
 #include <sstream>
+#include <thread>
 
 #include "checker.hpp"
 #include "eval.hpp"
@@ -158,6 +161,7 @@ BuildResult buildProject(const std::string& projectDir) {
   mss << mf.rdbuf();
   std::string manifestText = mss.str();
   sourcesByPath[manifestPath.string()] = manifestText;
+  r.inputs.push_back(manifestPath.string());
   if (!parseManifest(manifestText, manifestPath.string(), r.manifest,
                      r.diags))
     return r;
@@ -165,9 +169,13 @@ BuildResult buildProject(const std::string& projectDir) {
   // 2. Parse & type-check every source file (plus imports).
   std::vector<std::string> roots;
   for (auto& s : r.manifest.sources) roots.push_back((dir / s).string());
+  for (auto& s : roots) r.inputs.push_back(s);
   Program prog = checkProject(roots, r.diags);
-  for (auto& m : prog.modules)
+  for (auto& m : prog.modules) {
     sourcesByPath[m.parsed.path] = m.parsed.source;
+    if (std::find(roots.begin(), roots.end(), m.parsed.path) == roots.end())
+      r.inputs.push_back(m.parsed.path);
+  }
 
   fs::path buildDir = dir / "build";
   fs::path artifactDir = buildDir / "artifacts";
@@ -182,7 +190,7 @@ BuildResult buildProject(const std::string& projectDir) {
 
   // 3. Evaluate: enumerate render targets (and run load_* validation).
   std::vector<RenderTarget> targets;
-  bool evalOk = evaluateProgram(prog, targets, r.diags);
+  bool evalOk = evaluateProgram(prog, targets, r.diags, &r.inputs);
 
   // Project-level rule: duplicate render names are a build error (§5.2).
   std::map<std::string, const RenderTarget*> byName;
@@ -241,6 +249,57 @@ DiagnosticBag lintFiles(const std::vector<std::string>& files) {
   DiagnosticBag diags;
   checkProject(files, diags);
   return diags;
+}
+
+namespace {
+
+// Snapshot of a file's identity for change detection. Missing files get a
+// distinct marker so appearing/disappearing counts as a change.
+struct Stamp {
+  bool exists = false;
+  int64_t size = 0;
+  int64_t mtime = 0;
+  bool operator==(const Stamp&) const = default;
+};
+
+Stamp stampOf(const fs::path& p) {
+  Stamp s;
+  std::error_code ec;
+  auto status = fs::status(p, ec);
+  if (ec || !fs::exists(status)) return s;
+  s.exists = true;
+  if (fs::is_regular_file(status)) s.size = (int64_t)fs::file_size(p, ec);
+  auto t = fs::last_write_time(p, ec);
+  if (!ec) s.mtime = t.time_since_epoch().count();
+  return s;
+}
+
+std::map<std::string, Stamp> snapshot(const std::string& projectDir,
+                                      const std::vector<std::string>& inputs) {
+  std::map<std::string, Stamp> snap;
+  // Watching the directory itself catches newly added source files that a
+  // manifest already references (or fixed unresolved imports).
+  snap[projectDir] = stampOf(projectDir);
+  for (auto& f : inputs) snap[f] = stampOf(f);
+  return snap;
+}
+
+}  // namespace
+
+void watchProject(const std::string& projectDir,
+                  const std::function<void(const BuildResult&)>& onBuild,
+                  const std::function<bool()>& keepRunning, int pollMillis) {
+  BuildResult r = buildProject(projectDir);
+  onBuild(r);
+  auto snap = snapshot(projectDir, r.inputs);
+  while (keepRunning()) {
+    std::this_thread::sleep_for(std::chrono::milliseconds(pollMillis));
+    auto now = snapshot(projectDir, r.inputs);
+    if (now == snap) continue;
+    r = buildProject(projectDir);
+    onBuild(r);
+    snap = snapshot(projectDir, r.inputs);
+  }
 }
 
 }  // namespace synth

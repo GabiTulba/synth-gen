@@ -1,4 +1,5 @@
 #pragma once
+#include <functional>
 #include <string>
 #include <vector>
 
@@ -38,6 +39,10 @@ struct BuildResult {
   std::vector<TargetInfo> targets;
   DiagnosticBag diags;
   std::string metadataPath;
+  // Every file this build depended on: the manifest, all source modules
+  // (listed and imported), and all loaded audio files. This is what the
+  // daemon watches (§8.3).
+  std::vector<std::string> inputs;
 };
 
 // One-shot build of the project in `projectDir` (§8.2): parse & check all
@@ -50,5 +55,15 @@ BuildResult buildProject(const std::string& projectDir);
 // Front-end only (lint): parse + type-check the given files and their
 // imports; no evaluation, no artifacts.
 DiagnosticBag lintFiles(const std::vector<std::string>& files);
+
+// The build daemon loop (§8.3): builds once, then watches the project's
+// inputs (sources, .build, imported audio files) and rebuilds on change.
+// `onBuild` is called after every build. Polling-based (portable, no
+// dependencies); a whole-project rebuild per change is the acceptable v1
+// (§12 Epic 6). Runs until `keepRunning` returns false.
+void watchProject(const std::string& projectDir,
+                  const std::function<void(const BuildResult&)>& onBuild,
+                  const std::function<bool()>& keepRunning,
+                  int pollMillis = 300);
 
 }  // namespace synth

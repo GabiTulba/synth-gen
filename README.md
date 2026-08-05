@@ -30,6 +30,10 @@ build/synthc build examples/pluck
 # -> examples/pluck/build/artifacts/demo.wav
 # -> examples/pluck/build/metadata.json
 
+# Build daemon: watch sources, .build and imported audio files, rebuild
+# on change (save file -> rebuild -> dev app reflects new artifacts):
+build/synthc watch examples/pluck
+
 # Front-end checks only (for editor integration):
 build/synthc lint path/to/file.synth
 ```
@@ -87,8 +91,8 @@ resolves `a.synth` in the same directory).
 | `src/signal.*` | Signal engine: lazy signal DAG, render-time discretization, sample/place windowing, filters, mixing |
 | `src/eval.*` | Evaluator: reduces definitions to values, collects render targets, `load_*` build-time validation |
 | `src/wav.*` | WAV read (PCM 16/24/32, float 32/64) and write (PCM 16) |
-| `src/build.*` | `.build` manifest, project validation, target enumeration, artifact + metadata emission, lint mode |
-| `src/main.cpp` | `synthc` CLI (`build`, `lint`) |
+| `src/build.*` | `.build` manifest, project validation, target enumeration, artifact + metadata emission, lint mode, watch loop |
+| `src/main.cpp` | `synthc` CLI (`build`, `watch`, `lint`) |
 | `tests/` | Unit + end-to-end tests (assert-based, run via CTest) |
 | `examples/pluck/` | The design doc's §3.4 example as a buildable project |
 
@@ -110,7 +114,10 @@ resolves `a.synth` in the same directory).
   build-time channel validation.
 - [x] **Epic 5** — One-shot build system: manifest, project validation,
   target enumeration, metadata emission, `synthc build` + `synthc lint`.
-- [ ] **Epic 6** — Build daemon (watch mode).
+- [x] **Epic 6** — Build daemon: `synthc watch` rebuilds on changes to
+  sources, the manifest, and imported audio files (polling-based,
+  whole-project rebuild — the acceptable v1 per §12). Partial-failure
+  error surfacing goes through the same metadata file as one-shot builds.
 - [ ] **Epic 7** — Dev app (SDL2 + Dear ImGui artifact browser/player).
 - [ ] **Epic 8/9** — Incremental builds, caching, parallel evaluation
   (post-MVP fast-follows by design).

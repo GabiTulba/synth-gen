@@ -18,6 +18,9 @@ int usage() {
       "Usage:\n"
       "  synthc build [PROJECT_DIR]     one-shot build of a project\n"
       "                                 (PROJECT_DIR defaults to '.')\n"
+      "  synthc watch [PROJECT_DIR]     build daemon: watch the project's\n"
+      "                                 sources, manifest and audio inputs\n"
+      "                                 and rebuild on change\n"
       "  synthc lint FILE...            front-end checks only (parse +\n"
       "                                 type-check), no artifacts\n";
   return 2;
@@ -56,6 +59,26 @@ int cmdBuild(const std::string& dir) {
   return r.ok ? 0 : 1;
 }
 
+int cmdWatch(const std::string& dir) {
+  std::cout << "watching '" << dir << "' (Ctrl-C to stop)\n";
+  synth::watchProject(
+      dir,
+      [](const synth::BuildResult& r) {
+        printDiags(r.diags);
+        for (auto& t : r.targets) {
+          if (t.ok)
+            std::cout << "  rendered '" << t.name << "' -> " << t.artifact
+                      << "\n";
+          else
+            std::cout << "  FAILED '" << t.name << "': " << t.error << "\n";
+        }
+        std::cout << (r.ok ? "build succeeded" : "build failed")
+                  << "; watching for changes...\n";
+      },
+      [] { return true; });
+  return 0;
+}
+
 int cmdLint(const std::vector<std::string>& files) {
   synth::DiagnosticBag diags = synth::lintFiles(files);
   printDiags(diags);
@@ -73,6 +96,10 @@ int main(int argc, char** argv) {
   if (cmd == "build") {
     if (args.size() > 2) return usage();
     return cmdBuild(args.size() == 2 ? args[1] : ".");
+  }
+  if (cmd == "watch") {
+    if (args.size() > 2) return usage();
+    return cmdWatch(args.size() == 2 ? args[1] : ".");
   }
   if (cmd == "lint") {
     if (args.size() < 2) return usage();

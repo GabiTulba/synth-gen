@@ -1,8 +1,10 @@
 #include <unistd.h>
 
+#include <chrono>
 #include <filesystem>
 #include <fstream>
 #include <sstream>
+#include <thread>
 
 #include "build.hpp"
 #include "test_framework.hpp"
@@ -201,4 +203,60 @@ TEST(build_lint_mode) {
   tp.write("bad.synth", "let x : Scalar = sine 440.0 ;;");
   DiagnosticBag bad = lintFiles({(tp.dir / "bad.synth").string()});
   CHECK(bad.hasErrors());
+}
+
+TEST(build_inputs_are_tracked) {
+  TempDir tp;
+  tp.write("instr.synth",
+           "let tone freq:Scalar : Scalar Signal = sine freq ;;");
+  tp.write("song.synth", R"(
+import Instr
+let _ = render "song" 44100.0 (sample (Instr.tone 330.0) 0s 100ms) ;;
+)");
+  tp.write(".build", "project inputs\nsource song.synth\n");
+  BuildResult r = buildProject(tp.dir.string());
+  CHECK(r.ok);
+  auto has = [&](const std::string& suffix) {
+    for (auto& i : r.inputs)
+      if (i.size() >= suffix.size() &&
+          i.compare(i.size() - suffix.size(), suffix.size(), suffix) == 0)
+        return true;
+    return false;
+  };
+  CHECK(has(".build"));
+  CHECK(has("song.synth"));
+  CHECK(has("instr.synth"));  // discovered via import
+}
+
+TEST(build_watch_rebuilds_on_change) {
+  TempDir tp;
+  tp.write("a.synth",
+           "let _ = render \"t\" 8000.0 (sample (sine 440.0) 0s 10ms) ;;");
+  tp.write(".build", "project watch\nsource a.synth\n");
+
+  int builds = 0;
+  bool changed = false;
+  watchProject(
+      tp.dir.string(),
+      [&](const BuildResult& r) {
+        builds++;
+        CHECK(r.ok);
+      },
+      [&] {
+        if (builds == 1 && !changed) {
+          // Mutate the source after the initial build; ensure the mtime
+          // moves even on coarse-grained filesystems.
+          std::this_thread::sleep_for(std::chrono::milliseconds(20));
+          tp.write("a.synth",
+                   "let _ = render \"t\" 8000.0 "
+                   "(sample (saw 220.0) 0s 10ms) ;;");
+          fs::last_write_time(tp.dir / "a.synth",
+                              fs::file_time_type::clock::now() +
+                                  std::chrono::seconds(2));
+          changed = true;
+        }
+        return builds < 2;
+      },
+      10);
+  CHECK(builds == 2);
 }

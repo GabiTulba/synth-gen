@@ -49,7 +49,11 @@ struct RenderTarget {
 // collects all render targets. Runtime errors (bad file, channel mismatch,
 // invalid windows) become diagnostics attached to the declaring top-level
 // definition. Returns false if any evaluation error occurred.
+// `loadedFiles`, when non-null, receives the resolved paths of every audio
+// file read by load_mono/load_multi — they are build inputs the daemon
+// watches (§8.3).
 bool evaluateProgram(const Program& prog, std::vector<RenderTarget>& targets,
-                     DiagnosticBag& diags);
+                     DiagnosticBag& diags,
+                     std::vector<std::string>* loadedFiles = nullptr);
 
 }  // namespace synth

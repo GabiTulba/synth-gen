@@ -134,6 +134,7 @@ positional argument).
 | `examples/basic/` | Basic instrument samples: snare, kick, guitar pluck, piano note |
 | `examples/song/` | A full 16-bar stereo song across five modules — drums, synth pad, piano, guitar, and the arrangement that imports them (`outputs/song/song.wav`) |
 | `examples/advanced/` | Advanced effect demos: the rapid stereo Doppler fly-by built on FM modulation (`outputs/advanced/`) |
+| `examples/darksynth/` | A ~91 s darksynth track with two drops across six modules — drums, electric bass, dark pads, distorted guitar, riser/impact FX, and the arrangement (`outputs/darksynth/`) |
 | `outputs/` | Committed renders of the showcase projects (`outputs/primitives/`, `outputs/basic/`) — `.wav` to listen to and `render_vis` waveform `.svg`s to look at, without building anything; refresh with `scripts/render-outputs.sh` |
 
 ## Implementation status (design doc §12)

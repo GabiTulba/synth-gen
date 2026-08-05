@@ -1,0 +1,39 @@
+(* Dark pad: wide detuned saws per chord tone plus a quiet upper octave,
+   lowpassed under a slow envelope. Detune is a parameter so each stereo
+   side runs a different width. *)
+
+let wide ~freq:Scalar ~detune:Scalar : Scalar Signal =
+  (saw (freq - detune) + saw (freq + detune)) * 0.5
+;;
+
+let dark_chord ~root:Scalar ~third:Scalar ~fifth:Scalar ~detune:Scalar
+    : Scalar Signal =
+  let env : Scalar Signal =
+    adsr ~attack:600ms ~decay:400ms ~sustain:0.8 ~release:900ms
+         ~hold:3100ms in
+  let stack : Scalar Signal =
+    (wide ~freq:root ~detune:detune
+     + wide ~freq:third ~detune:detune
+     + wide ~freq:fifth ~detune:detune
+     + wide ~freq:(root * 2.0) ~detune:(detune * 2.0) * 0.4) * 0.27 in
+  (stack |> lowpass ~cutoff:850.0) * env
+;;
+
+(* Am -> F -> Dm -> E: four seconds per chord, one 16 s cycle. The E
+   major (G#) is the harmonic-minor turn that makes it dark. *)
+let cycle detune:Scalar : Scalar Signal =
+  let am : Scalar Sample =
+    dark_chord ~root:110.0 ~third:130.81 ~fifth:164.81 ~detune:detune
+      |> sample ~from:0s ~to:4s in
+  let f : Scalar Sample =
+    dark_chord ~root:87.31 ~third:110.0 ~fifth:130.81 ~detune:detune
+      |> sample ~from:0s ~to:4s in
+  let dm : Scalar Sample =
+    dark_chord ~root:73.42 ~third:87.31 ~fifth:110.0 ~detune:detune
+      |> sample ~from:0s ~to:4s in
+  let e : Scalar Sample =
+    dark_chord ~root:82.41 ~third:103.83 ~fifth:123.47 ~detune:detune
+      |> sample ~from:0s ~to:4s in
+  mix_all [am |> place ~at:0s; f |> place ~at:4s;
+           dm |> place ~at:8s; e |> place ~at:12s]
+;;

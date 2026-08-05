@@ -13,9 +13,10 @@ fi
 "$BUILD_DIR/synthc" build examples/primitives
 "$BUILD_DIR/synthc" build examples/basic
 "$BUILD_DIR/synthc" build examples/advanced
+"$BUILD_DIR/synthc" build examples/darksynth
 "$BUILD_DIR/synthc" build examples/song
 
-mkdir -p outputs/primitives outputs/basic outputs/advanced outputs/song
+mkdir -p outputs/primitives outputs/basic outputs/advanced outputs/song outputs/darksynth
 cp examples/primitives/build/artifacts/*.wav outputs/primitives/ 2>/dev/null || true
 cp examples/primitives/build/artifacts/*.svg outputs/primitives/ 2>/dev/null || true
 cp examples/basic/build/artifacts/*.wav outputs/basic/ 2>/dev/null || true
@@ -27,4 +28,7 @@ cp examples/advanced/build/artifacts/*.svg outputs/advanced/ 2>/dev/null || true
 cp examples/song/build/artifacts/song.wav outputs/song/ 2>/dev/null || true
 cp examples/song/build/artifacts/song-wave.svg outputs/song/ 2>/dev/null || true
 cp examples/song/build/artifacts/song-stems-wave.svg outputs/song/ 2>/dev/null || true
+# darksynth: master + overview only; the five stems (~15 MB each) build locally
+cp examples/darksynth/build/artifacts/darksynth.wav outputs/darksynth/ 2>/dev/null || true
+cp examples/darksynth/build/artifacts/darksynth-stems-wave.svg outputs/darksynth/ 2>/dev/null || true
 echo "outputs/ refreshed"

@@ -1,0 +1,20 @@
+(* Transition FX: the pre-drop riser (rising FM sweep + noise swell)
+   and the drop impact (reverberated sub boom). *)
+
+let riser : Scalar Sample =
+  let ramp : Scalar Signal =
+    adsr ~attack:3800ms ~decay:1ms ~sustain:1.0 ~release:200ms
+         ~hold:3800ms in
+  let sweep : Scalar Signal = fm ~carrier:70.0 ~modulator:(ramp * 620.0) in
+  let hiss : Scalar Signal = noise 2500.0 * 0.8 in
+  (sweep * 0.45 + hiss) * ramp * 0.8
+    |> sample ~from:0s ~to:4s
+;;
+
+let impact : Scalar Sample =
+  let boom : Scalar Signal =
+    fm ~carrier:38.0 ~modulator:(exp_decay 9.0 * 55.0) in
+  boom * exp_decay 2.2
+    |> reverb ~decay:900ms ~damping:0.5 ~mix:0.35
+    |> sample ~from:0s ~to:2500ms
+;;

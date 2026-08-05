@@ -1,0 +1,171 @@
+(* Darksynth: ~91 s at 120 BPM (beat 500ms, bar 2s), A minor with the
+   harmonic-minor E. Two drops.
+
+   0-16s   INTRO      pad + held bass, riser from 12s
+   16-32s  BUILD      four-floor kick, hats, bass eighths, snare roll,
+                      riser from 28s; everything cuts at 31.5s (the gap)
+   32-48s  DROP 1     full kit, driving bass, distorted guitar chugs+stabs
+   48-64s  BREAKDOWN  pad + held bass; kick re-enters 56s, riser from 60s
+   64-88s  DROP 2     extended: six chord segments of the full wall
+   88-91s  OUTRO      impact + final held bass under the pad tail *)
+
+import Drums
+import Bass
+import Pads
+import Guitar
+import Fx
+
+(* ---------- drums ---------- *)
+let kick_line : Scalar Signal =
+  mix_all [place_multi Drums.kick_hit (time_steps ~start:16s ~step:500ms ~count:31.0);
+           place_multi Drums.kick_hit (time_steps ~start:32s ~step:500ms ~count:32.0);
+           place_multi Drums.kick_hit (time_steps ~start:56s ~step:500ms ~count:15.0);
+           place_multi Drums.kick_hit (time_steps ~start:64s ~step:500ms ~count:48.0)]
+;;
+
+let snare_line : Scalar Signal =
+  mix_all [place_multi Drums.snare_hit (time_steps ~start:30s ~step:250ms ~count:6.0);
+           place_multi Drums.snare_hit (time_steps ~start:32500ms ~step:1s ~count:16.0);
+           place_multi Drums.snare_hit (time_steps ~start:62s ~step:250ms ~count:6.0);
+           place_multi Drums.snare_hit (time_steps ~start:64500ms ~step:1s ~count:24.0)]
+;;
+
+let hat_line : Scalar Signal =
+  mix_all [place_multi Drums.hat_hit (time_steps ~start:16s ~step:250ms ~count:62.0);
+           place_multi Drums.hat_hit (time_steps ~start:32250ms ~step:500ms ~count:32.0);
+           place_multi Drums.hat_hit (time_steps ~start:64250ms ~step:500ms ~count:47.0)]
+;;
+
+let drum_line : Scalar Signal =
+  kick_line + snare_line * 0.85 + hat_line * 0.4
+;;
+
+(* ---------- bass (roots: A1, F1, D2, E1) ---------- *)
+let eighths ~freq:Scalar ~start:Timestamp ~count:Scalar : Scalar Signal =
+  place_multi (Bass.pulse freq) (time_steps ~start:start ~step:250ms ~count:count)
+;;
+
+let bass_line : Scalar Signal =
+  let intro : Scalar Signal =
+    mix_all [place_multi (Bass.held 55.0) [0s; 2s];
+             place_multi (Bass.held 43.65) [4s; 6s];
+             place_multi (Bass.held 73.42) [8s; 10s];
+             place_multi (Bass.held 41.2) [12s; 14s]] in
+  let build : Scalar Signal =
+    mix_all [eighths ~freq:55.0 ~start:16s ~count:16.0;
+             eighths ~freq:43.65 ~start:20s ~count:16.0;
+             eighths ~freq:73.42 ~start:24s ~count:16.0;
+             eighths ~freq:41.2 ~start:28s ~count:14.0] in
+  let drop1 : Scalar Signal =
+    mix_all [eighths ~freq:55.0 ~start:32s ~count:16.0;
+             eighths ~freq:43.65 ~start:36s ~count:16.0;
+             eighths ~freq:73.42 ~start:40s ~count:16.0;
+             eighths ~freq:41.2 ~start:44s ~count:16.0] in
+  let breakdown : Scalar Signal =
+    mix_all [place_multi (Bass.held 55.0) [48s; 50s];
+             place_multi (Bass.held 43.65) [52s; 54s];
+             place_multi (Bass.held 73.42) [56s; 58s];
+             place_multi (Bass.held 41.2) [60s; 62s]] in
+  let drop2 : Scalar Signal =
+    mix_all [eighths ~freq:55.0 ~start:64s ~count:16.0;
+             eighths ~freq:43.65 ~start:68s ~count:16.0;
+             eighths ~freq:73.42 ~start:72s ~count:16.0;
+             eighths ~freq:41.2 ~start:76s ~count:16.0;
+             eighths ~freq:55.0 ~start:80s ~count:16.0;
+             eighths ~freq:43.65 ~start:84s ~count:16.0] in
+  let outro : Scalar Signal = Bass.held 55.0 |> place ~at:88s in
+  intro * 0.8 + build + drop1 + breakdown * 0.8 + drop2 + outro
+;;
+
+(* ---------- pads: the 16 s cycle tiles the whole song ---------- *)
+let pad_line detune:Scalar : Scalar Signal =
+  let one_cycle : Scalar Sample =
+    Pads.cycle detune |> sample ~from:0s ~to:16s in
+  place_multi one_cycle [0s; 16s; 32s; 48s; 64s; 80s]
+;;
+
+(* ---------- distorted guitar (drops only) ---------- *)
+let chugs ~freq:Scalar ~start:Timestamp ~count:Scalar : Scalar Signal =
+  place_multi (Guitar.chug freq) (time_steps ~start:start ~step:250ms ~count:count)
+;;
+
+let chug_part : Scalar Signal =
+  mix_all [chugs ~freq:110.0 ~start:32s ~count:12.0;
+           chugs ~freq:87.31 ~start:36s ~count:12.0;
+           chugs ~freq:73.42 ~start:40s ~count:12.0;
+           chugs ~freq:82.41 ~start:44s ~count:12.0;
+           chugs ~freq:110.0 ~start:64s ~count:12.0;
+           chugs ~freq:87.31 ~start:68s ~count:12.0;
+           chugs ~freq:73.42 ~start:72s ~count:12.0;
+           chugs ~freq:82.41 ~start:76s ~count:12.0;
+           chugs ~freq:110.0 ~start:80s ~count:12.0;
+           chugs ~freq:87.31 ~start:84s ~count:12.0]
+;;
+
+let stab_pair ~fifth:Scalar ~third:Scalar ~at1:Timestamp ~at2:Timestamp
+    : Scalar Signal =
+  (Guitar.stab fifth |> place ~at:at1)
+  + (Guitar.stab third |> place ~at:at2)
+;;
+
+let stab_part : Scalar Signal =
+  mix_all [stab_pair ~fifth:220.0 ~third:261.63 ~at1:35s ~at2:35500ms;
+           stab_pair ~fifth:174.61 ~third:220.0 ~at1:39s ~at2:39500ms;
+           stab_pair ~fifth:146.83 ~third:174.61 ~at1:43s ~at2:43500ms;
+           stab_pair ~fifth:164.81 ~third:207.65 ~at1:47s ~at2:47500ms;
+           stab_pair ~fifth:220.0 ~third:261.63 ~at1:67s ~at2:67500ms;
+           stab_pair ~fifth:174.61 ~third:220.0 ~at1:71s ~at2:71500ms;
+           stab_pair ~fifth:146.83 ~third:174.61 ~at1:75s ~at2:75500ms;
+           stab_pair ~fifth:164.81 ~third:207.65 ~at1:79s ~at2:79500ms;
+           stab_pair ~fifth:220.0 ~third:261.63 ~at1:83s ~at2:83500ms;
+           stab_pair ~fifth:174.61 ~third:220.0 ~at1:87s ~at2:87500ms]
+;;
+
+(* ---------- fx ---------- *)
+let fx_line : Scalar Signal =
+  place_multi Fx.riser [11500ms; 27500ms; 59500ms]
+  + place_multi Fx.impact [32s; 64s; 88s]
+;;
+
+(* ---------- stereo buses & master ---------- *)
+let drum_bus : Vector Signal =
+  channels [drum_line * 0.62; drum_line * 0.62] ;;
+let bass_bus : Vector Signal =
+  channels [bass_line * 0.55; bass_line * 0.55] ;;
+let pad_bus : Vector Signal =
+  channels [pad_line 0.8 * 0.38; pad_line 1.3 * 0.38] ;;
+let guitar_bus : Vector Signal =
+  channels [chug_part * 0.62 + stab_part * 0.38;
+            chug_part * 0.44 + stab_part * 0.55] ;;
+let fx_bus : Vector Signal =
+  channels [fx_line * 0.5; fx_line * 0.5] ;;
+
+let master : Vector Signal =
+  pad_bus + drum_bus + bass_bus + guitar_bus + fx_bus
+    |> soft_clip ~threshold:0.9
+;;
+
+let _ =
+  master |> sample ~from:0s ~to:91s
+         |> render ~name:"darksynth" ~rate:44100.0 ;;
+
+let _ =
+  render_stems ~name:"darksynth" ~rate:44100.0
+    ~stems:[("drums", drum_bus |> sample ~from:0s ~to:91s);
+            ("bass", bass_bus |> sample ~from:0s ~to:91s);
+            ("pads", pad_bus |> sample ~from:0s ~to:91s);
+            ("guitar", guitar_bus |> sample ~from:0s ~to:91s);
+            ("fx", fx_bus |> sample ~from:0s ~to:91s)]
+;;
+
+(* The overview image renders at a low rate: waveform lanes don't need
+   audio resolution, and it keeps the build quick. *)
+let _ =
+  render_vis_stems ~name:"darksynth-stems-wave" ~rate:8000.0
+    ~stems:[("master", master |> sample ~from:0s ~to:91s);
+            ("drums", drum_bus |> sample ~from:0s ~to:91s);
+            ("bass", bass_bus |> sample ~from:0s ~to:91s);
+            ("pads", pad_bus |> sample ~from:0s ~to:91s);
+            ("guitar", guitar_bus |> sample ~from:0s ~to:91s);
+            ("fx", fx_bus |> sample ~from:0s ~to:91s)]
+;;

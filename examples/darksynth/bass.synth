@@ -1,0 +1,22 @@
+(* Electric bass: a detuned saw pair through a dark lowpass and a soft
+   clipper. `pulse` is the driving eighth-note; `held` the long note for
+   intro/breakdown. *)
+
+let voice freq:Scalar : Scalar Signal =
+  (saw freq + saw (freq * 1.006)) * 0.5
+    |> lowpass ~cutoff:450.0
+    |> soft_clip ~threshold:0.7
+;;
+
+let pulse freq:Scalar : Scalar Sample =
+  voice freq
+    * (adsr ~attack:3ms ~decay:110ms ~sustain:0.5 ~release:60ms ~hold:170ms)
+    |> sample ~from:0s ~to:230ms
+;;
+
+let held freq:Scalar : Scalar Sample =
+  voice freq
+    * (adsr ~attack:8ms ~decay:400ms ~sustain:0.6 ~release:350ms
+            ~hold:1550ms)
+    |> sample ~from:0s ~to:1900ms
+;;

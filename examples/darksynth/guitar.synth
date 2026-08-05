@@ -1,0 +1,26 @@
+(* Distorted guitar: detuned saws plus a sub square driven hard into a
+   hard clipper. `chug` is the palm-muted eighth; `stab` the open,
+   brighter accent note. *)
+
+let dist freq:Scalar : Scalar Signal =
+  saw freq + saw (freq * 1.012) + square (freq * 0.5) * 0.5
+    |> lowpass ~cutoff:750.0
+    |> hard_clip ~threshold:0.45
+;;
+
+let chug freq:Scalar : Scalar Sample =
+  dist freq
+    * (adsr ~attack:2ms ~decay:70ms ~sustain:0.3 ~release:40ms ~hold:140ms)
+    |> sample ~from:0s ~to:180ms
+;;
+
+let stab freq:Scalar : Scalar Sample =
+  let tone : Scalar Signal =
+    saw freq + saw (freq * 1.015) + square (freq * 2.02) * 0.3
+      |> lowpass ~cutoff:1900.0
+      |> hard_clip ~threshold:0.5 in
+  tone
+    * (adsr ~attack:2ms ~decay:160ms ~sustain:0.45 ~release:180ms
+            ~hold:420ms)
+    |> sample ~from:0s ~to:600ms
+;;

@@ -230,6 +230,15 @@ follows (all easy to revisit):
   inside the primitive's per-render state — the *language-level* signal
   graph stays acyclic, exactly like the stateful one-pole filters.
   Parameters are validated at graph construction.
+- **List builders** — `list_init n:Scalar f:(Scalar -> 'a) : 'a list`
+  builds `[f 0.0; f 1.0; ...; f (n-1)]` (additive stacks, generated
+  patterns); `repeat n:Scalar x:'a : 'a list` builds n copies (not
+  expressible via `list_init` without lambdas); `time_steps
+  start:Timestamp step:Timestamp count:Scalar : Timestamp list` builds
+  arithmetic timestamp sequences — the natural feed for `place_multi`
+  (`place_multi kick (time_steps ~start:0s ~step:500ms ~count:8.0)`).
+  There is no Integer type in v1: counts and indices are Scalars,
+  validated at build time to be whole and non-negative.
 - **`place_multi sample:'a Sample ats:Timestamp list : 'a Signal`** —
   places one sample at every timestamp in the list and mixes the
   placements (overlaps sum): `place_multi kick [0s; 500ms; 1s]`. This is

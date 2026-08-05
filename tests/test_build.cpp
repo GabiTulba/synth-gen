@@ -722,3 +722,84 @@ let _ = render "out" 8000.0 (sample sum 0s 200ms) ;;
   for (double v : w.channels[0]) peak = std::max(peak, std::fabs(v));
   CHECK(peak > 0.3);  // all three tones present
 }
+
+TEST(build_list_init_harmonic_stack) {
+  // list_init driving additive synthesis: five harmonics of 110 Hz.
+  TempDir tp;
+  tp.write("p.synth", R"(
+let harmonic i:Scalar : Scalar Signal =
+  sine (110.0 * (i + 1.0)) * (1.0 / (i + 1.0)) ;;
+let stack : Scalar Signal = mix_all (list_init 5.0 harmonic) * 0.3 ;;
+let _ = stack |> sample ~from:0s ~to:200ms |> render ~name:"out" ~rate:8000.0 ;;
+)");
+  tp.write(".build", "project li\nsource p.synth\n");
+  BuildResult r = buildProject(tp.dir.string());
+  for (auto& d : r.diags.items) std::cerr << d.message << "\n";
+  CHECK(r.ok);
+  WavData w = readWav((tp.dir / "build" / "artifacts" / "out.wav").string());
+  // Goertzel power at each expected harmonic: all five present.
+  auto power = [&](double freq) {
+    double wc = 2.0 * M_PI * freq / 8000.0, c = 2.0 * std::cos(wc);
+    double s0 = 0, s1 = 0, s2 = 0;
+    for (int64_t i = 0; i < w.frames(); i++) {
+      s0 = w.channels[0][(size_t)i] + c * s1 - s2;
+      s2 = s1;
+      s1 = s0;
+    }
+    return std::sqrt(std::max(0.0, s1 * s1 + s2 * s2 - c * s1 * s2)) /
+           (double)w.frames();
+  };
+  for (double h : {110.0, 220.0, 330.0, 440.0, 550.0})
+    CHECK(power(h) > 0.005);
+  CHECK(power(660.0) < 0.001);  // sixth harmonic absent
+}
+
+TEST(build_time_steps_matches_manual_list) {
+  TempDir stepped, manual;
+  stepped.write("p.synth", R"(
+let hit : Scalar Sample = sine 660.0 * exp_decay 20.0 |> sample ~from:0s ~to:100ms ;;
+let _ = place_multi hit (time_steps ~start:0s ~step:150ms ~count:4.0)
+        |> sample ~from:0s ~to:600ms |> render ~name:"out" ~rate:8000.0 ;;
+)");
+  stepped.write(".build", "project ts\nsource p.synth\n");
+  manual.write("p.synth", R"(
+let hit : Scalar Sample = sine 660.0 * exp_decay 20.0 |> sample ~from:0s ~to:100ms ;;
+let _ = place_multi hit [0s; 150ms; 300ms; 450ms]
+        |> sample ~from:0s ~to:600ms |> render ~name:"out" ~rate:8000.0 ;;
+)");
+  manual.write(".build", "project tm\nsource p.synth\n");
+  CHECK(buildProject(stepped.dir.string()).ok);
+  CHECK(buildProject(manual.dir.string()).ok);
+  std::string a = slurp(stepped.dir / "build" / "artifacts" / "out.wav");
+  std::string b = slurp(manual.dir / "build" / "artifacts" / "out.wav");
+  CHECK(!a.empty());
+  CHECK(a == b);
+}
+
+TEST(build_repeat_and_count_validation) {
+  TempDir tp;
+  tp.write("p.synth", R"(
+let layers : Scalar Signal = mix_all (repeat 3.0 (sine 220.0)) * 0.2 ;;
+let _ = layers |> sample ~from:0s ~to:100ms |> render ~name:"out" ~rate:8000.0 ;;
+)");
+  tp.write(".build", "project rep\nsource p.synth\n");
+  BuildResult r = buildProject(tp.dir.string());
+  CHECK(r.ok);
+  // Three identical layers at 0.2 gain -> amplitude 0.6.
+  WavData w = readWav((tp.dir / "build" / "artifacts" / "out.wav").string());
+  double peak = 0;
+  for (double v : w.channels[0]) peak = std::max(peak, std::fabs(v));
+  CHECK_NEAR(peak, 0.6, 0.01);
+
+  // Fractional and negative counts are build errors.
+  TempDir bad;
+  bad.write("p.synth", R"(
+let xs : Scalar list = repeat 2.5 1.0 ;;
+let _ = mix_all (repeat 1.0 (sine 1.0)) |> sample ~from:0s ~to:10ms
+        |> render ~name:"x" ~rate:8000.0 ;;
+)");
+  bad.write(".build", "project badrep\nsource p.synth\n");
+  BuildResult rb = buildProject(bad.dir.string());
+  CHECK(!rb.ok);
+  CHECK(rb.diags.hasErrors());
+}

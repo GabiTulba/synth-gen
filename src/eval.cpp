@@ -1,5 +1,6 @@
 #include "eval.hpp"
 
+#include <cmath>
 #include <filesystem>
 #include <map>
 #include <stdexcept>
@@ -192,6 +193,20 @@ class Interp {
   // --- Primitive implementations ----------------------------------------
 
   static double scalarArg(const Value& v) { return std::get<ScalarV>(v.v).v; }
+
+  // Counts are Scalars in the language; here they must be whole,
+  // non-negative, and sane (build-time validation).
+  static int64_t wholeCount(double v, const char* prim) {
+    double rounded = std::round(v);
+    if (std::fabs(v - rounded) > 1e-9 || rounded < 0)
+      throw EvalError(std::string(prim) +
+                      ": count must be a whole non-negative number (got " +
+                      std::to_string(v) + ")");
+    if (rounded > 1e6)
+      throw EvalError(std::string(prim) + ": count " + std::to_string(v) +
+                      " is unreasonably large");
+    return (int64_t)rounded;
+  }
   static double timeArg(const Value& v) { return std::get<TimeV>(v.v).seconds; }
   static const std::string& strArg(const Value& v) {
     return std::get<StringV>(v.v).s;
@@ -315,6 +330,28 @@ class Interp {
         for (auto& x : std::get<ListV>(args[2].v).items)
           acc = apply(f, {acc, x}, mod);
         return acc;
+      }
+      case PrimId::ListInit: {
+        int64_t n = wholeCount(scalarArg(args[0]), "list_init");
+        ListV out;
+        for (int64_t i = 0; i < n; i++)
+          out.items.push_back(apply(args[1], {Value{ScalarV{(double)i}}}, mod));
+        return Value{std::move(out)};
+      }
+      case PrimId::Repeat: {
+        int64_t n = wholeCount(scalarArg(args[0]), "repeat");
+        ListV out;
+        for (int64_t i = 0; i < n; i++) out.items.push_back(args[1]);
+        return Value{std::move(out)};
+      }
+      case PrimId::TimeSteps: {
+        double start = timeArg(args[0]);
+        double step = timeArg(args[1]);
+        int64_t n = wholeCount(scalarArg(args[2]), "time_steps");
+        ListV out;
+        for (int64_t i = 0; i < n; i++)
+          out.items.push_back(Value{TimeV{start + step * (double)i}});
+        return Value{std::move(out)};
       }
     }
     throw EvalError("internal error: unimplemented primitive");

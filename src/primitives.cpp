@@ -96,6 +96,17 @@ const std::vector<PrimSig>& primitives() {
     add(PrimId::Map, "map", {"f", "xs"}, {tFun({a}, b), tList(a)}, tList(b));
     add(PrimId::Fold, "fold", {"f", "init", "xs"},
         {tFun({a, b}, a), a, tList(b)}, a);
+    // List builders. Counts and indices are Scalars (the language's one
+    // numeric type); counts must be whole and non-negative, checked at
+    // build time. list_init builds [f 0.0; f 1.0; ...; f (n-1)]; repeat
+    // builds n copies of a value; time_steps builds the arithmetic
+    // Timestamp sequence [start; start+step; ...] of `count` entries -
+    // the rhythm-pattern maker for place_multi.
+    add(PrimId::ListInit, "list_init", {"n", "f"},
+        {tScalar(), tFun({tScalar()}, a)}, tList(a));
+    add(PrimId::Repeat, "repeat", {"n", "x"}, {tScalar(), a}, tList(a));
+    add(PrimId::TimeSteps, "time_steps", {"start", "step", "count"},
+        {tTimestamp(), tTimestamp(), tScalar()}, tList(tTimestamp()));
     return p;
   }();
   return prims;

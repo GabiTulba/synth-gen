@@ -214,10 +214,16 @@ val render_vis: name:String -> rate:Scalar -> sample:'a Sample -> unit  (* wavef
 val load_mono : path:String -> Scalar Signal
 val load_multi: path:String -> Vector Signal
 
-(* list combinators *)
+(* list combinators & builders *)
 val map       : f:('a -> 'b) -> xs:'a list -> 'b list
 val fold      : f:('a -> 'b -> 'a) -> init:'a -> xs:'b list -> 'a
+val list_init : n:Scalar -> f:(Scalar -> 'a) -> 'a list   (* [f 0.0; ...; f (n-1)] *)
+val repeat    : n:Scalar -> x:'a -> 'a list
+val time_steps: start:Timestamp -> step:Timestamp -> count:Scalar -> Timestamp list
 ```
+
+Counts and indices are Scalars (the language's single numeric type);
+counts must be whole and non-negative, validated at build time.
 
 Semantics details for the doc's open points (also in the README):
 `adsr` sustains until `hold` then releases; `fm` integrates

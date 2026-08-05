@@ -504,3 +504,44 @@ TEST(checker_pipe_type_error_propagates) {
   checkProject({f}, diags);
   CHECK(diags.hasErrors());
 }
+
+TEST(checker_list_builders) {
+  TempProject tp;
+  std::string f = tp.write("ok.synth", R"(
+let harmonic i:Scalar : Scalar Signal = sine (110.0 * (i + 1.0)) ;;
+let stack : Scalar Signal list = list_init 5.0 harmonic ;;
+let fives : Scalar list = repeat 3.0 5.0 ;;
+let beats : Timestamp list = time_steps ~start:0s ~step:250ms ~count:8.0 ;;
+let sigs : Scalar Signal list = list_init ~n:4.0 ~f:sine ;;
+)");
+  DiagnosticBag diags;
+  Program prog = checkProject({f}, diags);
+  for (auto& d : diags.items)
+    std::cerr << renderDiagnostic(d, prog.modules.empty()
+                                         ? std::string{}
+                                         : prog.modules[0].parsed.source);
+  CHECK(!diags.hasErrors());
+  CHECK(typeEquals(prog.modules[0].defTypes.at("stack"),
+                   tList(tSignal(tScalar()))));
+  CHECK(typeEquals(prog.modules[0].defTypes.at("beats"),
+                   tList(tTimestamp())));
+}
+
+TEST(checker_list_builder_type_errors) {
+  TempProject tp;
+  // f must take a Scalar.
+  std::string f = tp.write("bad.synth", R"(
+let g t:Timestamp : Scalar Signal = sine 440.0 ;;
+let xs : Scalar Signal list = list_init 3.0 g ;;
+)");
+  DiagnosticBag d1;
+  checkProject({f}, d1);
+  CHECK(d1.hasErrors());
+  // time_steps count is a Scalar, not a Timestamp.
+  std::string g = tp.write(
+      "bad2.synth",
+      "let xs : Timestamp list = time_steps 0s 250ms 1s ;;");
+  DiagnosticBag d2;
+  checkProject({g}, d2);
+  CHECK(d2.hasErrors());
+}

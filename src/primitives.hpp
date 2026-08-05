@@ -34,6 +34,9 @@ enum class PrimId {
   LoadMulti,
   Map,
   Fold,
+  ListInit,
+  Repeat,
+  TimeSteps,
 };
 
 struct PrimSig {

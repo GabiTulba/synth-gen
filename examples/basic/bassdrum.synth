@@ -4,13 +4,14 @@
    plus a short, dark noise layer riding only on the attack. soft_clip
    rounds the sum off gently. *)
 
-let env : Scalar Signal =
-  adsr ~attack:25ms ~decay:60ms ~sustain:0.5 ~release:50ms ~hold:200ms ;;
-let tone : Scalar Signal = sine 55.0 * env ;;
-let attack_noise : Scalar Signal =
-  (noise 700.0 |> lowpass ~cutoff:900.0) * exp_decay 45.0 * 0.18 ;;
 let bass_drum : Scalar Signal =
-  tone * 0.7 + attack_noise |> soft_clip ~threshold:0.8 ;;
+  let env : Scalar Signal =
+    adsr ~attack:25ms ~decay:60ms ~sustain:0.5 ~release:50ms ~hold:200ms in
+  let tone : Scalar Signal = sine 55.0 * env in
+  let attack_noise : Scalar Signal =
+    (noise 700.0 |> lowpass ~cutoff:900.0) * exp_decay 45.0 * 0.18 in
+  tone * 0.7 + attack_noise |> soft_clip ~threshold:0.8
+;;
 
 let _ =
   bass_drum |> sample ~from:0s ~to:300ms

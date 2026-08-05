@@ -109,9 +109,9 @@ let _ =
     |> sample ~from:0s ~to:1500ms
     |> render ~name:"list_init" ~rate:48000.0 ;;
 
-let tick : Scalar Sample =
-  sine 880.0 * exp_decay 25.0 |> sample ~from:0s ~to:120ms ;;
 let _ =
+  let tick : Scalar Sample =
+    sine 880.0 * exp_decay 25.0 |> sample ~from:0s ~to:120ms in
   place_multi tick (time_steps ~start:0s ~step:250ms ~count:6.0)
     |> sample ~from:0s ~to:1600ms
     |> render ~name:"time_steps" ~rate:48000.0 ;;

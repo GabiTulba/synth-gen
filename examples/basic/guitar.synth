@@ -5,17 +5,17 @@ let harm ~freq:Scalar ~amp:Scalar ~decay:Scalar : Scalar Signal =
   sine freq * exp_decay decay * amp
 ;;
 
-let body : Scalar Signal =
-  mix_all [harm ~freq:196.0 ~amp:1.0 ~decay:2.6;
-           harm ~freq:392.0 ~amp:0.55 ~decay:3.4;
-           harm ~freq:588.0 ~amp:0.30 ~decay:4.4;
-           harm ~freq:784.0 ~amp:0.18 ~decay:5.6;
-           harm ~freq:980.0 ~amp:0.10 ~decay:6.8;
-           harm ~freq:1176.0 ~amp:0.06 ~decay:8.0]
+let guitar : Scalar Signal =
+  let body : Scalar Signal =
+    mix_all [harm ~freq:196.0 ~amp:1.0 ~decay:2.6;
+             harm ~freq:392.0 ~amp:0.55 ~decay:3.4;
+             harm ~freq:588.0 ~amp:0.30 ~decay:4.4;
+             harm ~freq:784.0 ~amp:0.18 ~decay:5.6;
+             harm ~freq:980.0 ~amp:0.10 ~decay:6.8;
+             harm ~freq:1176.0 ~amp:0.06 ~decay:8.0] in
+  let pick : Scalar Signal = noise 3000.0 * exp_decay 70.0 * 0.15 in
+  body * 0.55 + pick
 ;;
-
-let pick : Scalar Signal = noise 3000.0 * exp_decay 70.0 * 0.15 ;;
-let guitar : Scalar Signal = body * 0.55 + pick ;;
 
 let _ =
   guitar |> sample ~from:0s ~to:2s

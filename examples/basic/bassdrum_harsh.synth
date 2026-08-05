@@ -1,21 +1,20 @@
-(* Harsh bass drum: same 250 ms ADSR skeleton and attack-noise layer as
-   the soft bass drum (bassdrum.synth), but the tone is FM-modulated by a
-   square wave that acts as the pitch switch: the square's half-period
-   spans half the note, so the oscillator runs high (125 Hz) through the
-   attack/decay side and drops low (55 Hz) for the sustain/release side.
-   hard_clip flat-tops the sum for grit instead of soft_clip's rounding. *)
+(* Harsh bass drum: same 250 ms skeleton and attack-noise layer as the
+   soft bass drum (bassdrum.synth), but snare-like - short sustain
+   plateau (hold ends at 120 ms), long 130 ms release, noise laying
+   over the attack *and* the decay - and harsher: the tone is
+   FM-modulated by a square wave acting as the pitch switch (125 Hz
+   through the attack/decay side, dropping to 55 Hz for the
+   sustain/release side), then hard_clip flat-tops the sum for grit. *)
 
-(* Snare-like shape: the sustain plateau is short (hold ends at 120 ms)
-   and the release is long (130 ms), and the noise layer decays slowly
-   enough to lay over the attack *and* the decay. *)
-let env : Scalar Signal =
-  adsr ~attack:25ms ~decay:60ms ~sustain:0.5 ~release:130ms ~hold:120ms ;;
-let pitch_switch : Scalar Signal = square 4.0 * 35.0 ;;
-let tone : Scalar Signal = (fm ~carrier:90.0 ~modulator:pitch_switch) * env ;;
-let attack_noise : Scalar Signal =
-  (noise 700.0 |> lowpass ~cutoff:900.0) * exp_decay 18.0 * 0.18 ;;
 let bass_drum_harsh : Scalar Signal =
-  tone * 0.9 + attack_noise |> hard_clip ~threshold:0.55 ;;
+  let env : Scalar Signal =
+    adsr ~attack:25ms ~decay:60ms ~sustain:0.5 ~release:130ms ~hold:120ms in
+  let pitch_switch : Scalar Signal = square 4.0 * 35.0 in
+  let tone : Scalar Signal = (fm ~carrier:90.0 ~modulator:pitch_switch) * env in
+  let attack_noise : Scalar Signal =
+    (noise 700.0 |> lowpass ~cutoff:900.0) * exp_decay 18.0 * 0.18 in
+  tone * 0.9 + attack_noise |> hard_clip ~threshold:0.55
+;;
 
 let _ =
   bass_drum_harsh |> sample ~from:0s ~to:300ms

@@ -14,11 +14,12 @@ let strike root:Scalar : Scalar Signal =
            partial ~freq:(root * 5.016) ~amp:0.07 ~decay:3.7]
 ;;
 
-let env : Scalar Signal =
-  adsr ~attack:4ms ~decay:900ms ~sustain:0.12 ~release:600ms ~hold:1200ms ;;
-let note : Scalar Signal = (strike 261.63 + strike 261.9 * 0.35) * env ;;
 let piano : Scalar Signal =
-  note * 0.5 |> reverb ~decay:500ms ~damping:0.5 ~mix:0.2 ;;
+  let env : Scalar Signal =
+    adsr ~attack:4ms ~decay:900ms ~sustain:0.12 ~release:600ms ~hold:1200ms in
+  let note : Scalar Signal = (strike 261.63 + strike 261.9 * 0.35) * env in
+  note * 0.5 |> reverb ~decay:500ms ~damping:0.5 ~mix:0.2
+;;
 
 let _ =
   piano |> sample ~from:0s ~to:2500ms

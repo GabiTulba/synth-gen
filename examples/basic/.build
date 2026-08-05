@@ -3,6 +3,7 @@ project basic-samples
 source bassdrum.synth
 source bassdrum_harsh.synth
 source bitonal.synth
+source doppler.synth
 source snare.synth
 source kick.synth
 source guitar.synth

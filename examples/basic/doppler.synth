@@ -1,0 +1,49 @@
+(* Doppler fly-by: a 220 Hz + 440 Hz saw pair passes the listener over
+   10 seconds, left to right.
+
+   One control signal drives everything: `shape` is a cosine half-period
+   (+1 at the start, -1 at the end, steepest mid-pass) made by giving pm
+   a constant pi/2 phase at 0.05 Hz. From it:
+   - pitch: each harmonic is an fm partial whose deviation is
+     proportional to its own frequency (real Doppler shifts are
+     relative), so the whole saw sweeps ~+5.5% -> -5.5% coherently;
+   - loudness: 1 - shape^2 = sin^2, swelling to a peak at the pass;
+   - stereo: pan gains (shape+1)/2 left and (1-shape)/2 right move the
+     image across the field. *)
+
+let shape : Scalar Signal =
+  pm ~carrier:0.05 ~modulator:(exp_decay 0.0 * 1.5707963) ;;
+
+(* A saw as a stack of six Doppler-swept FM partials: harmonic n at
+   base*n with amplitude 1/n. list_init drives the stack; currying ~base
+   turns the two-argument builder into the Scalar -> Scalar Signal
+   generator it needs. *)
+let partial ~base:Scalar ~i:Scalar : Scalar Signal =
+  let n : Scalar = i + 1.0 in
+  (fm ~carrier:(base * n) ~modulator:(shape * (base * n * 0.055)))
+    * (1.0 / n)
+;;
+
+let swept_saw base:Scalar : Scalar Signal =
+  mix_all (list_init ~n:6.0 ~f:(partial ~base:base)) * 0.4
+;;
+
+let source : Scalar Signal =
+  let tone : Scalar Signal = swept_saw 220.0 * 0.55 + swept_saw 440.0 * 0.45 in
+  let proximity : Scalar Signal =
+    (exp_decay 0.0 - shape * shape) * 0.85 + 0.15 in
+  tone * proximity
+;;
+
+let doppler : Vector Signal =
+  let left : Scalar Signal = source * ((shape + 1.0) * 0.5) in
+  let right : Scalar Signal = source * ((1.0 - shape) * 0.5) in
+  channels [left; right] * 1.5
+;;
+
+let _ =
+  doppler |> sample ~from:0s ~to:10s
+          |> render ~name:"doppler" ~rate:48000.0 ;;
+let _ =
+  doppler |> sample ~from:0s ~to:10s
+          |> render_vis ~name:"doppler-wave" ~rate:48000.0 ;;

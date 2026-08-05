@@ -111,8 +111,9 @@ resolves `a.synth` in the same directory).
 
 ## Implementation status (design doc §12)
 
-- [x] **Epic 0** — Repo structure, build system, C++ toolchain. (0.2, the
-  standalone grammar/type-rules spec document, still pending.)
+- [x] **Epic 0** — Repo structure, build system, C++ toolchain, and the
+  language specification document
+  ([docs/language-spec.md](docs/language-spec.md)).
 - [x] **Epic 1** — Lexer, parser, AST, source spans, module resolution,
   parse diagnostics.
 - [x] **Epic 2** — Type checker: primitive/parameterized types, annotated

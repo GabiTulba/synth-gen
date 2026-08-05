@@ -649,3 +649,14 @@ let _ = render_stems ~name:"mix" ~rate:8000.0
   checkProject({g}, d2);
   CHECK(d2.hasErrors());
 }
+
+TEST(checker_render_vis_stems) {
+  TempProject tp;
+  std::string f = tp.write("ok.synth", R"(
+let s : Scalar Sample = sine 440.0 |> sample ~from:0s ~to:100ms ;;
+let _ = render_vis_stems ~name:"w" ~rate:8000.0 ~stems:[("a", s); ("b", s)] ;;
+)");
+  DiagnosticBag diags;
+  checkProject({f}, diags);
+  CHECK(!diags.hasErrors());
+}

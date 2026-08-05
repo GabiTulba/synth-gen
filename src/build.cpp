@@ -273,7 +273,7 @@ BuildResult buildProject(const std::string& projectDir, BuildCache* cache) {
   r.targets.resize(targets.size());
   std::vector<size_t> pending;
   auto extensionFor = [](const RenderTarget& t) {
-    return t.kind == RenderTarget::Kind::Visual ? ".svg" : ".wav";
+    return t.kind == RenderTarget::Kind::Audio ? ".wav" : ".svg";
   };
   for (size_t i = 0; i < targets.size(); i++) {
     const RenderTarget& t = targets[i];
@@ -304,27 +304,40 @@ BuildResult buildProject(const std::string& projectDir, BuildCache* cache) {
         const RenderTarget& t = targets[i];
         TargetInfo info;
         info.name = t.name;
-        info.kind = t.kind == RenderTarget::Kind::Visual ? "visual" : "audio";
+        info.kind = t.kind == RenderTarget::Kind::Audio ? "audio" : "visual";
         info.rate = t.rate;
         try {
-          Rendered rendered =
-              renderWindow(t.sample.sig, t.sample.from, t.sample.to, t.rate);
           std::string fileName = t.name + extensionFor(t);
           fs::path artifactPath = artifactDir / fileName;
-          if (t.kind == RenderTarget::Kind::Visual) {
+          if (t.kind == RenderTarget::Kind::VisualStems) {
+            std::vector<std::pair<std::string, Rendered>> lanes;
+            for (auto& [label, s] : t.stems)
+              lanes.emplace_back(label,
+                                 renderWindow(s.sig, s.from, s.to, t.rate));
             std::ofstream out(artifactPath, std::ios::trunc);
             if (!out) throw std::runtime_error("cannot write artifact file");
-            out << renderWaveformSvg(t.name, rendered, t.rate);
+            out << renderStackedWaveformSvg(t.name, lanes, t.rate);
+            for (auto& [label, r] : lanes)
+              info.frames = std::max(info.frames, r.frames);
+            info.channelCount = lanes.empty() ? 0 : lanes[0].second.channels;
           } else {
-            writeWav(artifactPath.string(), t.rate, rendered.channels,
-                     rendered.interleaved);
+            Rendered rendered =
+                renderWindow(t.sample.sig, t.sample.from, t.sample.to, t.rate);
+            if (t.kind == RenderTarget::Kind::Visual) {
+              std::ofstream out(artifactPath, std::ios::trunc);
+              if (!out) throw std::runtime_error("cannot write artifact file");
+              out << renderWaveformSvg(t.name, rendered, t.rate);
+            } else {
+              writeWav(artifactPath.string(), t.rate, rendered.channels,
+                       rendered.interleaved);
+            }
+            info.channelCount = rendered.channels;
+            info.frames = rendered.frames;
           }
           info.artifact =
               (fs::path("build") / "artifacts" / fileName).generic_string();
-          info.channelCount = rendered.channels;
-          info.frames = rendered.frames;
           info.durationSeconds =
-              t.rate > 0 ? (double)rendered.frames / t.rate : 0;
+              t.rate > 0 ? (double)info.frames / t.rate : 0;
           info.ok = true;
         } catch (const std::exception& e) {
           info.error = e.what();

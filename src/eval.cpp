@@ -301,6 +301,31 @@ class Interp {
           placed.push_back(makePlace(s.sig, s.from, s.to, timeArg(t)));
         return Value{makeMix(std::move(placed))};
       }
+      case PrimId::RenderVisStems: {
+        const std::string& name = strArg(args[0]);
+        double rate = scalarArg(args[1]);
+        if (name.empty())
+          throw EvalError("render_vis_stems: empty artifact name");
+        if (rate <= 0)
+          throw EvalError("render_vis_stems: sample rate must be positive");
+        RenderTarget t;
+        t.kind = RenderTarget::Kind::VisualStems;
+        t.name = name;
+        t.rate = rate;
+        for (auto& item : std::get<ListV>(args[2].v).items) {
+          const TupleV& stem = std::get<TupleV>(item.v);
+          const std::string& label = std::get<StringV>(stem.items[0].v).s;
+          if (label.empty())
+            throw EvalError("render_vis_stems: empty lane label");
+          t.stems.emplace_back(label, std::get<SampleV>(stem.items[1].v));
+        }
+        t.file = mod.parsed.path;
+        t.span = currentDef_ ? currentDef_->span : Span{};
+        t.declModule = currentModule_;
+        t.declDef = currentDef_;
+        targets_.push_back(std::move(t));
+        return Value{UnitV{}};
+      }
       case PrimId::RenderStems: {
         const std::string& base = strArg(args[0]);
         double rate = scalarArg(args[1]);

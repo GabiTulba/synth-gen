@@ -62,3 +62,13 @@ let _ =
             ("piano", keys_bus |> sample ~from:0s ~to:16500ms);
             ("guitar", strings_bus |> sample ~from:0s ~to:16500ms)]
 ;;
+
+(* One image: the master over every composing bus, on a shared time axis. *)
+let _ =
+  render_vis_stems ~name:"song-stems-wave" ~rate:48000.0
+    ~stems:[("master", master |> sample ~from:0s ~to:16500ms);
+            ("drums", drum_bus |> sample ~from:0s ~to:16500ms);
+            ("pad", pad_bus |> sample ~from:0s ~to:16500ms);
+            ("piano", keys_bus |> sample ~from:0s ~to:16500ms);
+            ("guitar", strings_bus |> sample ~from:0s ~to:16500ms)]
+;;

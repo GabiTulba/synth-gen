@@ -93,6 +93,12 @@ const std::vector<PrimSig>& primitives() {
     add(PrimId::RenderStems, "render_stems", {"name", "rate", "stems"},
         {tString(), tScalar(), tList(tTuple({tString(), tSample(a)}))},
         tUnit());
+    // Stacked waveform image: ONE svg artifact with a labeled lane per
+    // (label, sample) entry, sharing a common time axis - e.g. a song's
+    // master over its composing buses.
+    add(PrimId::RenderVisStems, "render_vis_stems", {"name", "rate", "stems"},
+        {tString(), tScalar(), tList(tTuple({tString(), tSample(a)}))},
+        tUnit());
     // File import
     add(PrimId::LoadMono, "load_mono", {"path"}, {tString()},
         tSignal(tScalar()));

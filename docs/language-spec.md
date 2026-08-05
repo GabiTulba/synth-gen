@@ -231,6 +231,9 @@ val render_vis: name:String -> rate:Scalar -> sample:'a Sample -> unit  (* wavef
 val render_stems : name:String -> rate:Scalar
                 -> stems:(String, 'a Sample) list -> unit
   (* one audio target per stem, named "<name>-<label>" *)
+val render_vis_stems : name:String -> rate:Scalar
+                    -> stems:(String, 'a Sample) list -> unit
+  (* ONE svg artifact: a labeled waveform lane per stem, shared time axis *)
 
 (* file import *)
 val load_mono : path:String -> Scalar Signal

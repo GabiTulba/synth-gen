@@ -46,11 +46,13 @@ struct Value {
 // A build target collected from a `render` call (§5.2): the name is the
 // stable artifact identifier, unique project-wide.
 struct RenderTarget {
-  enum class Kind { Audio, Visual };
+  enum class Kind { Audio, Visual, VisualStems };
   Kind kind = Kind::Audio;
   std::string name;
   double rate = 0;
-  SampleV sample;
+  SampleV sample;  // Audio / Visual
+  // VisualStems: labeled samples drawn as stacked lanes in one image.
+  std::vector<std::pair<std::string, SampleV>> stems;
   std::string file;  // source file that declared it (for diagnostics)
   Span span{};
   // The top-level definition whose evaluation declared this target -

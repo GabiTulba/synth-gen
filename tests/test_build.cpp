@@ -913,3 +913,35 @@ let _ = render_stems ~name:"mix" ~rate:8000.0
   CHECK(!r.ok);
   CHECK(r.diags.hasErrors());
 }
+
+TEST(build_render_vis_stems_single_stacked_svg) {
+  TempDir tp;
+  tp.write("p.synth", R"(
+let a : Scalar Sample = sine 440.0 * 0.5 |> sample ~from:0s ~to:200ms ;;
+let b : Scalar Sample = saw 110.0 * 0.5 |> sample ~from:0s ~to:100ms ;;
+let mix : Scalar Sample = sine 440.0 * 0.25 + saw 110.0 * 0.25
+                          |> sample ~from:0s ~to:200ms ;;
+let _ = render_vis_stems ~name:"stack" ~rate:8000.0
+                         ~stems:[("mix", mix); ("lead", a); ("bass", b)] ;;
+)");
+  tp.write(".build", "project vs\nsource p.synth\n");
+  BuildResult r = buildProject(tp.dir.string());
+  for (auto& d : r.diags.items) std::cerr << d.message << "\n";
+  CHECK(r.ok);
+  CHECK(r.targets.size() == 1);  // ONE artifact, not one per lane
+  CHECK(r.targets[0].kind == "visual");
+  CHECK(r.targets[0].artifact == "build/artifacts/stack.svg");
+  CHECK(r.targets[0].frames == 1600);  // the longest lane (200ms @ 8k)
+
+  std::string svg = slurp(tp.dir / r.targets[0].artifact);
+  CHECK(svg.find("<svg") == 0);
+  for (const char* label : {"mix", "lead", "bass"})
+    CHECK(svg.find(label) != std::string::npos);
+  CHECK(svg.find("3 lanes") != std::string::npos);
+  // One waveform path per lane.
+  size_t paths = 0;
+  for (size_t pos = svg.find("<path"); pos != std::string::npos;
+       pos = svg.find("<path", pos + 1))
+    paths++;
+  CHECK(paths == 3);
+}

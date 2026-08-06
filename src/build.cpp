@@ -434,6 +434,18 @@ BuildResult buildProject(const std::string& projectDir,
     }
   }
 
+  // Sample-window cache for the whole build: shared by all targets, and
+  // - when the caller (the daemon) supplies one - by successive builds.
+  // beginBuild starts a generation and prunes entries the previous build
+  // did not place.
+  std::shared_ptr<SampleCache> localSampleCache;
+  SampleCache* sampleCache = options.sampleCache;
+  if (!sampleCache) {
+    localSampleCache = makeSampleCache();
+    sampleCache = localSampleCache.get();
+  }
+  sampleCacheBeginBuild(*sampleCache);
+
   std::vector<std::string> renderErrors(targets.size());
   {
     std::mutex schedMutex;
@@ -524,7 +536,8 @@ BuildResult buildProject(const std::string& projectDir,
               auto laneStart = std::chrono::steady_clock::now();
               laneR[x] =
                   renderWindow(s.sig, s.from, s.to, t.rate, 0,
-                               lanePre.empty() ? nullptr : &lanePre);
+                               lanePre.empty() ? nullptr : &lanePre,
+                               sampleCache);
               double laneSecs = BuildLog::secondsSince(laneStart);
               renderSecs += laneSecs;
               log.line("[worker " + std::to_string(workerId) + "] '" +
@@ -551,7 +564,7 @@ BuildResult buildProject(const std::string& projectDir,
             auto renderStart = std::chrono::steady_clock::now();
             auto rendered = std::make_shared<Rendered>(
                 renderWindow(t.sample.sig, t.sample.from, t.sample.to, t.rate,
-                             0, pre.empty() ? nullptr : &pre));
+                             0, pre.empty() ? nullptr : &pre, sampleCache));
             renderSecs = BuildLog::secondsSince(renderStart);
             auto writeStart = std::chrono::steady_clock::now();
             if (t.kind == RenderTarget::Kind::Visual) {
@@ -620,6 +633,13 @@ BuildResult buildProject(const std::string& projectDir,
     if (!pending.empty()) worker(0);
     for (auto& th : pool) th.join();
   }
+  if (!pending.empty()) {
+    SampleCacheStats scs = sampleCacheStats(*sampleCache);
+    log.line("samples: " + std::to_string(scs.entries) + " window(s) cached (" +
+             std::to_string(scs.bytes / 1024) + " KiB), " +
+             std::to_string(scs.rendered) + " rendered this build, " +
+             std::to_string(scs.reusedPrior) + " reused from previous builds");
+  }
 
   bool allOk = true;
   for (size_t i = 0; i < targets.size(); i++) {
@@ -685,10 +705,16 @@ void watchProject(const std::string& projectDir,
                   const std::function<bool()>& keepRunning, int pollMillis,
                   std::function<void(const std::string&)> log) {
   // The daemon owns the incremental cache: rebuilds triggered by an edit
-  // only re-render targets whose dependency closure actually changed.
+  // only re-render targets whose dependency closure actually changed. It
+  // also owns a cross-build sample-window cache keyed by structural
+  // content hash, so even when a target IS dirty (an arrangement edit),
+  // the samples it places re-render only if their own definitions
+  // changed.
   BuildCache cache;
+  std::shared_ptr<SampleCache> sampleCache = makeSampleCache();
   BuildOptions options;
   options.cache = &cache;
+  options.sampleCache = sampleCache.get();
   options.log = log;
   BuildResult r = buildProject(projectDir, options);
   onBuild(r);

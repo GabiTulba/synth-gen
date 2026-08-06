@@ -17,6 +17,24 @@ namespace synth {
 namespace {
 constexpr double kPi = 3.14159265358979323846;
 
+// FNV-1a over structured values, for SigNode::contentHash.
+constexpr uint64_t kHashOffset = 1469598103934665603ull;
+constexpr uint64_t kHashPrime = 1099511628211ull;
+inline uint64_t hashMix(uint64_t h, uint64_t v) {
+  for (int i = 0; i < 8; i++) {
+    h ^= (v >> (i * 8)) & 0xff;
+    h *= kHashPrime;
+  }
+  return h;
+}
+inline uint64_t hashDouble(uint64_t h, double d) {
+  uint64_t bits;
+  std::memcpy(&bits, &d, sizeof bits);
+  return hashMix(h, bits);
+}
+// Per-node-type tag; parameters and child hashes mix in after it.
+inline uint64_t hashTag(uint64_t tag) { return hashMix(kHashOffset, tag); }
+
 int mergeChannels(int a, int b, const char* what) {
   if (a == -1) return b;
   if (b == -1) return a;
@@ -125,7 +143,9 @@ const double* SigNode::renderBlock(RenderCtx& ctx, int64_t start, int frames,
 struct OscNode final : SigNode {
   OscKind kind;
   double freq;
-  OscNode(OscKind k, double f) : kind(k), freq(f) {}
+  OscNode(OscKind k, double f) : kind(k), freq(f) {
+    contentHash = hashDouble(hashMix(hashTag(1), (uint64_t)kind), freq);
+  }
   int channels() const override { return 1; }
   bool computeBlock(RenderCtx& ctx, NodeState&, int64_t start, int frames,
                     double* out) const override {
@@ -159,6 +179,8 @@ struct FmNode final : SigNode {
     int mc = modulator->channels();
     if (mc != 1 && mc != -1)
       throw EngineError("fm: the modulator must be a mono signal");
+    contentHash =
+        hashMix(hashDouble(hashTag(2), carrier), modulator->contentHash);
   }
   int channels() const override { return 1; }
   bool stateful() const override { return true; }
@@ -190,6 +212,8 @@ struct PmNode final : SigNode {
     int mc = modulator->channels();
     if (mc != 1 && mc != -1)
       throw EngineError("pm: the modulator must be a mono signal");
+    contentHash =
+        hashMix(hashDouble(hashTag(3), carrier), modulator->contentHash);
   }
   int channels() const override { return 1; }
   bool computeBlock(RenderCtx& ctx, NodeState&, int64_t start, int frames,
@@ -216,6 +240,10 @@ struct AmNode final : SigNode {
     int mc = modulator->channels();
     if (mc != 1 && mc != -1)
       throw EngineError("am: the modulator must be a mono signal");
+    contentHash = hashDouble(
+        hashMix(hashMix(hashTag(4), carrier->contentHash),
+                modulator->contentHash),
+        depth);
   }
   int channels() const override { return carrier->channels(); }
   bool computeBlock(RenderCtx& ctx, NodeState&, int64_t start, int frames,
@@ -256,6 +284,7 @@ struct DelayNode final : SigNode {
   SigPtr input;
   DelayNode(double b, SigPtr in) : by(b), input(std::move(in)) {
     if (by < 0) throw EngineError("delay: negative delay time");
+    contentHash = hashMix(hashDouble(hashTag(5), by), input->contentHash);
   }
   int channels() const override { return input->channels(); }
   bool stateful() const override { return true; }
@@ -329,6 +358,9 @@ struct ReverbNode final : SigNode {
       throw EngineError("reverb: damping must be in [0, 1]");
     if (mix < 0 || mix > 1)
       throw EngineError("reverb: mix must be in [0, 1]");
+    contentHash = hashMix(
+        hashDouble(hashDouble(hashDouble(hashTag(6), decay), damping), mix),
+        input->contentHash);
   }
   int channels() const override { return input->channels(); }
   bool stateful() const override { return true; }
@@ -393,7 +425,9 @@ struct ReverbNode final : SigNode {
 
 struct ExpDecayNode final : SigNode {
   double rate;
-  explicit ExpDecayNode(double r) : rate(r) {}
+  explicit ExpDecayNode(double r) : rate(r) {
+    contentHash = hashDouble(hashTag(7), rate);
+  }
   int channels() const override { return 1; }
   bool computeBlock(RenderCtx& ctx, NodeState&, int64_t start, int frames,
                     double* out) const override {
@@ -411,7 +445,12 @@ struct ExpDecayNode final : SigNode {
 struct AdsrNode final : SigNode {
   double a, d, s, r, hold;
   AdsrNode(double a_, double d_, double s_, double r_, double h)
-      : a(a_), d(d_), s(s_), r(r_), hold(h) {}
+      : a(a_), d(d_), s(s_), r(r_), hold(h) {
+    contentHash = hashDouble(
+        hashDouble(hashDouble(hashDouble(hashDouble(hashTag(8), a), d), s),
+                   r),
+        hold);
+  }
   int channels() const override { return 1; }
   bool computeBlock(RenderCtx& ctx, NodeState&, int64_t start, int frames,
                     double* out) const override {
@@ -437,7 +476,9 @@ struct AdsrNode final : SigNode {
 
 struct ConstNode final : SigNode {
   double value;
-  explicit ConstNode(double v) : value(v) {}
+  explicit ConstNode(double v) : value(v) {
+    contentHash = hashDouble(hashTag(9), value);
+  }
   int channels() const override { return -1; }
   bool computeBlock(RenderCtx&, NodeState&, int64_t, int frames,
                     double* out) const override {
@@ -461,7 +502,11 @@ struct FilterNode final : SigNode {
   double cutoff;
   SigPtr input;
   FilterNode(FilterKind k, double c, SigPtr in)
-      : kind(k), cutoff(c), input(std::move(in)) {}
+      : kind(k), cutoff(c), input(std::move(in)) {
+    contentHash = hashMix(hashDouble(hashMix(hashTag(10), (uint64_t)kind),
+                                     cutoff),
+                          input->contentHash);
+  }
   int channels() const override { return input->channels(); }
   bool stateful() const override { return true; }
   std::unique_ptr<NodeState> makeState() const override {
@@ -511,6 +556,9 @@ struct ClipNode final : SigNode {
           (kind == ClipKind::Hard ? std::string("hard_clip")
                                   : std::string("soft_clip")) +
           ": threshold must be positive");
+    contentHash = hashMix(hashDouble(hashMix(hashTag(11), (uint64_t)kind),
+                                     threshold),
+                          input->contentHash);
   }
   int channels() const override { return input->channels(); }
   bool computeBlock(RenderCtx& ctx, NodeState&, int64_t start, int frames,
@@ -790,6 +838,8 @@ struct MixNode final : SigNode {
   int ch;
   explicit MixNode(std::vector<SigPtr> xs) : items(std::move(xs)), ch(-1) {
     for (auto& x : items) ch = mergeChannels(ch, x->channels(), "mix_all");
+    contentHash = hashTag(13);
+    for (auto& x : items) contentHash = hashMix(contentHash, x->contentHash);
   }
   int channels() const override { return ch; }
   bool computeBlock(RenderCtx& ctx, NodeState&, int64_t start, int frames,
@@ -834,6 +884,8 @@ struct ChannelsNode final : SigNode {
       if (c != 1 && c != -1)
         throw EngineError("channels: every input must be mono");
     }
+    contentHash = hashTag(14);
+    for (auto& x : items) contentHash = hashMix(contentHash, x->contentHash);
   }
   int channels() const override { return (int)items.size(); }
   bool computeBlock(RenderCtx& ctx, NodeState&, int64_t start, int frames,
@@ -873,37 +925,52 @@ struct CachedSample {
 };
 
 struct SampleCache {
+  // Keyed by the source's structural content hash (not its pointer), so
+  // an entry outlives the graph that created it: after a rebuild, a
+  // structurally unchanged sample hashes the same and its window is
+  // served without re-rendering.
   struct Key {
-    const SigNode* src;
-    double from, to;
+    uint64_t src;
+    double from, to, rate;
     bool operator==(const Key& o) const {
-      return src == o.src && from == o.from && to == o.to;
+      return src == o.src && from == o.from && to == o.to && rate == o.rate;
     }
   };
   struct KeyHash {
     size_t operator()(const Key& k) const {
-      size_t h = std::hash<const void*>()(k.src);
+      size_t h = std::hash<uint64_t>()(k.src);
       h = h * 1000003u ^ std::hash<double>()(k.from);
       h = h * 1000003u ^ std::hash<double>()(k.to);
+      h = h * 1000003u ^ std::hash<double>()(k.rate);
       return h;
     }
   };
+  struct Entry {
+    // nullptr = another thread is building this entry right now.
+    std::shared_ptr<const CachedSample> data;
+    uint64_t gen = 0;  // last generation that used this entry
+  };
   std::mutex m;
-  // nullptr value = another thread is building this entry right now.
-  std::unordered_map<Key, std::shared_ptr<const CachedSample>, KeyHash>
-      entries;
+  std::unordered_map<Key, Entry, KeyHash> entries;
+  uint64_t generation = 0;
+  size_t rendered = 0, reusedPrior = 0;  // per-generation stats
 
   // Returns the cached window, building it on first use. Returns nullptr
   // if the entry is mid-build on another thread; the caller then falls
   // back to a private replay (identical values, just not shared).
   std::shared_ptr<const CachedSample> acquire(const SigPtr& src, double from,
                                               double to, double rate) {
-    Key key{src.get(), from, to};
+    Key key{src->contentHash, from, to, rate};
     {
       std::lock_guard<std::mutex> lk(m);
       auto it = entries.find(key);
-      if (it != entries.end()) return it->second;  // ready, or building
-      entries.emplace(key, nullptr);               // claim
+      if (it != entries.end()) {
+        if (it->second.data && it->second.gen != generation)
+          reusedPrior++;  // survived from an earlier build
+        it->second.gen = generation;
+        return it->second.data;  // ready, or building (nullptr)
+      }
+      entries.emplace(key, Entry{nullptr, generation});  // claim
     }
     std::shared_ptr<const CachedSample> built;
     try {
@@ -914,7 +981,10 @@ struct SampleCache {
       throw;
     }
     std::lock_guard<std::mutex> lk(m);
-    entries[key] = built;
+    Entry& e = entries[key];
+    e.data = built;
+    e.gen = generation;
+    rendered++;
     return built;
   }
 
@@ -964,6 +1034,37 @@ struct SampleCache {
   }
 };
 
+std::shared_ptr<SampleCache> makeSampleCache() {
+  return std::make_shared<SampleCache>();
+}
+
+void sampleCacheBeginBuild(SampleCache& cache) {
+  std::lock_guard<std::mutex> lk(cache.m);
+  cache.generation++;
+  cache.rendered = 0;
+  cache.reusedPrior = 0;
+  // Keep only what the previous generation actually used: samples whose
+  // definitions changed leave stale hashes behind, and this is where
+  // they die.
+  for (auto it = cache.entries.begin(); it != cache.entries.end();)
+    it = it->second.gen + 1 < cache.generation ? cache.entries.erase(it)
+                                               : std::next(it);
+}
+
+SampleCacheStats sampleCacheStats(const SampleCache& cache) {
+  auto& c = const_cast<SampleCache&>(cache);
+  std::lock_guard<std::mutex> lk(c.m);
+  SampleCacheStats s;
+  for (auto& [key, e] : c.entries) {
+    if (!e.data) continue;
+    s.entries++;
+    s.bytes += e.data->interleaved.size() * sizeof(double);
+  }
+  s.rendered = c.rendered;
+  s.reusedPrior = c.reusedPrior;
+  return s;
+}
+
 // Each placement replays a fixed finite slice of its source: a Sample is
 // a value, so every placement of it must produce identical content. The
 // shared SampleCache exploits exactly that guarantee - the first
@@ -988,6 +1089,11 @@ struct PlaceNode final : SigNode {
                         "s, " + std::to_string(t) + "s)");
     if (a < 0)
       throw EngineError("place: negative timestamp");
+    contentHash = hashDouble(
+        hashDouble(hashDouble(hashMix(hashTag(15), source->contentHash),
+                              from),
+                   to),
+        at);
   }
   int channels() const override { return source->channels(); }
   std::unique_ptr<NodeState> makeState() const override {
@@ -1055,6 +1161,11 @@ struct FileNode final : SigNode {
                         std::to_string(kMaxChannels) +
                         " channels are not supported in v1");
     for (auto& c : data) maxLen = std::max(maxLen, c.size());
+    contentHash = hashDouble(hashTag(16), fileRate);
+    for (auto& c : data) {
+      contentHash = hashMix(contentHash, (uint64_t)c.size());
+      for (double v : c) contentHash = hashDouble(contentHash, v);
+    }
   }
   int channels() const override { return (int)data.size(); }
   bool computeBlock(RenderCtx& ctx, NodeState&, int64_t start, int frames,
@@ -1161,6 +1272,15 @@ SigPtr makeBinOp(SigBinOp op, SigPtr l, SigPtr r) {
     else
       depth--;
     node->depthNeed = std::max(node->depthNeed, depth);
+  }
+  node->contentHash = hashTag(12);
+  for (const auto& o : node->program) {
+    node->contentHash = hashMix(node->contentHash, (uint64_t)o.k);
+    if (o.k == FusedNode::Op::K::Input)
+      node->contentHash = hashMix(
+          node->contentHash, node->inputs[(size_t)o.input]->contentHash);
+    else if (o.k == FusedNode::Op::K::Const)
+      node->contentHash = hashDouble(node->contentHash, o.value);
   }
   return node;
 }
@@ -1302,7 +1422,8 @@ bool graphContainsShared(const SigPtr& root, const SigNode* needle) {
 }
 
 Rendered renderWindow(const SigPtr& node, double from, double to, double rate,
-                      int maxThreads, const PreRenderedMap* preRendered) {
+                      int maxThreads, const PreRenderedMap* preRendered,
+                      SampleCache* sampleCache) {
   if (rate <= 0) throw EngineError("render: sample rate must be positive");
   if (from < 0 || to < from)
     throw EngineError("render: invalid sample window");
@@ -1344,13 +1465,16 @@ Rendered renderWindow(const SigPtr& node, double from, double to, double rate,
     groups = groupLeaves(leaves);
   int workers = std::min<int>(maxThreads, (int)groups.size());
 
-  // One sample-window cache per render: every placement of the same
-  // (source, window) pair - across the whole graph and all planner
-  // threads - discretizes it once and serves slices.
-  SampleCache sampleCache;
+  // Sample-window cache: every placement of the same (source, window)
+  // pair - across the whole graph and all planner threads - discretizes
+  // it once and serves slices. Callers may pass a longer-lived cache
+  // (shared across a build's targets, or across daemon rebuilds via
+  // content-hash keys); otherwise the cache lives for this render.
+  SampleCache localSampleCache;
+  SampleCache* sc = sampleCache ? sampleCache : &localSampleCache;
   RenderCtx mainCtx(rate);
   mainCtx.preRendered = preRendered;
-  mainCtx.sampleCache = &sampleCache;
+  mainCtx.sampleCache = sc;
 
   if (workers < 2) {
     // Sequential block loop.
@@ -1371,7 +1495,7 @@ Rendered renderWindow(const SigPtr& node, double from, double to, double rate,
   for (size_t g = 0; g < groups.size(); g++) {
     groupCtx.push_back(std::make_unique<RenderCtx>(rate));
     groupCtx.back()->preRendered = preRendered;
-    groupCtx.back()->sampleCache = &sampleCache;
+    groupCtx.back()->sampleCache = sc;
   }
 
   // Per-block barrier scheduling: for every block, the workers claim groups

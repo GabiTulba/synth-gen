@@ -9,6 +9,8 @@
 
 namespace synth {
 
+struct SampleCache;  // signal.hpp; opaque here
+
 // The `.build` project manifest (design doc §8.1). v1 format, line-based:
 //
 //   # comment
@@ -70,6 +72,12 @@ struct BuildResult {
 // serialized internally; leave it null for a silent build.
 struct BuildOptions {
   BuildCache* cache = nullptr;
+  // Optional cross-build sample-window cache (see makeSampleCache). The
+  // daemon passes one that survives rebuilds: structurally unchanged
+  // samples then never re-render, even when their targets do. When
+  // omitted, buildProject still shares a cache across the build's own
+  // targets.
+  SampleCache* sampleCache = nullptr;
   std::function<void(const std::string&)> log;
 };
 

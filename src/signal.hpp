@@ -79,10 +79,27 @@ using PreRenderedMap = std::unordered_map<const SigNode*, PreRenderedWindow>;
 // between renders. Stateful nodes are evaluated at monotonically
 // increasing frame indices and catch up block-by-block when queried with
 // a gap (this is what gives placed samples "from the epoch" semantics).
-// Render-wide cache of discretized sample windows, shared by every
-// placement of the same (source, window) pair - see PlaceNode. Owned by
-// renderWindow; opaque outside the engine.
+// Cache of discretized sample windows, shared by every placement of a
+// structurally identical (source, window, rate) triple - see PlaceNode.
+// renderWindow creates a private one per render unless the caller
+// supplies its own; a caller-owned cache is thread-safe and may be
+// shared across targets of one build and across successive builds (the
+// daemon does both): entries are keyed by structural content hash, so
+// they stay valid exactly as long as the sample's definition is
+// unchanged. Opaque outside the engine.
 struct SampleCache;
+std::shared_ptr<SampleCache> makeSampleCache();
+// Marks the start of a build generation: entries not used since the
+// previous mark are dropped (the cache holds only what the last build
+// actually placed), and the per-generation stats reset.
+void sampleCacheBeginBuild(SampleCache& cache);
+struct SampleCacheStats {
+  size_t entries = 0;        // live cached windows
+  size_t bytes = 0;          // their total sample data
+  size_t rendered = 0;       // windows discretized this generation
+  size_t reusedPrior = 0;    // windows served from a previous generation
+};
+SampleCacheStats sampleCacheStats(const SampleCache& cache);
 
 struct RenderCtx {
   double rate;
@@ -100,6 +117,13 @@ struct RenderCtx {
 
 struct SigNode : std::enable_shared_from_this<SigNode> {
   virtual ~SigNode() = default;
+
+  // Structural content hash, set once at construction from the node's
+  // parameters and its children's hashes. Two graphs with equal hashes
+  // render identically (modulo 64-bit collisions), even when built by
+  // different evaluations - this is what lets rendered sample windows
+  // survive a rebuild, where every node pointer is new.
+  uint64_t contentHash = 0;
 
   // Static channel count; -1 = broadcast.
   virtual int channels() const = 0;
@@ -194,7 +218,8 @@ SigPtr makeFileSignal(std::vector<std::vector<double>> channelData,
 // is identical either way.
 Rendered renderWindow(const SigPtr& node, double from, double to, double rate,
                       int maxThreads = 0,
-                      const PreRenderedMap* preRendered = nullptr);
+                      const PreRenderedMap* preRendered = nullptr,
+                      SampleCache* sampleCache = nullptr);
 
 // True if `needle` occurs in `root`'s graph outside of any placement's
 // private subtree - i.e. at a position where a pre-rendered window for

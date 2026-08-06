@@ -241,6 +241,21 @@ positional argument).
   nested samples inside a cached window share the same cache. Measured:
   fresh darksynth build ~2.6 s → ~1.8 s wall (drums stem 1174 → 738 ms,
   master 1490 → 1088 ms); artifacts byte-identical.
+- [x] **Cross-build sample cache in the daemon** — every `SigNode` now
+  carries a structural content hash (set at construction, O(1) from its
+  children's hashes; audio files hash their data), and the sample cache
+  is keyed by (content hash, window, rate) instead of node pointers, so
+  cached windows outlive the graph that created them. `buildProject`
+  shares one cache across all targets of a build; the watch daemon keeps
+  it across rebuilds, so an arrangement edit that dirties every target
+  re-renders only the samples whose own definitions changed — usually
+  none. A generation sweep keeps only what the previous build actually
+  placed, and the verbose log reports it (`samples: 92 window(s) cached
+  (36091 KiB), 0 rendered this build, 76 reused from previous builds`).
+  Measured in watch mode on darksynth: a mix-gain edit that invalidates
+  all seven targets rebuilds in ~1.4 s vs ~1.8 s cold, with zero sample
+  windows re-rendered; output is bit-identical across generations
+  (tested) and all artifacts verified byte-identical.
 
 ## Decisions taken on points the design doc leaves open
 

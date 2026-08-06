@@ -668,3 +668,72 @@ TEST(engine_sample_cache_slices_at_odd_offsets) {
       CHECK(r.interleaved[(size_t)(nAt + k)] == ref.interleaved[(size_t)k]);
   }
 }
+
+// --- Cross-build sample cache ----------------------------------------------
+
+static SigPtr crossBuildVoice(double cutoff) {
+  return makeFilter(FilterKind::Lowpass, cutoff,
+                    makeBinOp(SigBinOp::Mul, makeOsc(OscKind::Saw, 220.0),
+                              makeAdsr(0.01, 0.05, 0.5, 0.1, 0.15)));
+}
+
+TEST(engine_content_hash_structural) {
+  // Two separately built but structurally identical graphs hash equal
+  // (this is what lets cached windows survive a rebuild); any parameter
+  // change anywhere in the tree changes the hash.
+  SigPtr a = crossBuildVoice(900.0);
+  SigPtr b = crossBuildVoice(900.0);
+  SigPtr c = crossBuildVoice(901.0);
+  CHECK(a.get() != b.get());
+  CHECK(a->contentHash == b->contentHash);
+  CHECK(a->contentHash != c->contentHash);
+  // Placement timestamps participate too.
+  CHECK(makePlace(a, 0.0, 0.25, 1.0)->contentHash ==
+        makePlace(b, 0.0, 0.25, 1.0)->contentHash);
+  CHECK(makePlace(a, 0.0, 0.25, 1.0)->contentHash !=
+        makePlace(b, 0.0, 0.25, 1.5)->contentHash);
+}
+
+TEST(engine_sample_cache_survives_rebuild) {
+  // Simulate the daemon: render, "rebuild" (all-new node objects), and
+  // render again with the same cache. The second build must reuse the
+  // cached windows - and still produce bit-identical output.
+  double rate = 8000.0;
+  auto makeSong = [&] {
+    SigPtr v = crossBuildVoice(900.0);
+    std::vector<SigPtr> placed;
+    for (int i = 0; i < 4; i++)
+      placed.push_back(makePlace(v, 0.0, 0.25, 0.4 * i));
+    return makeMix(placed);
+  };
+  std::shared_ptr<SampleCache> cache = makeSampleCache();
+  sampleCacheBeginBuild(*cache);
+  Rendered first = renderWindow(makeSong(), 0.0, 2.0, rate, 1, nullptr,
+                                cache.get());
+  SampleCacheStats s1 = sampleCacheStats(*cache);
+  CHECK(s1.rendered == 1);  // one distinct sample window
+  CHECK(s1.reusedPrior == 0);
+  sampleCacheBeginBuild(*cache);
+  Rendered second = renderWindow(makeSong(), 0.0, 2.0, rate, 1, nullptr,
+                                 cache.get());
+  SampleCacheStats s2 = sampleCacheStats(*cache);
+  CHECK(s2.rendered == 0);      // nothing re-rendered...
+  CHECK(s2.reusedPrior == 1);   // ...the window came from build 1
+  CHECK(first.interleaved.size() == second.interleaved.size());
+  bool identical = true;
+  for (size_t i = 0; i < first.interleaved.size(); i++)
+    if (first.interleaved[i] != second.interleaved[i]) identical = false;
+  CHECK(identical);
+  // A changed sample definition misses and re-renders; the untouched
+  // entry from the previous generation is pruned next build.
+  sampleCacheBeginBuild(*cache);
+  SigPtr changed = crossBuildVoice(500.0);
+  renderWindow(makeMix({makePlace(changed, 0.0, 0.25, 0.0)}), 0.0, 1.0, rate,
+               1, nullptr, cache.get());
+  SampleCacheStats s3 = sampleCacheStats(*cache);
+  CHECK(s3.rendered == 1);
+  CHECK(s3.reusedPrior == 0);
+  sampleCacheBeginBuild(*cache);
+  SampleCacheStats s4 = sampleCacheStats(*cache);
+  CHECK(s4.entries == 1);  // only the changed voice's window survives
+}

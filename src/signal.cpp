@@ -67,6 +67,27 @@ NodeState& RenderCtx::stateFor(const SigNode& node) {
 
 const double* SigNode::renderBlock(RenderCtx& ctx, int64_t start, int frames,
                                    bool& silent) const {
+  if (ctx.preRendered) {
+    auto it = ctx.preRendered->find(this);
+    if (it != ctx.preRendered->end()) {
+      const PreRenderedWindow& pr = it->second;
+      int64_t rel = start - pr.startFrame;
+      if (pr.data && rel >= 0 && rel + frames <= pr.data->frames &&
+          pr.data->channels == concreteChannels()) {
+        // Serve the block verbatim from the finished render; no state is
+        // touched, so partial coverage simply falls through to a normal
+        // (deterministic, hence identical) computation below.
+        const double* p =
+            pr.data->interleaved.data() + (size_t)rel * (size_t)pr.data->channels;
+        size_t count = (size_t)frames * (size_t)pr.data->channels;
+        bool allZero = true;
+        for (size_t k = 0; k < count; k++)
+          if (p[k] != 0.0) { allZero = false; break; }
+        silent = allZero;
+        return allZero ? nullptr : p;
+      }
+    }
+  }
   NodeState& st = ctx.stateFor(*this);
   if (st.cachedStart == start && st.cachedFrames == frames) {
     silent = st.cachedSilent;
@@ -887,10 +908,27 @@ std::vector<std::vector<int>> groupLeaves(const std::vector<SigPtr>& leaves) {
   return groups;
 }
 
+bool containsSharedImpl(const SigNode* n, const SigNode* needle,
+                        std::unordered_set<const SigNode*>& seen) {
+  if (n == needle) return true;
+  if (!seen.insert(n).second) return false;
+  if (dynamic_cast<const PlaceNode*>(n)) return false;
+  bool found = false;
+  n->forEachChild([&](const SigPtr& c) {
+    if (!found) found = containsSharedImpl(c.get(), needle, seen);
+  });
+  return found;
+}
+
 }  // namespace
 
+bool graphContainsShared(const SigPtr& root, const SigNode* needle) {
+  std::unordered_set<const SigNode*> seen;
+  return containsSharedImpl(root.get(), needle, seen);
+}
+
 Rendered renderWindow(const SigPtr& node, double from, double to, double rate,
-                      int maxThreads) {
+                      int maxThreads, const PreRenderedMap* preRendered) {
   if (rate <= 0) throw EngineError("render: sample rate must be positive");
   if (from < 0 || to < from)
     throw EngineError("render: invalid sample window");
@@ -924,6 +962,7 @@ Rendered renderWindow(const SigPtr& node, double from, double to, double rate,
   int workers = std::min<int>(maxThreads, (int)groups.size());
 
   RenderCtx mainCtx(rate);
+  mainCtx.preRendered = preRendered;
 
   if (workers < 2) {
     // Sequential block loop.
@@ -941,8 +980,10 @@ Rendered renderWindow(const SigPtr& node, double from, double to, double rate,
     for (int li : groups[(size_t)g]) leafGroup[(size_t)li] = g;
   std::vector<std::unique_ptr<RenderCtx>> groupCtx;
   groupCtx.reserve(groups.size());
-  for (size_t g = 0; g < groups.size(); g++)
+  for (size_t g = 0; g < groups.size(); g++) {
     groupCtx.push_back(std::make_unique<RenderCtx>(rate));
+    groupCtx.back()->preRendered = preRendered;
+  }
 
   // Per-block barrier scheduling: for every block, the workers claim groups
   // off an atomic counter and render each group's leaves in that group's
@@ -1038,6 +1079,10 @@ Rendered renderWindow(const SigPtr& node, double from, double to, double rate,
         const SigNode& leaf = *leaves[li];
         NodeState& gs =
             groupCtx[(size_t)leafGroup[li]]->stateFor(leaf);
+        // A leaf served from a pre-rendered window never touches its
+        // group state; the main context resolves it the same way, so
+        // there is nothing to inject.
+        if (gs.cachedStart != n || gs.cachedFrames != f) continue;
         NodeState& ms = mainCtx.stateFor(leaf);
         ms.cachedStart = n;
         ms.cachedFrames = f;

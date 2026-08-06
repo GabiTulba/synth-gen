@@ -608,3 +608,40 @@ TEST(engine_delay_tail_survives_silence_skip) {
   for (int64_t i = (int64_t)(0.06 * rate); i < (int64_t)(1.5 * rate); i++)
     CHECK(r.interleaved[(size_t)i] == 0.0);  // exact silence before it
 }
+
+TEST(engine_prerendered_window_reused_bit_exact) {
+  // Render a "bus" on its own, then render a "master" containing that bus
+  // twice: once normally, once serving the bus from the finished buffer.
+  // The pre-rendered run must be bit-identical to the direct one.
+  double rate = 8000.0;
+  SigPtr bus = makeReverb(
+      0.5, 0.3, 0.3,
+      makeMix({makePlace(makeOsc(OscKind::Saw, 220.0), 0.0, 0.3, 0.1),
+               makePlace(makeOsc(OscKind::Saw, 331.0), 0.0, 0.3, 0.6)}));
+  SigPtr other = makeFilter(FilterKind::Lowpass, 700.0,
+                            makeOsc(OscKind::Square, 110.0));
+  SigPtr master = makeClip(ClipKind::Soft, 0.9,
+                           makeBinOp(SigBinOp::Add, bus, other));
+  Rendered busR = renderWindow(bus, 0.0, 2.0, rate);
+  Rendered direct = renderWindow(master, 0.0, 2.0, rate);
+  PreRenderedMap pre;
+  pre[bus.get()] = PreRenderedWindow{0, &busR};
+  Rendered served = renderWindow(master, 0.0, 2.0, rate, 0, &pre);
+  CHECK(direct.frames == served.frames);
+  bool identical = true;
+  for (size_t i = 0; i < direct.interleaved.size(); i++)
+    if (direct.interleaved[i] != served.interleaved[i]) identical = false;
+  CHECK(identical);
+}
+
+TEST(engine_graph_contains_shared) {
+  SigPtr bus = makeMix({makeOsc(OscKind::Saw, 110.0)});
+  SigPtr master = makeClip(ClipKind::Soft, 0.9,
+                           makeBinOp(SigBinOp::Add, bus, makeConst(0.1)));
+  SigPtr placedElsewhere = makeMix({makePlace(bus, 0.0, 1.0, 2.0)});
+  CHECK(graphContainsShared(master, bus.get()));
+  CHECK(graphContainsShared(bus, bus.get()));  // a node contains itself
+  // Under a placement the subtree evaluates in a private, time-remapped
+  // context, so a pre-rendered window would never be served there.
+  CHECK(!graphContainsShared(placedElsewhere, bus.get()));
+}

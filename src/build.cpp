@@ -2,13 +2,18 @@
 
 #include <algorithm>
 #include <chrono>
+#include <cmath>
+#include <condition_variable>
 #include <cstdio>
+#include <deque>
 #include <filesystem>
 #include <fstream>
 #include <map>
+#include <memory>
 #include <mutex>
 #include <sstream>
 #include <thread>
+#include <unordered_map>
 
 #include <atomic>
 
@@ -384,14 +389,89 @@ BuildResult buildProject(const std::string& projectDir,
              "/" + std::to_string(targets.size()) + " target(s) fresh, " +
              std::to_string(pending.size()) + " to render");
 
+  // 4b. Shared bus rendering across targets: when one pending target's
+  // signal occurs as a shared subtree of another pending target's graph
+  // (the canonical case: a master summing the buses the stems render),
+  // the containing target is scheduled after its providers and their
+  // finished buffers are served to it block-by-block instead of being
+  // re-discretized. Deps only form between targets with identical
+  // windows and rates; renders are deterministic, so output is identical.
+  std::vector<std::vector<size_t>> providersOf(targets.size());
+  std::vector<std::vector<size_t>> consumersOf(targets.size());
+  {
+    auto shareable = [&](const RenderTarget& t) {
+      return t.kind != RenderTarget::Kind::VisualStems &&
+             t.sample.sig != nullptr;
+    };
+    for (size_t a : pending) {
+      const RenderTarget& ta = targets[a];
+      if (!shareable(ta)) continue;
+      for (size_t b : pending) {
+        if (a == b) continue;
+        const RenderTarget& tb = targets[b];
+        if (!shareable(tb)) continue;
+        if (ta.rate != tb.rate || ta.sample.from != tb.sample.from ||
+            ta.sample.to != tb.sample.to)
+          continue;
+        const SigNode* ra = ta.sample.sig.get();
+        const SigNode* rb = tb.sample.sig.get();
+        // Identical roots (duplicate targets) tie-break by index; the
+        // containment order itself is acyclic on a DAG.
+        bool dep = ra == rb ? b < a : graphContainsShared(ta.sample.sig, rb);
+        if (dep) {
+          providersOf[a].push_back(b);
+          consumersOf[b].push_back(a);
+        }
+      }
+      if (!providersOf[a].empty()) {
+        std::string names;
+        for (size_t b : providersOf[a])
+          names += (names.empty() ? "'" : ", '") + targets[b].name + "'";
+        log.line("share: target '" + ta.name + "' reuses " +
+                 std::to_string(providersOf[a].size()) +
+                 " shared bus render(s): " + names);
+      }
+    }
+  }
+
   std::vector<std::string> renderErrors(targets.size());
   {
-    std::atomic<size_t> next{0};
+    std::mutex schedMutex;
+    std::condition_variable schedCv;
+    std::deque<size_t> ready;
+    std::vector<size_t> waitCount(targets.size(), 0);
+    std::vector<size_t> consumersLeft(targets.size(), 0);
+    // Buffers of provider targets, kept only while consumers still need
+    // them (a stem buffer is ~duration * rate * channels doubles).
+    std::unordered_map<size_t, std::shared_ptr<Rendered>> busBuffers;
+    size_t done = 0;
+    for (size_t i : pending) {
+      waitCount[i] = providersOf[i].size();
+      consumersLeft[i] = consumersOf[i].size();
+      if (waitCount[i] == 0) ready.push_back(i);
+    }
     auto worker = [&](int workerId) {
       for (;;) {
-        size_t slot = next.fetch_add(1);
-        if (slot >= pending.size()) return;
-        size_t i = pending[slot];
+        size_t i;
+        PreRenderedMap pre;
+        std::vector<std::shared_ptr<Rendered>> keepAlive;
+        {
+          std::unique_lock<std::mutex> lk(schedMutex);
+          schedCv.wait(
+              lk, [&] { return !ready.empty() || done == pending.size(); });
+          if (ready.empty()) return;
+          i = ready.front();
+          ready.pop_front();
+          for (size_t j : providersOf[i]) {
+            auto it = busBuffers.find(j);
+            if (it == busBuffers.end()) continue;  // provider failed
+            keepAlive.push_back(it->second);
+            pre[targets[j].sample.sig.get()] = PreRenderedWindow{
+                (int64_t)llround(targets[j].sample.from * targets[j].rate),
+                it->second.get()};
+          }
+        }
+        std::shared_ptr<Rendered> forConsumers;
         const RenderTarget& t = targets[i];
         auto targetStart = std::chrono::steady_clock::now();
         double renderSecs = 0, writeSecs = 0;
@@ -403,17 +483,62 @@ BuildResult buildProject(const std::string& projectDir,
           std::string fileName = t.name + extensionFor(t);
           fs::path artifactPath = artifactDir / fileName;
           if (t.kind == RenderTarget::Kind::VisualStems) {
-            std::vector<std::pair<std::string, Rendered>> lanes;
-            for (auto& [label, s] : t.stems) {
+            // Lanes often contain one another (an overview stacks the
+            // master above the buses it sums), so discretize them in
+            // dependency order and serve finished lanes to the ones that
+            // contain them - the intra-target version of shared bus
+            // rendering.
+            size_t laneCount = t.stems.size();
+            std::vector<std::vector<size_t>> laneProviders(laneCount);
+            for (size_t x = 0; x < laneCount; x++) {
+              const SampleV& sx = t.stems[x].second;
+              for (size_t y = 0; y < laneCount; y++) {
+                if (x == y) continue;
+                const SampleV& sy = t.stems[y].second;
+                if (sx.from != sy.from || sx.to != sy.to) continue;
+                const SigNode* rx = sx.sig.get();
+                const SigNode* ry = sy.sig.get();
+                bool dep =
+                    rx == ry ? y < x : graphContainsShared(sx.sig, ry);
+                if (dep) laneProviders[x].push_back(y);
+              }
+            }
+            std::vector<Rendered> laneR(laneCount);
+            std::vector<char> laneDone(laneCount, 0);
+            for (size_t finished = 0; finished < laneCount; finished++) {
+              size_t x = laneCount;
+              for (size_t c = 0; c < laneCount && x == laneCount; c++) {
+                if (laneDone[c]) continue;
+                bool ok = true;
+                for (size_t y : laneProviders[c]) ok = ok && laneDone[y];
+                if (ok) x = c;
+              }
+              if (x == laneCount)  // unreachable: containment is acyclic
+                throw std::runtime_error("internal: lane dependency cycle");
+              const SampleV& s = t.stems[x].second;
+              PreRenderedMap lanePre;
+              for (size_t y : laneProviders[x])
+                lanePre[t.stems[y].second.sig.get()] = PreRenderedWindow{
+                    (int64_t)llround(t.stems[y].second.from * t.rate),
+                    &laneR[y]};
               auto laneStart = std::chrono::steady_clock::now();
-              lanes.emplace_back(label,
-                                 renderWindow(s.sig, s.from, s.to, t.rate));
+              laneR[x] =
+                  renderWindow(s.sig, s.from, s.to, t.rate, 0,
+                               lanePre.empty() ? nullptr : &lanePre);
               double laneSecs = BuildLog::secondsSince(laneStart);
               renderSecs += laneSecs;
               log.line("[worker " + std::to_string(workerId) + "] '" +
-                       t.name + "' lane '" + label + "' discretized in " +
-                       fmtSecs(laneSecs));
+                       t.name + "' lane '" + t.stems[x].first +
+                       "' discretized in " + fmtSecs(laneSecs) +
+                       (lanePre.empty()
+                            ? std::string()
+                            : " (reused " + std::to_string(lanePre.size()) +
+                                  " lane render(s))"));
+              laneDone[x] = 1;
             }
+            std::vector<std::pair<std::string, Rendered>> lanes;
+            for (size_t x = 0; x < laneCount; x++)
+              lanes.emplace_back(t.stems[x].first, std::move(laneR[x]));
             auto writeStart = std::chrono::steady_clock::now();
             std::ofstream out(artifactPath, std::ios::trunc);
             if (!out) throw std::runtime_error("cannot write artifact file");
@@ -424,21 +549,23 @@ BuildResult buildProject(const std::string& projectDir,
             info.channelCount = lanes.empty() ? 0 : lanes[0].second.channels;
           } else {
             auto renderStart = std::chrono::steady_clock::now();
-            Rendered rendered =
-                renderWindow(t.sample.sig, t.sample.from, t.sample.to, t.rate);
+            auto rendered = std::make_shared<Rendered>(
+                renderWindow(t.sample.sig, t.sample.from, t.sample.to, t.rate,
+                             0, pre.empty() ? nullptr : &pre));
             renderSecs = BuildLog::secondsSince(renderStart);
             auto writeStart = std::chrono::steady_clock::now();
             if (t.kind == RenderTarget::Kind::Visual) {
               std::ofstream out(artifactPath, std::ios::trunc);
               if (!out) throw std::runtime_error("cannot write artifact file");
-              out << renderWaveformSvg(t.name, rendered, t.rate);
+              out << renderWaveformSvg(t.name, *rendered, t.rate);
             } else {
-              writeWav(artifactPath.string(), t.rate, rendered.channels,
-                       rendered.interleaved);
+              writeWav(artifactPath.string(), t.rate, rendered->channels,
+                       rendered->interleaved);
             }
             writeSecs = BuildLog::secondsSince(writeStart);
-            info.channelCount = rendered.channels;
-            info.frames = rendered.frames;
+            info.channelCount = rendered->channels;
+            info.frames = rendered->frames;
+            forConsumers = std::move(rendered);
           }
           info.artifact =
               (fs::path("build") / "artifacts" / fileName).generic_string();
@@ -453,7 +580,11 @@ BuildResult buildProject(const std::string& projectDir,
                    std::to_string(info.channelCount) + " ch in " +
                    fmtSecs(BuildLog::secondsSince(targetStart)) +
                    " (discretize " + fmtSecs(renderSecs) + ", write " +
-                   fmtSecs(writeSecs) + ")");
+                   fmtSecs(writeSecs) +
+                   (pre.empty() ? std::string()
+                                : ", reused " + std::to_string(pre.size()) +
+                                      " bus render(s)") +
+                   ")");
         } catch (const std::exception& e) {
           info.error = e.what();
           renderErrors[i] = e.what();
@@ -463,6 +594,18 @@ BuildResult buildProject(const std::string& projectDir,
                    e.what());
         }
         r.targets[i] = std::move(info);
+        {
+          std::lock_guard<std::mutex> lk(schedMutex);
+          if (forConsumers && consumersLeft[i] > 0 && renderErrors[i].empty())
+            busBuffers[i] = std::move(forConsumers);
+          for (size_t j : providersOf[i])
+            if (consumersLeft[j] > 0 && --consumersLeft[j] == 0)
+              busBuffers.erase(j);
+          for (size_t k : consumersOf[i])
+            if (--waitCount[k] == 0) ready.push_back(k);
+          done++;
+          schedCv.notify_all();
+        }
       }
     };
     size_t threadCount = std::min<size_t>(

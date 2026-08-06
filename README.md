@@ -199,6 +199,18 @@ positional argument).
   bit-identical to a sequential render. A fresh full darksynth build
   dropped from ~250 s to ~4 s wall; all showcase artifacts verified
   byte-identical to the per-frame engine's.
+- [x] **Shared bus rendering across targets** — when one target's signal
+  occurs as a shared subtree of another target's graph (a master summing
+  the buses the stems render, an overview stacking a master lane above
+  its bus lanes), the build schedules the containing target after its
+  providers and serves their finished buffers to it block-by-block
+  (`PreRenderedMap`), instead of re-discretizing the subtree. Deps only
+  form between renders with identical windows and rates, never reach
+  under placements (which remap time in private contexts), and renders
+  are deterministic — so artifacts stay byte-identical. The darksynth
+  master's discretization drops roughly in half again, and the stems
+  overview's master lane becomes a cheap sum of its already-rendered
+  lanes.
 
 ## Decisions taken on points the design doc leaves open
 

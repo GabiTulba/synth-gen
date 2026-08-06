@@ -48,6 +48,27 @@ struct NodeState {
   virtual ~NodeState() = default;
 };
 
+// A discretized window: `frames` frames of `channels` interleaved values.
+struct Rendered {
+  int channels = 1;
+  int64_t frames = 0;
+  std::vector<double> interleaved;
+};
+
+// A finished render of some node's window, indexed by the frame (at the
+// consuming render's rate) its first sample corresponds to. renderBlock
+// serves blocks that fall inside the window verbatim from the buffer, so
+// a build that has already rendered a bus for its own target can hand
+// that buffer to every other target whose graph contains the same node
+// (a master summing buses, an overview stacking lanes) instead of
+// re-discretizing the subtree. The buffer must stay alive for the whole
+// consuming render, and must have been produced at the same rate.
+struct PreRenderedWindow {
+  int64_t startFrame = 0;
+  const Rendered* data = nullptr;
+};
+using PreRenderedMap = std::unordered_map<const SigNode*, PreRenderedWindow>;
+
 // Per-render evaluation context. Each render instantiates fresh state, so
 // a shared subgraph used by several targets never leaks filter state
 // between renders. Stateful nodes are evaluated at monotonically
@@ -55,6 +76,10 @@ struct NodeState {
 // a gap (this is what gives placed samples "from the epoch" semantics).
 struct RenderCtx {
   double rate;
+  // Optional cross-render reuse; not inherited by placements' private
+  // contexts (a placement remaps time, so a shared window would be
+  // served at the wrong offset there).
+  const PreRenderedMap* preRendered = nullptr;
   std::unordered_map<const SigNode*, std::unique_ptr<NodeState>> states;
 
   explicit RenderCtx(double r) : rate(r) {}
@@ -150,12 +175,20 @@ SigPtr makeFileSignal(std::vector<std::vector<double>> channelData,
 // a per-block barrier; summation order is preserved, so the result is
 // identical to a sequential render. maxThreads <= 0 means "hardware
 // concurrency"; pass 1 to force sequential rendering.
-struct Rendered {
-  int channels = 1;
-  int64_t frames = 0;
-  std::vector<double> interleaved;
-};
+//
+// `preRendered` (optional) supplies already-discretized windows for nodes
+// occurring in this graph; matching blocks are served from those buffers
+// instead of being recomputed. Renders are deterministic, so the result
+// is identical either way.
 Rendered renderWindow(const SigPtr& node, double from, double to, double rate,
-                      int maxThreads = 0);
+                      int maxThreads = 0,
+                      const PreRenderedMap* preRendered = nullptr);
+
+// True if `needle` occurs in `root`'s graph outside of any placement's
+// private subtree - i.e. at a position where a pre-rendered window for
+// `needle` would actually be served (placements remap time, so their
+// sources are excluded). Used by the build system to schedule targets
+// that contain other targets' signals after them.
+bool graphContainsShared(const SigPtr& root, const SigNode* needle);
 
 }  // namespace synth

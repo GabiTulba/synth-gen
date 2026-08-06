@@ -68,6 +68,17 @@ const double* SigNode::renderBlock(RenderCtx& ctx, int64_t start, int frames,
         // Serve the block verbatim from the finished render; no state is
         // touched, so partial coverage simply falls through to a normal
         // (deterministic, hence identical) computation below.
+        // Grid-aligned queries first consult the provider's recorded
+        // silence flags, which spares the zero scan its worst case (a
+        // silent block scans to the end before concluding); a false flag
+        // only means "not proven silent", so it still falls to the scan.
+        if (!pr.data->blockSilent.empty() && rel % kBlockFrames == 0 &&
+            frames ==
+                (int)std::min<int64_t>(kBlockFrames, pr.data->frames - rel) &&
+            pr.data->blockSilent[(size_t)(rel / kBlockFrames)]) {
+          silent = true;
+          return nullptr;
+        }
         const double* p =
             pr.data->interleaved.data() + (size_t)rel * (size_t)pr.data->channels;
         size_t count = (size_t)frames * (size_t)pr.data->channels;
@@ -1185,6 +1196,7 @@ Rendered renderWindow(const SigPtr& node, double from, double to, double rate,
                 out.interleaved.begin() + (ptrdiff_t)(off + count), 0.0);
     else
       std::memcpy(out.interleaved.data() + off, p, count * sizeof(double));
+    out.blockSilent.push_back(silent ? 1 : 0);  // blocks emit in order
   };
 
   if (maxThreads <= 0) {
@@ -1194,8 +1206,16 @@ Rendered renderWindow(const SigPtr& node, double from, double to, double rate,
 
   std::vector<SigPtr> leaves;
   decomposeInto(node, kDecomposeDepth, leaves);
+  // When every leaf is already served by a pre-rendered window, the
+  // render is a single cheap spine pass; worker threads would only add
+  // per-block barrier overhead.
+  bool allServed = preRendered && !leaves.empty();
+  if (allServed)
+    for (auto& l : leaves)
+      if (!preRendered->count(l.get())) { allServed = false; break; }
   std::vector<std::vector<int>> groups;
-  if (maxThreads > 1 && leaves.size() > 1) groups = groupLeaves(leaves);
+  if (!allServed && maxThreads > 1 && leaves.size() > 1)
+    groups = groupLeaves(leaves);
   int workers = std::min<int>(maxThreads, (int)groups.size());
 
   RenderCtx mainCtx(rate);

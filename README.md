@@ -211,6 +211,23 @@ positional argument).
   master's discretization drops roughly in half again, and the stems
   overview's master lane becomes a cheap sum of its already-rendered
   lanes.
+- [x] **Fused arithmetic** — `makeBinOp` no longer builds a node per
+  operator: elementwise `+ - * /` chains merge into a single fused node
+  holding the non-arithmetic subtrees as inputs and a small postfix
+  program over them (constants become immediates, duplicate inputs
+  dedup, inlining capped so shared DAGs cannot blow up). The program
+  executes block-at-a-time — each operator is one tight auto-vectorized
+  loop over cache-resident value-stack slabs — replaying the exact
+  operator-tree order, with a per-block silence lattice reproducing each
+  operator's short-circuit rule, so output is bit-identical. Benchmarked
+  at ~13% off a fresh darksynth build (3.1 s → 2.7 s wall). Two smaller
+  measured-and-kept follow-ups: the planner skips worker threads when
+  every decomposed leaf is served from a pre-rendered window (barrier
+  overhead only), and renders record per-block silence flags in
+  `Rendered` so serving a shared buffer's silent stretches is a flag
+  test instead of a worst-case zero scan (~2.7 s → ~2.6 s). A
+  per-element interpreter variant of fusion was tried first, measured
+  as a regression (it defeated SIMD auto-vectorization), and replaced.
 
 ## Decisions taken on points the design doc leaves open
 

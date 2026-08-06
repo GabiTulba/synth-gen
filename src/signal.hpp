@@ -49,10 +49,15 @@ struct NodeState {
 };
 
 // A discretized window: `frames` frames of `channels` interleaved values.
+// blockSilent records, per kBlockFrames render block, whether the engine
+// proved the block all-zero while rendering (structural silence). It is
+// advisory: a false entry only means "not proven", and consumers serving
+// this window re-check by scanning.
 struct Rendered {
   int channels = 1;
   int64_t frames = 0;
   std::vector<double> interleaved;
+  std::vector<uint8_t> blockSilent;
 };
 
 // A finished render of some node's window, indexed by the frame (at the

@@ -1,6 +1,7 @@
 #include "signal.hpp"
 
 #include <algorithm>
+#include <array>
 #include <atomic>
 #include <cmath>
 #include <condition_variable>
@@ -23,16 +24,6 @@ int mergeChannels(int a, int b, const char* what) {
     throw EngineError(std::string(what) + ": channel count mismatch (" +
                       std::to_string(a) + " vs " + std::to_string(b) + ")");
   return a;
-}
-
-double applyOp(SigBinOp op, double a, double b) {
-  switch (op) {
-    case SigBinOp::Add: return a + b;
-    case SigBinOp::Sub: return a - b;
-    case SigBinOp::Mul: return a * b;
-    case SigBinOp::Div: return a / b;
-  }
-  return 0;
 }
 
 // A child's block, with broadcast-aware element access: a silent block
@@ -534,38 +525,254 @@ struct ClipNode final : SigNode {
 
 // --- Combination -----------------------------------------------------------
 
-struct BinOpNode final : SigNode {
-  SigBinOp op;
-  SigPtr l, r;
-  int ch;
-  BinOpNode(SigBinOp o, SigPtr l_, SigPtr r_)
-      : op(o), l(std::move(l_)), r(std::move(r_)),
-        ch(mergeChannels(l->channels(), r->channels(), "signal arithmetic")) {}
+// Fused elementwise arithmetic. makeBinOp does not build a node per
+// operator: it merges its operands' programs into one FusedNode holding
+// the non-arithmetic subtrees as `inputs` and a small postfix program
+// over them, with scalar constants folded in as immediates. A chain like
+// `kick + snare * 0.85 + hat * 0.4` therefore renders in a single pass -
+// three input reads and one output write per element, the intermediates
+// living on a register stack - instead of one full buffer pass per
+// operator. The program replays the exact operator-tree evaluation
+// order, so results are bit-identical to unfused evaluation.
+//
+// Per block, a silence lattice folded over the program reproduces each
+// operator's short-circuit rule exactly (add/sub: zero iff both sides
+// are; mul: zero if either side is; div: never assumed zero, so 0/0
+// still yields NaN); silent inputs read as literal zeros inside a
+// non-zero expression, matching the unfused dense-with-zeros behavior.
+//
+// Inlining is capped at kMaxFusedOps: an oversized operand stays a
+// (still internally fused) input node, so shared arithmetic DAGs cannot
+// blow up the program exponentially and chains fuse in bounded chunks.
+constexpr size_t kMaxFusedOps = 64;
+
+struct FusedState final : NodeState {
+  std::vector<double> scratch;  // depthNeed block-sized value-stack slabs
+};
+
+struct FusedNode final : SigNode {
+  struct Op {
+    enum class K : uint8_t { Input, Const, Add, Sub, Mul, Div };
+    K k = K::Const;
+    int input = 0;     // K::Input: index into `inputs`
+    double value = 0;  // K::Const
+  };
+  std::vector<SigPtr> inputs;
+  std::vector<Op> program;  // postfix, ends with an operator
+  int ch = -1;
+  int depthNeed = 0;  // maximum value-stack depth of `program`
+
   int channels() const override { return ch; }
-  bool computeBlock(RenderCtx& ctx, NodeState&, int64_t start, int frames,
+  std::unique_ptr<NodeState> makeState() const override {
+    return std::make_unique<FusedState>();
+  }
+  bool computeBlock(RenderCtx& ctx, NodeState& st0, int64_t start, int frames,
                     double* out) const override {
-    // Both sides are always pulled, even when silence lets the arithmetic
-    // be skipped: stateful subtrees must keep advancing in lockstep or a
-    // shared node would later be queried backwards.
-    Block a = pull(ctx, l, start, frames);
-    Block b = pull(ctx, r, start, frames);
-    if ((op == SigBinOp::Add || op == SigBinOp::Sub) && a.silent() &&
-        b.silent())
-      return true;
-    if (op == SigBinOp::Mul && (a.silent() || b.silent())) return true;
-    // Div is never short-circuited: 0/0 must still produce NaN.
+    // All inputs are always pulled, even when silence lets the
+    // arithmetic be skipped: stateful subtrees must keep advancing in
+    // lockstep or a shared node would later be queried backwards.
+    int nIn = (int)inputs.size();
+    std::array<Block, kMaxFusedOps> in;
+    for (int k = 0; k < nIn; k++)
+      in[(size_t)k] = pull(ctx, inputs[(size_t)k], start, frames);
+    // Fold the silence lattice over the program.
+    std::array<char, kMaxFusedOps> zs;
+    size_t zp = 0;
+    for (const Op& op : program) {
+      switch (op.k) {
+        case Op::K::Input: zs[zp++] = in[(size_t)op.input].silent(); break;
+        case Op::K::Const: zs[zp++] = op.value == 0.0; break;
+        case Op::K::Add:
+        case Op::K::Sub:
+          zp--;
+          zs[zp - 1] = zs[zp - 1] && zs[zp];
+          break;
+        case Op::K::Mul:
+          zp--;
+          zs[zp - 1] = zs[zp - 1] || zs[zp];
+          break;
+        case Op::K::Div:
+          zp--;
+          zs[zp - 1] = 0;
+          break;
+      }
+    }
+    if (zs[0]) return true;
+    // Dense pass, executed block-at-a-time: the value stack holds
+    // block-sized slabs and every operator runs one tight loop over the
+    // whole block, so the per-op dispatch is amortized over the block
+    // and the loops auto-vectorize; the slabs live in the node's scratch
+    // and stay cache-resident. Scalar constants fold eagerly (a
+    // scalar-scalar op produces a scalar, not a slab). Input slabs are
+    // borrowed pointers - results always land in scratch.
     int cc = concreteChannels();
-    for (int f = 0; f < frames; f++)
-      for (int i = 0; i < cc; i++)
-        out[f * cc + i] = applyOp(op, a.at(f, i), b.at(f, i));
+    size_t slab = (size_t)frames * (size_t)cc;
+    auto& st = static_cast<FusedState&>(st0);
+    if (st.scratch.size() < slab * (size_t)depthNeed)
+      st.scratch.resize(slab * (size_t)depthNeed);
+    struct Slot {
+      const double* p = nullptr;  // dense slab unless scalar
+      double scalar = 0;
+      bool isScalar = false;
+      bool perFrame = false;  // 1 value/frame under a multi-channel node
+    };
+    static const std::vector<double> kZeroSlab(
+        (size_t)kBlockFrames * (size_t)kMaxChannels, 0.0);
+    std::array<Slot, kMaxFusedOps> stack;
+    size_t sp = 0;
+    for (size_t o = 0; o < program.size(); o++) {
+      const Op& op = program[o];
+      bool last = o + 1 == program.size();
+      switch (op.k) {
+        case Op::K::Input: {
+          const Block& b = in[(size_t)op.input];
+          Slot s;
+          if (b.silent()) s.p = kZeroSlab.data();
+          else { s.p = b.p; s.perFrame = b.cc == 1 && cc > 1; }
+          stack[sp++] = s;
+          break;
+        }
+        case Op::K::Const: {
+          Slot s;
+          s.isScalar = true;
+          s.scalar = op.value;
+          stack[sp++] = s;
+          break;
+        }
+        default: {
+          Slot b = stack[--sp];
+          Slot a = stack[sp - 1];
+          Slot res;
+          if (a.isScalar && b.isScalar) {
+            res.isScalar = true;
+            switch (op.k) {
+              case Op::K::Add: res.scalar = a.scalar + b.scalar; break;
+              case Op::K::Sub: res.scalar = a.scalar - b.scalar; break;
+              case Op::K::Mul: res.scalar = a.scalar * b.scalar; break;
+              default: res.scalar = a.scalar / b.scalar; break;
+            }
+          } else {
+            // The final operator writes straight into the caller's block.
+            double* dst =
+                last ? out : st.scratch.data() + (sp - 1) * slab;
+            if (a.perFrame || b.perFrame) {
+              // Rare shape (a non-constant broadcast input): generic loop.
+              auto at = [&](const Slot& s, int f, int i) {
+                return s.isScalar ? s.scalar
+                                  : s.perFrame ? s.p[f] : s.p[f * cc + i];
+              };
+              for (int f = 0; f < frames; f++)
+                for (int i = 0; i < cc; i++) {
+                  double x = at(a, f, i), y = at(b, f, i);
+                  switch (op.k) {
+                    case Op::K::Add: dst[f * cc + i] = x + y; break;
+                    case Op::K::Sub: dst[f * cc + i] = x - y; break;
+                    case Op::K::Mul: dst[f * cc + i] = x * y; break;
+                    default: dst[f * cc + i] = x / y; break;
+                  }
+                }
+            } else if (a.isScalar) {
+              double x = a.scalar;
+              const double* y = b.p;
+              switch (op.k) {
+                case Op::K::Add:
+                  for (size_t n = 0; n < slab; n++) dst[n] = x + y[n];
+                  break;
+                case Op::K::Sub:
+                  for (size_t n = 0; n < slab; n++) dst[n] = x - y[n];
+                  break;
+                case Op::K::Mul:
+                  for (size_t n = 0; n < slab; n++) dst[n] = x * y[n];
+                  break;
+                default:
+                  for (size_t n = 0; n < slab; n++) dst[n] = x / y[n];
+                  break;
+              }
+            } else if (b.isScalar) {
+              const double* x = a.p;
+              double y = b.scalar;
+              switch (op.k) {
+                case Op::K::Add:
+                  for (size_t n = 0; n < slab; n++) dst[n] = x[n] + y;
+                  break;
+                case Op::K::Sub:
+                  for (size_t n = 0; n < slab; n++) dst[n] = x[n] - y;
+                  break;
+                case Op::K::Mul:
+                  for (size_t n = 0; n < slab; n++) dst[n] = x[n] * y;
+                  break;
+                default:
+                  for (size_t n = 0; n < slab; n++) dst[n] = x[n] / y;
+                  break;
+              }
+            } else {
+              const double* x = a.p;
+              const double* y = b.p;
+              switch (op.k) {
+                case Op::K::Add:
+                  for (size_t n = 0; n < slab; n++) dst[n] = x[n] + y[n];
+                  break;
+                case Op::K::Sub:
+                  for (size_t n = 0; n < slab; n++) dst[n] = x[n] - y[n];
+                  break;
+                case Op::K::Mul:
+                  for (size_t n = 0; n < slab; n++) dst[n] = x[n] * y[n];
+                  break;
+                default:
+                  for (size_t n = 0; n < slab; n++) dst[n] = x[n] / y[n];
+                  break;
+              }
+            }
+            res.p = dst;
+          }
+          stack[sp - 1] = res;
+          break;
+        }
+      }
+    }
+    const Slot& top = stack[0];
+    if (top.isScalar) std::fill(out, out + slab, top.scalar);
+    // else the last operator already wrote into `out`.
     return false;
   }
   void forEachChild(
       const std::function<void(const SigPtr&)>& fn) const override {
-    fn(l);
-    fn(r);
+    for (auto& x : inputs) fn(x);
   }
 };
+
+namespace {
+
+void fusedAppendInput(const SigPtr& x, std::vector<SigPtr>& inputs,
+                      std::vector<FusedNode::Op>& prog) {
+  for (size_t k = 0; k < inputs.size(); k++)
+    if (inputs[k] == x) {  // dedup: `x * x` pulls x once
+      prog.push_back({FusedNode::Op::K::Input, (int)k, 0});
+      return;
+    }
+  inputs.push_back(x);
+  prog.push_back({FusedNode::Op::K::Input, (int)inputs.size() - 1, 0});
+}
+
+void fusedAppendOperand(const SigPtr& x, std::vector<SigPtr>& inputs,
+                        std::vector<FusedNode::Op>& prog) {
+  if (auto* c = dynamic_cast<const ConstNode*>(x.get())) {
+    prog.push_back({FusedNode::Op::K::Const, 0, c->value});
+    return;
+  }
+  if (auto* fx = dynamic_cast<const FusedNode*>(x.get())) {
+    for (const auto& op : fx->program) {
+      if (op.k == FusedNode::Op::K::Input)
+        fusedAppendInput(fx->inputs[(size_t)op.input], inputs, prog);
+      else
+        prog.push_back(op);
+    }
+    return;
+  }
+  fusedAppendInput(x, inputs, prog);
+}
+
+}  // namespace
 
 struct MixNode final : SigNode {
   std::vector<SigPtr> items;
@@ -789,7 +996,36 @@ SigPtr makeClip(ClipKind kind, double threshold, SigPtr input) {
   return std::make_shared<ClipNode>(kind, threshold, std::move(input));
 }
 SigPtr makeBinOp(SigBinOp op, SigPtr l, SigPtr r) {
-  return std::make_shared<BinOpNode>(op, std::move(l), std::move(r));
+  FusedNode::Op::K k = FusedNode::Op::K::Add;
+  switch (op) {
+    case SigBinOp::Add: k = FusedNode::Op::K::Add; break;
+    case SigBinOp::Sub: k = FusedNode::Op::K::Sub; break;
+    case SigBinOp::Mul: k = FusedNode::Op::K::Mul; break;
+    case SigBinOp::Div: k = FusedNode::Op::K::Div; break;
+  }
+  auto node = std::make_shared<FusedNode>();
+  node->ch = mergeChannels(l->channels(), r->channels(), "signal arithmetic");
+  fusedAppendOperand(l, node->inputs, node->program);
+  fusedAppendOperand(r, node->inputs, node->program);
+  node->program.push_back({k, 0, 0});
+  if (node->program.size() > kMaxFusedOps) {
+    // Too big to inline: keep both operands as inputs. Their own fused
+    // programs stay intact, so long chains fuse in bounded chunks.
+    node->inputs.clear();
+    node->program.clear();
+    fusedAppendInput(l, node->inputs, node->program);
+    fusedAppendInput(r, node->inputs, node->program);
+    node->program.push_back({k, 0, 0});
+  }
+  int depth = 0;
+  for (const auto& o : node->program) {
+    if (o.k == FusedNode::Op::K::Input || o.k == FusedNode::Op::K::Const)
+      depth++;
+    else
+      depth--;
+    node->depthNeed = std::max(node->depthNeed, depth);
+  }
+  return node;
 }
 SigPtr makeMix(std::vector<SigPtr> items) {
   return std::make_shared<MixNode>(std::move(items));
@@ -830,9 +1066,10 @@ void decomposeInto(const SigPtr& n, int depth, std::vector<SigPtr>& leaves) {
       for (auto& x : chans->items) decomposeInto(x, depth - 1, leaves);
       return;
     }
-    if (auto* bin = dynamic_cast<const BinOpNode*>(n.get())) {
-      decomposeInto(bin->l, depth - 1, leaves);
-      decomposeInto(bin->r, depth - 1, leaves);
+    if (auto* fused = dynamic_cast<const FusedNode*>(n.get())) {
+      // The fused program is the spine's arithmetic; its inputs are the
+      // independent subtrees hanging off it.
+      for (auto& x : fused->inputs) decomposeInto(x, depth - 1, leaves);
       return;
     }
     // Walk through single-input wrappers (filter, clip, reverb, delay...)

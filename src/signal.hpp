@@ -79,12 +79,19 @@ using PreRenderedMap = std::unordered_map<const SigNode*, PreRenderedWindow>;
 // between renders. Stateful nodes are evaluated at monotonically
 // increasing frame indices and catch up block-by-block when queried with
 // a gap (this is what gives placed samples "from the epoch" semantics).
+// Render-wide cache of discretized sample windows, shared by every
+// placement of the same (source, window) pair - see PlaceNode. Owned by
+// renderWindow; opaque outside the engine.
+struct SampleCache;
+
 struct RenderCtx {
   double rate;
   // Optional cross-render reuse; not inherited by placements' private
   // contexts (a placement remaps time, so a shared window would be
   // served at the wrong offset there).
   const PreRenderedMap* preRendered = nullptr;
+  // Shared sample-window cache for placements (nullable).
+  SampleCache* sampleCache = nullptr;
   std::unordered_map<const SigNode*, std::unique_ptr<NodeState>> states;
 
   explicit RenderCtx(double r) : rate(r) {}

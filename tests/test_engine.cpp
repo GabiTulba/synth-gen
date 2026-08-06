@@ -645,3 +645,26 @@ TEST(engine_graph_contains_shared) {
   // context, so a pre-rendered window would never be served there.
   CHECK(!graphContainsShared(placedElsewhere, bus.get()));
 }
+
+TEST(engine_sample_cache_slices_at_odd_offsets) {
+  // Several placements of one stateful sample at block-misaligned
+  // timestamps: each must equal the directly rendered sample window,
+  // frame for frame, wherever it lands (the shared sample cache serves
+  // slices at arbitrary offsets).
+  double rate = 8000.0;
+  SigPtr voice = makeFilter(
+      FilterKind::Lowpass, 900.0,
+      makeBinOp(SigBinOp::Mul, makeOsc(OscKind::Saw, 220.0),
+                makeAdsr(0.01, 0.05, 0.5, 0.1, 0.15)));
+  Rendered ref = renderWindow(voice, 0.0, 0.25, rate);
+  double ats[3] = {0.013, 0.531, 1.2071};
+  std::vector<SigPtr> placed;
+  for (double at : ats) placed.push_back(makePlace(voice, 0.0, 0.25, at));
+  Rendered r = renderWindow(makeMix(placed), 0.0, 2.0, rate);
+  int64_t len = llround(0.25 * rate);
+  for (double at : ats) {
+    int64_t nAt = llround(at * rate);
+    for (int64_t k = 0; k < len; k++)
+      CHECK(r.interleaved[(size_t)(nAt + k)] == ref.interleaved[(size_t)k]);
+  }
+}

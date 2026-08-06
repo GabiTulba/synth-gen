@@ -858,13 +858,123 @@ struct ChannelsNode final : SigNode {
 
 // --- Placement -------------------------------------------------------------
 
-// Each placement owns a private evaluation context for its source subtree:
-// a Sample is a fixed finite slice, so every placement of it must replay
-// identical content. Isolating state per placement makes that hold even
-// when the source contains stateful nodes (filters, fm, delay) and the
-// same sample value is placed at several timestamps - the canonical
-// `mix_all [place k 0s; place k 500ms]` idiom (§5.1).
+// A discretized sample window, rendered once per render and shared by
+// every placement of the same (source, window) pair. Values are exactly
+// what a placement's private replay would compute (renders are
+// deterministic and block partitioning does not affect values), so
+// serving slices is bit-exact. [nzBegin, nzEnd) brackets the frames with
+// any nonzero value; slices outside it are silent - which is what keeps
+// envelope-gated tails and pre-attack padding free for every placement.
+struct CachedSample {
+  int cc = 1;
+  int64_t frames = 0;
+  std::vector<double> interleaved;
+  int64_t nzBegin = 0, nzEnd = 0;  // nzBegin >= nzEnd means all-zero
+};
+
+struct SampleCache {
+  struct Key {
+    const SigNode* src;
+    double from, to;
+    bool operator==(const Key& o) const {
+      return src == o.src && from == o.from && to == o.to;
+    }
+  };
+  struct KeyHash {
+    size_t operator()(const Key& k) const {
+      size_t h = std::hash<const void*>()(k.src);
+      h = h * 1000003u ^ std::hash<double>()(k.from);
+      h = h * 1000003u ^ std::hash<double>()(k.to);
+      return h;
+    }
+  };
+  std::mutex m;
+  // nullptr value = another thread is building this entry right now.
+  std::unordered_map<Key, std::shared_ptr<const CachedSample>, KeyHash>
+      entries;
+
+  // Returns the cached window, building it on first use. Returns nullptr
+  // if the entry is mid-build on another thread; the caller then falls
+  // back to a private replay (identical values, just not shared).
+  std::shared_ptr<const CachedSample> acquire(const SigPtr& src, double from,
+                                              double to, double rate) {
+    Key key{src.get(), from, to};
+    {
+      std::lock_guard<std::mutex> lk(m);
+      auto it = entries.find(key);
+      if (it != entries.end()) return it->second;  // ready, or building
+      entries.emplace(key, nullptr);               // claim
+    }
+    std::shared_ptr<const CachedSample> built;
+    try {
+      built = build(src, from, to, rate);
+    } catch (...) {
+      std::lock_guard<std::mutex> lk(m);
+      entries.erase(key);
+      throw;
+    }
+    std::lock_guard<std::mutex> lk(m);
+    entries[key] = built;
+    return built;
+  }
+
+ private:
+  std::shared_ptr<const CachedSample> build(const SigPtr& src, double from,
+                                            double to, double rate) {
+    // Mirror PlaceNode's window arithmetic exactly, then render the
+    // source the same way a placement's private context would: block by
+    // block from n0, stateful nodes catching up from the epoch. Nested
+    // placements inside the sample share this cache (keys differ, and
+    // the graph is acyclic, so the recursion terminates).
+    int64_t n0 = llround(from * rate);
+    int64_t len = llround((to - from) * rate);
+    auto cs = std::make_shared<CachedSample>();
+    cs->cc = src->concreteChannels();
+    cs->frames = len;
+    cs->interleaved.assign((size_t)(len * cs->cc), 0.0);
+    RenderCtx ctx(rate);
+    ctx.sampleCache = this;
+    for (int64_t n = n0; n < n0 + len; n += kBlockFrames) {
+      int f = (int)std::min<int64_t>(kBlockFrames, n0 + len - n);
+      bool silent = false;
+      const double* p = src->renderBlock(ctx, n, f, silent);
+      if (!silent)
+        std::memcpy(cs->interleaved.data() + (size_t)((n - n0) * cs->cc), p,
+                    (size_t)f * (size_t)cs->cc * sizeof(double));
+    }
+    // Bracket the nonzero span (per frame, any channel).
+    const double* d = cs->interleaved.data();
+    int64_t b = 0, e = len;
+    while (b < e) {
+      bool z = true;
+      for (int c = 0; c < cs->cc && z; c++) z = d[b * cs->cc + c] == 0.0;
+      if (!z) break;
+      b++;
+    }
+    while (e > b) {
+      bool z = true;
+      for (int c = 0; c < cs->cc && z; c++)
+        z = d[(e - 1) * cs->cc + c] == 0.0;
+      if (!z) break;
+      e--;
+    }
+    cs->nzBegin = b;
+    cs->nzEnd = e;
+    return cs;
+  }
+};
+
+// Each placement replays a fixed finite slice of its source: a Sample is
+// a value, so every placement of it must produce identical content. The
+// shared SampleCache exploits exactly that guarantee - the first
+// placement renders the window once and all placements (of all
+// timestamps, on all planner threads) serve slices of it. When the cache
+// is unavailable (entry mid-build on another thread), the placement
+// falls back to its own private evaluation context, which isolates
+// stateful nodes (filters, fm, delay) per placement - the canonical
+// `mix_all [place k 0s; place k 500ms]` idiom (§5.1) holds either way.
 struct PlaceState final : NodeState {
+  std::shared_ptr<const CachedSample> cached;
   std::unique_ptr<RenderCtx> sub;
 };
 
@@ -893,9 +1003,26 @@ struct PlaceNode final : SigNode {
     // touched. This is what makes long mixes of short samples cheap.
     if (start >= end || start + (int64_t)frames <= nAt) return true;
     auto& st = static_cast<PlaceState&>(st0);
-    if (!st.sub) st.sub = std::make_unique<RenderCtx>(ctx.rate);
     int64_t s = std::max(start, nAt);
     int64_t e = std::min(start + (int64_t)frames, end);
+    int cc = concreteChannels();
+    // Adopt the shared window once, before any private replay starts.
+    if (!st.cached && !st.sub && ctx.sampleCache)
+      st.cached = ctx.sampleCache->acquire(source, from, to, ctx.rate);
+    if (st.cached) {
+      const CachedSample& cs = *st.cached;
+      int64_t q0 = s - nAt, q1 = e - nAt;  // frame span within the window
+      if (q1 <= cs.nzBegin || q0 >= cs.nzEnd) return true;
+      std::fill(out, out + (size_t)frames * (size_t)cc, 0.0);
+      std::memcpy(out + (size_t)(s - start) * (size_t)cc,
+                  cs.interleaved.data() + (size_t)(q0 * cs.cc),
+                  (size_t)(q1 - q0) * (size_t)cc * sizeof(double));
+      return false;
+    }
+    if (!st.sub) {
+      st.sub = std::make_unique<RenderCtx>(ctx.rate);
+      st.sub->sampleCache = ctx.sampleCache;  // nested samples still share
+    }
     int q = (int)(e - s);
     // The window maps onto a contiguous run of source frames, so the
     // private context only ever sees monotonically advancing queries.
@@ -903,7 +1030,6 @@ struct PlaceNode final : SigNode {
     const double* p =
         source->renderBlock(*st.sub, s - nAt + nFrom, q, srcSilent);
     if (srcSilent) return true;
-    int cc = concreteChannels();
     std::fill(out, out + (size_t)frames * (size_t)cc, 0.0);
     std::memcpy(out + (size_t)(s - start) * (size_t)cc, p,
                 (size_t)q * (size_t)cc * sizeof(double));
@@ -1218,8 +1344,13 @@ Rendered renderWindow(const SigPtr& node, double from, double to, double rate,
     groups = groupLeaves(leaves);
   int workers = std::min<int>(maxThreads, (int)groups.size());
 
+  // One sample-window cache per render: every placement of the same
+  // (source, window) pair - across the whole graph and all planner
+  // threads - discretizes it once and serves slices.
+  SampleCache sampleCache;
   RenderCtx mainCtx(rate);
   mainCtx.preRendered = preRendered;
+  mainCtx.sampleCache = &sampleCache;
 
   if (workers < 2) {
     // Sequential block loop.
@@ -1240,6 +1371,7 @@ Rendered renderWindow(const SigPtr& node, double from, double to, double rate,
   for (size_t g = 0; g < groups.size(); g++) {
     groupCtx.push_back(std::make_unique<RenderCtx>(rate));
     groupCtx.back()->preRendered = preRendered;
+    groupCtx.back()->sampleCache = &sampleCache;
   }
 
   // Per-block barrier scheduling: for every block, the workers claim groups

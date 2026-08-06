@@ -228,6 +228,19 @@ positional argument).
   test instead of a worst-case zero scan (~2.7 s → ~2.6 s). A
   per-element interpreter variant of fusion was tried first, measured
   as a regression (it defeated SIMD auto-vectorization), and replaced.
+- [x] **Sample cache across placements** — a Sample is a value, so every
+  placement of it is guaranteed to replay identical content; the engine
+  now exploits that instead of merely honoring it. Each render owns a
+  thread-safe cache keyed by (source node, window): the first placement
+  discretizes the whole window once, and every placement — at any
+  timestamp, block-aligned or not, on any planner thread — serves
+  slices of that buffer. The cached window records its nonzero span, so
+  envelope-gated tails and pre-attack padding are silent for free. A
+  placement whose entry is mid-build on another thread falls back to
+  the classic private-context replay (identical values either way), and
+  nested samples inside a cached window share the same cache. Measured:
+  fresh darksynth build ~2.6 s → ~1.8 s wall (drums stem 1174 → 738 ms,
+  master 1490 → 1088 ms); artifacts byte-identical.
 
 ## Decisions taken on points the design doc leaves open
 

@@ -1,18 +1,27 @@
-(* Darksynth: ~91 s at 120 BPM (beat 500ms, bar 2s), A minor with the
-   harmonic-minor E. Two drops.
+(* Darksynth: ~120 s at 120 BPM (beat 500ms, bar 2s), A minor with the
+   harmonic-minor E. Three drops.
 
-   0-16s   INTRO      blinking alarm pluck over pad + held bass; a
-                      gentle riser announces the mild drums entrance
-   16-32s  BUILD      four-floor kick, hats, bass eighths, snare roll,
-                      riser from 28s; everything cuts at 31.5s (the gap)
-   32-48s  DROP 1     the drums drop: full kit + octave-pumping grind
-                      bass, deliberately no guitar - held back
-   48-64s  BREAKDOWN  pad + held bass; engine Doppler crosses at 54s,
-                      kick re-enters 56s, riser from 60s
-   64-88s  DROP 2     the full wall: sixteenth grind bursts, guitar
-                      chugs + lead runs, sixteenth hats
-   88-91s  OUTRO      impact + final held bass; a last engine Doppler
-                      crosses the field as the pad dies *)
+   0-16s    INTRO      blinking alarm pluck over pad + held bass; a
+                       gentle riser announces the mild drums entrance
+   16-32s   BUILD      four-floor kick, hats, bass eighths, snare roll,
+                       riser from 28s; everything cuts at 31.5s (the gap)
+   32-48s   DROP 1     the drums drop: full kit + octave-pumping grind
+                       bass, deliberately no guitar - held back
+   48-64s   BREAKDOWN  pad + held bass; two far-off bell tolls
+                       foreshadow the end; engine Doppler at 54s, kick
+                       re-enters 56s, riser from 60s
+   64-88s   DROP 2     the full wall: sixteenth grind bursts, guitar
+                       chugs + lead runs, sixteenth hats
+   88-96s   TOLLING    bells toll the chord roots over held bass and
+                       rattling chains; an engine Doppler at 89s, kick
+                       re-enters 92s, riser from 91.5s
+   96-112s  DROP 3     the biggest wall: sixteenth grind at both ends,
+                       chugs + lead runs, chain accents on the offbeats,
+                       a bell marking every chord turn; the last bar
+                       gallops on a double-time kick
+   112-120s OUTRO      the long quiet fall: half-gain pad, soft held
+                       bass, dying bell tolls and chain echoes; a last
+                       engine Doppler crosses the field *)
 
 import Drums
 import Bass
@@ -25,20 +34,26 @@ let kick_line : Scalar Signal =
   mix_all [place_multi Drums.kick_hit (time_steps ~start:16s ~step:500ms ~count:31.0);
            place_multi Drums.kick_hit (time_steps ~start:32s ~step:500ms ~count:32.0);
            place_multi Drums.kick_hit (time_steps ~start:56s ~step:500ms ~count:15.0);
-           place_multi Drums.kick_hit (time_steps ~start:64s ~step:500ms ~count:48.0)]
+           place_multi Drums.kick_hit (time_steps ~start:64s ~step:500ms ~count:48.0);
+           place_multi Drums.kick_hit (time_steps ~start:92s ~step:500ms ~count:7.0);
+           place_multi Drums.kick_hit (time_steps ~start:96s ~step:500ms ~count:32.0);
+           place_multi Drums.kick_hit (time_steps ~start:108250ms ~step:250ms ~count:15.0)]
 ;;
 
 let snare_line : Scalar Signal =
   mix_all [place_multi Drums.snare_hit (time_steps ~start:30s ~step:250ms ~count:6.0);
            place_multi Drums.snare_hit (time_steps ~start:32500ms ~step:1s ~count:16.0);
            place_multi Drums.snare_hit (time_steps ~start:62s ~step:250ms ~count:6.0);
-           place_multi Drums.snare_hit (time_steps ~start:64500ms ~step:1s ~count:24.0)]
+           place_multi Drums.snare_hit (time_steps ~start:64500ms ~step:1s ~count:24.0);
+           place_multi Drums.snare_hit (time_steps ~start:94s ~step:250ms ~count:6.0);
+           place_multi Drums.snare_hit (time_steps ~start:96500ms ~step:1s ~count:16.0)]
 ;;
 
 let hat_line : Scalar Signal =
   mix_all [place_multi Drums.hat_hit (time_steps ~start:16s ~step:250ms ~count:62.0);
            place_multi Drums.hat_hit (time_steps ~start:32250ms ~step:500ms ~count:32.0);
-           place_multi Drums.hat_hit (time_steps ~start:64250ms ~step:250ms ~count:94.0)]
+           place_multi Drums.hat_hit (time_steps ~start:64250ms ~step:250ms ~count:94.0);
+           place_multi Drums.hat_hit (time_steps ~start:96250ms ~step:250ms ~count:62.0)]
 ;;
 
 let drum_line : Scalar Signal =
@@ -103,15 +118,27 @@ let bass_line : Scalar Signal =
              grind_pump ~freq:41.2 ~start:76s ~offstart:76250ms;
              grind_pump ~freq:55.0 ~start:80s ~offstart:80250ms;
              grind_sixteenths ~freq:43.65 ~start:84s] in
-  let outro : Scalar Signal = Bass.held 55.0 |> place ~at:88s in
-  intro * 0.8 + build + drop1 + breakdown * 0.8 + drop2 + outro
+  let tolling : Scalar Signal =
+    mix_all [place_multi (Bass.held 55.0) [88s; 90s];
+             Bass.held 43.65 |> place ~at:92s;
+             Bass.held 41.2 |> place ~at:94s] in
+  let drop3 : Scalar Signal =
+    mix_all [grind_sixteenths ~freq:55.0 ~start:96s;
+             grind_pump ~freq:43.65 ~start:100s ~offstart:100250ms;
+             grind_pump ~freq:73.42 ~start:104s ~offstart:104250ms;
+             grind_sixteenths ~freq:41.2 ~start:108s] in
+  let outro : Scalar Signal =
+    place_multi (Bass.held 55.0) [112s; 114s; 116s] in
+  intro * 0.8 + build + drop1 + breakdown * 0.8 + drop2
+    + tolling * 0.8 + drop3 + outro * 0.55
 ;;
 
 (* ---------- pads: the 16 s cycle tiles the whole song ---------- *)
 let pad_line detune:Scalar : Scalar Signal =
   let one_cycle : Scalar Sample =
     Pads.cycle detune |> sample ~from:0s ~to:16s in
-  place_multi one_cycle [0s; 16s; 32s; 48s; 64s; 80s]
+  place_multi one_cycle [0s; 16s; 32s; 48s; 64s; 80s; 96s]
+  + (one_cycle |> place ~at:112s) * 0.5
 ;;
 
 (* ---------- distorted guitar (drops only) ---------- *)
@@ -127,7 +154,11 @@ let chug_part : Scalar Signal =
            chugs ~freq:73.42 ~start:72s ~count:12.0;
            chugs ~freq:82.41 ~start:76s ~count:12.0;
            chugs ~freq:110.0 ~start:80s ~count:12.0;
-           chugs ~freq:87.31 ~start:84s ~count:12.0]
+           chugs ~freq:87.31 ~start:84s ~count:12.0;
+           chugs ~freq:110.0 ~start:96s ~count:12.0;
+           chugs ~freq:87.31 ~start:100s ~count:12.0;
+           chugs ~freq:73.42 ~start:104s ~count:12.0;
+           chugs ~freq:82.41 ~start:108s ~count:12.0]
 ;;
 
 (* Lead runs: four syncopated notes at the tail of each chord segment
@@ -153,7 +184,56 @@ let stab_part : Scalar Signal =
            lead_run ~n1:220.0 ~n2:261.63 ~n3:329.63
                     ~at1:82500ms ~ats2:[83s; 83500ms] ~at3:83250ms;
            lead_run ~n1:349.23 ~n2:261.63 ~n3:220.0
-                    ~at1:86500ms ~ats2:[87s; 87500ms] ~at3:87250ms]
+                    ~at1:86500ms ~ats2:[87s; 87500ms] ~at3:87250ms;
+           lead_run ~n1:329.63 ~n2:261.63 ~n3:220.0
+                    ~at1:98500ms ~ats2:[99s; 99500ms] ~at3:99250ms;
+           lead_run ~n1:349.23 ~n2:261.63 ~n3:220.0
+                    ~at1:102500ms ~ats2:[103s; 103500ms] ~at3:103250ms;
+           lead_run ~n1:293.66 ~n2:220.0 ~n3:174.61
+                    ~at1:106500ms ~ats2:[107s; 107500ms] ~at3:107250ms;
+           lead_run ~n1:246.94 ~n2:329.63 ~n3:440.0
+                    ~at1:110500ms ~ats2:[111s; 111500ms] ~at3:111250ms]
+;;
+
+(* ---------- bells: far-off tolls that close in ---------- *)
+(* Foreshadowed quietly in the first breakdown, tolling the chord roots
+   through 88-96s, marking every chord turn under drop 3, then dying
+   away through the outro (the last, lowest toll rings past the end). *)
+let bell_part : Scalar Signal =
+  let foreshadow : Scalar Signal =
+    (Fx.bell_hit 220.0 |> place ~at:48s)
+    + (Fx.bell_hit 164.81 |> place ~at:56s) in
+  let tolling : Scalar Signal =
+    mix_all [Fx.bell_hit 220.0 |> place ~at:88s;
+             Fx.bell_hit 174.61 |> place ~at:90s;
+             Fx.bell_hit 146.83 |> place ~at:92s;
+             Fx.bell_hit 164.81 |> place ~at:94s] in
+  let drop3 : Scalar Signal =
+    mix_all [Fx.bell_hit 220.0 |> place ~at:96s;
+             Fx.bell_hit 174.61 |> place ~at:100s;
+             Fx.bell_hit 146.83 |> place ~at:104s;
+             Fx.bell_hit 164.81 |> place ~at:108s] in
+  let outro : Scalar Signal =
+    (Fx.bell_hit 220.0 |> place ~at:112s)
+    + (Fx.bell_hit 220.0 |> place ~at:116s) * 0.6
+    + (Fx.bell_hit 110.0 |> place ~at:118s) * 0.45 in
+  foreshadow * 0.5 + tolling * 0.75 + drop3 * 0.55 + outro * 0.7
+;;
+
+(* ---------- chains: industrial rattle ---------- *)
+(* Loose shakes through the tolling section, offbeat accents locked to
+   the bar grid under drop 3, then a single dying shake echoing away in
+   the outro. *)
+let chain_part : Scalar Signal =
+  let tolling : Scalar Signal =
+    place_multi Fx.chain_shake [89s; 91s; 93500ms; 95s] in
+  let drop3 : Scalar Signal =
+    place_multi Fx.chain_shake (time_steps ~start:96250ms ~step:2s ~count:8.0) in
+  let outro : Scalar Signal =
+    let dying : Scalar Signal = Fx.chain_shake |> place ~at:112500ms in
+    dying + (dying |> delay ~by:700ms) * 0.5
+          + (dying |> delay ~by:1400ms) * 0.25 in
+  tolling * 0.5 + drop3 * 0.7 + outro * 0.4
 ;;
 
 (* ---------- fx ---------- *)
@@ -161,8 +241,8 @@ let stab_part : Scalar Signal =
    mildest arrival of the song. *)
 let fx_line : Scalar Signal =
   (Fx.riser |> place ~at:11500ms) * 0.55
-  + place_multi Fx.riser [27500ms; 59500ms]
-  + place_multi Fx.impact [32s; 64s; 88s]
+  + place_multi Fx.riser [27500ms; 59500ms; 91500ms]
+  + place_multi Fx.impact [32s; 64s; 88s; 96s; 112s]
 ;;
 
 (* ---------- stereo buses & master ---------- *)
@@ -177,11 +257,17 @@ let guitar_bus : Vector Signal =
             chug_part * 0.44 + stab_part * 0.55] ;;
 (* Alarm sits slightly left; the stereo Doppler whooshes cross the field
    mid-breakdown and over the very end. *)
+(* Bells lean right, chains lean left, alarm slightly left; the
+   Doppler whooshes cross the field in each breakdown and - quieter -
+   over the long outro. *)
 let fx_bus : Vector Signal =
-  channels [fx_line * 0.5 + alarm_line * 0.4;
-            fx_line * 0.5 + alarm_line * 0.28]
+  channels [fx_line * 0.5 + alarm_line * 0.4 + bell_part * 0.3
+              + chain_part * 0.42;
+            fx_line * 0.5 + alarm_line * 0.28 + bell_part * 0.42
+              + chain_part * 0.3]
   + (Fx.doppler_whoosh |> place ~at:54s) * 0.55
-  + (Fx.doppler_whoosh |> place ~at:89s) * 0.6 ;;
+  + (Fx.doppler_whoosh |> place ~at:89s) * 0.6
+  + (Fx.doppler_whoosh |> place ~at:117500ms) * 0.4 ;;
 
 let master : Vector Signal =
   pad_bus + drum_bus + bass_bus + guitar_bus + fx_bus
@@ -189,26 +275,26 @@ let master : Vector Signal =
 ;;
 
 let _ =
-  master |> sample ~from:0s ~to:91s
+  master |> sample ~from:0s ~to:120s
          |> render ~name:"darksynth" ~rate:44100.0 ;;
 
 let _ =
   render_stems ~name:"darksynth" ~rate:44100.0
-    ~stems:[("drums", drum_bus |> sample ~from:0s ~to:91s);
-            ("bass", bass_bus |> sample ~from:0s ~to:91s);
-            ("pads", pad_bus |> sample ~from:0s ~to:91s);
-            ("guitar", guitar_bus |> sample ~from:0s ~to:91s);
-            ("fx", fx_bus |> sample ~from:0s ~to:91s)]
+    ~stems:[("drums", drum_bus |> sample ~from:0s ~to:120s);
+            ("bass", bass_bus |> sample ~from:0s ~to:120s);
+            ("pads", pad_bus |> sample ~from:0s ~to:120s);
+            ("guitar", guitar_bus |> sample ~from:0s ~to:120s);
+            ("fx", fx_bus |> sample ~from:0s ~to:120s)]
 ;;
 
 (* The overview image renders at a low rate: waveform lanes don't need
    audio resolution, and it keeps the build quick. *)
 let _ =
   render_vis_stems ~name:"darksynth-stems-wave" ~rate:8000.0
-    ~stems:[("master", master |> sample ~from:0s ~to:91s);
-            ("drums", drum_bus |> sample ~from:0s ~to:91s);
-            ("bass", bass_bus |> sample ~from:0s ~to:91s);
-            ("pads", pad_bus |> sample ~from:0s ~to:91s);
-            ("guitar", guitar_bus |> sample ~from:0s ~to:91s);
-            ("fx", fx_bus |> sample ~from:0s ~to:91s)]
+    ~stems:[("master", master |> sample ~from:0s ~to:120s);
+            ("drums", drum_bus |> sample ~from:0s ~to:120s);
+            ("bass", bass_bus |> sample ~from:0s ~to:120s);
+            ("pads", pad_bus |> sample ~from:0s ~to:120s);
+            ("guitar", guitar_bus |> sample ~from:0s ~to:120s);
+            ("fx", fx_bus |> sample ~from:0s ~to:120s)]
 ;;

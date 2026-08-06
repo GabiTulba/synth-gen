@@ -19,6 +19,46 @@ let impact : Scalar Sample =
     |> sample ~from:0s ~to:2500ms
 ;;
 
+(* Dark tolling bell: classic FM bell voicing. The modulator sits at an
+   inharmonic ~3.47x the strike tone and its deviation decays, so the
+   clangorous sidebands of the strike settle into a purer ring; a second
+   inharmonic partial and a half-frequency hum give it body, and a
+   little reverb hangs it in the room. *)
+let bell_hit freq:Scalar : Scalar Sample =
+  let strike : Scalar Signal =
+    fm ~carrier:freq
+       ~modulator:(sine (freq * 3.47) * (freq * 2.6) * exp_decay 1.8) in
+  let shimmer : Scalar Signal = sine (freq * 2.76) * 0.22 * exp_decay 2.4 in
+  let hum : Scalar Signal = sine (freq * 0.5) * 0.3 * exp_decay 0.9 in
+  let struck : Scalar Signal =
+    (strike * 0.62 + shimmer + hum) * exp_decay 1.1
+      * (adsr ~attack:4ms ~decay:1ms ~sustain:1.0 ~release:400ms
+              ~hold:3400ms) in
+  struck |> reverb ~decay:1200ms ~damping:0.45 ~mix:0.3
+         |> sample ~from:0s ~to:4s
+;;
+
+(* Industrial chain rattle: one link is a burst of high noise with two
+   inharmonic metallic ring tones; a shake is two irregular layers of
+   links (the offset layer quieter), like a chain settling against
+   itself. *)
+let chain_link : Scalar Sample =
+  let clink : Scalar Signal =
+    noise 6200.0 * 0.5 + sine 3170.0 * 0.2 + sine 4733.0 * 0.14 in
+  (clink |> highpass ~cutoff:2200.0) * exp_decay 26.0
+    * (adsr ~attack:1ms ~decay:1ms ~sustain:1.0 ~release:40ms ~hold:110ms)
+    |> sample ~from:0s ~to:150ms
+;;
+
+let chain_shake : Scalar Sample =
+  let l1 : Scalar Signal =
+    place_multi chain_link [0s; 90ms; 210ms; 340ms; 470ms] in
+  let l2 : Scalar Signal =
+    place_multi chain_link [35ms; 130ms; 265ms; 415ms; 545ms] in
+  (l1 + l2 * 0.55) * 0.8
+    |> sample ~from:0s ~to:700ms
+;;
+
 (* Blinking alarm pluck for the intro: a bright square blip. The song
    places it on a strong/weak 500 ms blink grid with a touch of delay. *)
 let alarm_hit : Scalar Sample =

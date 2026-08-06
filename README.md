@@ -41,6 +41,11 @@ build/synthc watch examples/pluck
 # Front-end checks only (for editor integration):
 build/synthc lint path/to/file.synth
 
+# Stream the build log (-v works for watch too): phase timings, one line
+# per artifact with its worker thread and discretize/write durations, and
+# per-target dependency statistics (direct deps, dependents, closure):
+build/synthc build examples/basic -v
+
 # Dev app: browse and play a project's rendered artifacts; live-updates
 # whenever a build rewrites the metadata (pair it with `synthc watch`):
 build/synth-dev examples/pluck

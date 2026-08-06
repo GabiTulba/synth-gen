@@ -2,9 +2,11 @@
 
 #include <algorithm>
 #include <chrono>
+#include <cstdio>
 #include <filesystem>
 #include <fstream>
 #include <map>
+#include <mutex>
 #include <sstream>
 #include <thread>
 
@@ -25,6 +27,46 @@ namespace {
 // Bump when engine semantics change so stale cached artifacts are not
 // mistaken for up-to-date ones.
 constexpr uint64_t kEngineVersion = 1;
+
+// Streaming build log: every line is stamped with the time since the
+// build started; calls are serialized so worker threads can log freely.
+class BuildLog {
+ public:
+  explicit BuildLog(std::function<void(const std::string&)> sink)
+      : sink_(std::move(sink)),
+        t0_(std::chrono::steady_clock::now()) {}
+
+  explicit operator bool() const { return (bool)sink_; }
+
+  void line(const std::string& msg) {
+    if (!sink_) return;
+    double secs = secondsSince(t0_);
+    char head[32];
+    std::snprintf(head, sizeof head, "[%8.3fs] ", secs);
+    std::lock_guard<std::mutex> lock(mu_);
+    sink_(head + msg);
+  }
+
+  static double secondsSince(std::chrono::steady_clock::time_point start) {
+    return std::chrono::duration<double>(std::chrono::steady_clock::now() -
+                                         start)
+        .count();
+  }
+
+ private:
+  std::function<void(const std::string&)> sink_;
+  std::chrono::steady_clock::time_point t0_;
+  std::mutex mu_;
+};
+
+std::string fmtSecs(double s) {
+  char buf[32];
+  if (s < 1.0)
+    std::snprintf(buf, sizeof buf, "%.0f ms", s * 1000.0);
+  else
+    std::snprintf(buf, sizeof buf, "%.2f s", s);
+  return buf;
+}
 
 // Snapshot of a file's identity for change detection. Missing files get a
 // distinct marker so appearing/disappearing counts as a change.
@@ -116,6 +158,7 @@ void writeMetadata(const std::string& path, const BuildResult& r,
       << jsonEscape(t.artifact) << "\", \"rate\": " << formatDouble(t.rate)
       << ", \"channels\": " << t.channelCount << ", \"frames\": " << t.frames
       << ", \"duration_seconds\": " << formatDouble(t.durationSeconds)
+      << ", \"render_ms\": " << formatDouble(t.renderMillis)
       << ", \"error\": \"" << jsonEscape(t.error) << "\"}"
       << (i + 1 < r.targets.size() ? "," : "") << "\n";
   }
@@ -176,6 +219,17 @@ bool parseManifest(const std::string& text, const std::string& file,
 }
 
 BuildResult buildProject(const std::string& projectDir, BuildCache* cache) {
+  BuildOptions options;
+  options.cache = cache;
+  return buildProject(projectDir, options);
+}
+
+BuildResult buildProject(const std::string& projectDir,
+                         const BuildOptions& options) {
+  BuildCache* cache = options.cache;
+  BuildLog log(options.log);
+  auto buildStart = std::chrono::steady_clock::now();
+
   BuildResult r;
   fs::path dir(projectDir);
   fs::path manifestPath = dir / ".build";
@@ -196,17 +250,27 @@ BuildResult buildProject(const std::string& projectDir, BuildCache* cache) {
   if (!parseManifest(manifestText, manifestPath.string(), r.manifest,
                      r.diags))
     return r;
+  log.line("manifest: project '" + r.manifest.projectName + "', " +
+           std::to_string(r.manifest.sources.size()) + " source(s)");
 
   // 2. Parse & type-check every source file (plus imports).
+  auto frontEndStart = std::chrono::steady_clock::now();
   std::vector<std::string> roots;
   for (auto& s : r.manifest.sources) roots.push_back((dir / s).string());
   for (auto& s : roots) r.inputs.push_back(s);
   Program prog = checkProject(roots, r.diags);
+  size_t defCount = 0;
   for (auto& m : prog.modules) {
     sourcesByPath[m.parsed.path] = m.parsed.source;
     if (std::find(roots.begin(), roots.end(), m.parsed.path) == roots.end())
       r.inputs.push_back(m.parsed.path);
+    for (auto& d : m.parsed.defs)
+      if (d.kind == TopDef::Kind::Let) defCount++;
   }
+  log.line("front-end: " + std::to_string(prog.modules.size()) +
+           " module(s), " + std::to_string(defCount) +
+           " definition(s) parsed + checked in " +
+           fmtSecs(BuildLog::secondsSince(frontEndStart)));
 
   fs::path buildDir = dir / "build";
   fs::path artifactDir = buildDir / "artifacts";
@@ -220,10 +284,31 @@ BuildResult buildProject(const std::string& projectDir, BuildCache* cache) {
   }
 
   // 3. Evaluate: enumerate render targets (and run load_* validation).
+  auto evalStart = std::chrono::steady_clock::now();
   std::vector<RenderTarget> targets;
   std::vector<std::string> audioInputs;
   bool evalOk = evaluateProgram(prog, targets, r.diags, &audioInputs);
   for (auto& a : audioInputs) r.inputs.push_back(a);
+  log.line("evaluate: " + std::to_string(targets.size()) + " target(s), " +
+           std::to_string(audioInputs.size()) + " audio input(s) in " +
+           fmtSecs(BuildLog::secondsSince(evalStart)));
+
+  // Dependency statistics per target (from the declaring definition's
+  // spot in the definition graph).
+  if (log && evalOk) {
+    auto stats = defGraphStats(prog);
+    for (auto& t : targets) {
+      auto it = t.declDef ? stats.find(t.declDef) : stats.end();
+      if (it == stats.end()) continue;
+      const DefStats& st = it->second;
+      log.line("deps: '" + t.name + "' (declared in " +
+               st.mod->parsed.name + "): " +
+               std::to_string(st.directDeps) + " direct dependenc" +
+               (st.directDeps == 1 ? "y" : "ies") + ", " +
+               std::to_string(st.dependents) + " dependent(s), closure " +
+               std::to_string(st.closureSize) + " definition(s)");
+    }
+  }
 
   // Project-level rule: duplicate render names are a build error (§5.2).
   std::map<std::string, const RenderTarget*> byName;
@@ -264,6 +349,7 @@ BuildResult buildProject(const std::string& projectDir, BuildCache* cache) {
                      : 0;
     keys[i] = fnvCombine(k, audioSalt);
   }
+  if (!cache) log.line("cache: none supplied (full rebuild)");
 
   // 4. Discretize targets and write artifacts. Cache-fresh targets are
   // reused without re-rendering; the rest render in parallel across a
@@ -288,20 +374,27 @@ BuildResult buildProject(const std::string& projectDir, BuildCache* cache) {
     if (hit) {
       r.targets[i] = hit->info;
       r.targets[i].cached = true;
+      log.line("target '" + t.name + "': cached, artifact reused");
     } else {
       pending.push_back(i);
     }
   }
+  if (cache)
+    log.line("cache: " + std::to_string(targets.size() - pending.size()) +
+             "/" + std::to_string(targets.size()) + " target(s) fresh, " +
+             std::to_string(pending.size()) + " to render");
 
   std::vector<std::string> renderErrors(targets.size());
   {
     std::atomic<size_t> next{0};
-    auto worker = [&] {
+    auto worker = [&](int workerId) {
       for (;;) {
         size_t slot = next.fetch_add(1);
         if (slot >= pending.size()) return;
         size_t i = pending[slot];
         const RenderTarget& t = targets[i];
+        auto targetStart = std::chrono::steady_clock::now();
+        double renderSecs = 0, writeSecs = 0;
         TargetInfo info;
         info.name = t.name;
         info.kind = t.kind == RenderTarget::Kind::Audio ? "audio" : "visual";
@@ -311,18 +404,30 @@ BuildResult buildProject(const std::string& projectDir, BuildCache* cache) {
           fs::path artifactPath = artifactDir / fileName;
           if (t.kind == RenderTarget::Kind::VisualStems) {
             std::vector<std::pair<std::string, Rendered>> lanes;
-            for (auto& [label, s] : t.stems)
+            for (auto& [label, s] : t.stems) {
+              auto laneStart = std::chrono::steady_clock::now();
               lanes.emplace_back(label,
                                  renderWindow(s.sig, s.from, s.to, t.rate));
+              double laneSecs = BuildLog::secondsSince(laneStart);
+              renderSecs += laneSecs;
+              log.line("[worker " + std::to_string(workerId) + "] '" +
+                       t.name + "' lane '" + label + "' discretized in " +
+                       fmtSecs(laneSecs));
+            }
+            auto writeStart = std::chrono::steady_clock::now();
             std::ofstream out(artifactPath, std::ios::trunc);
             if (!out) throw std::runtime_error("cannot write artifact file");
             out << renderStackedWaveformSvg(t.name, lanes, t.rate);
+            writeSecs = BuildLog::secondsSince(writeStart);
             for (auto& [label, r] : lanes)
               info.frames = std::max(info.frames, r.frames);
             info.channelCount = lanes.empty() ? 0 : lanes[0].second.channels;
           } else {
+            auto renderStart = std::chrono::steady_clock::now();
             Rendered rendered =
                 renderWindow(t.sample.sig, t.sample.from, t.sample.to, t.rate);
+            renderSecs = BuildLog::secondsSince(renderStart);
+            auto writeStart = std::chrono::steady_clock::now();
             if (t.kind == RenderTarget::Kind::Visual) {
               std::ofstream out(artifactPath, std::ios::trunc);
               if (!out) throw std::runtime_error("cannot write artifact file");
@@ -331,6 +436,7 @@ BuildResult buildProject(const std::string& projectDir, BuildCache* cache) {
               writeWav(artifactPath.string(), t.rate, rendered.channels,
                        rendered.interleaved);
             }
+            writeSecs = BuildLog::secondsSince(writeStart);
             info.channelCount = rendered.channels;
             info.frames = rendered.frames;
           }
@@ -338,19 +444,37 @@ BuildResult buildProject(const std::string& projectDir, BuildCache* cache) {
               (fs::path("build") / "artifacts" / fileName).generic_string();
           info.durationSeconds =
               t.rate > 0 ? (double)info.frames / t.rate : 0;
+          info.renderMillis =
+              BuildLog::secondsSince(targetStart) * 1000.0;
           info.ok = true;
+          log.line("[worker " + std::to_string(workerId) + "] target '" +
+                   t.name + "' (" + info.kind + "): " +
+                   std::to_string(info.frames) + " frames x " +
+                   std::to_string(info.channelCount) + " ch in " +
+                   fmtSecs(BuildLog::secondsSince(targetStart)) +
+                   " (discretize " + fmtSecs(renderSecs) + ", write " +
+                   fmtSecs(writeSecs) + ")");
         } catch (const std::exception& e) {
           info.error = e.what();
           renderErrors[i] = e.what();
+          log.line("[worker " + std::to_string(workerId) + "] target '" +
+                   t.name + "' FAILED after " +
+                   fmtSecs(BuildLog::secondsSince(targetStart)) + ": " +
+                   e.what());
         }
         r.targets[i] = std::move(info);
       }
     };
     size_t threadCount = std::min<size_t>(
         pending.size(), std::max(1u, std::thread::hardware_concurrency()));
+    if (!pending.empty())
+      log.line("render: " + std::to_string(pending.size()) +
+               " target(s) across " + std::to_string(threadCount) +
+               " worker thread(s)");
     std::vector<std::thread> pool;
-    for (size_t i = 1; i < threadCount; i++) pool.emplace_back(worker);
-    if (!pending.empty()) worker();
+    for (size_t i = 1; i < threadCount; i++)
+      pool.emplace_back(worker, (int)i);
+    if (!pending.empty()) worker(0);
     for (auto& th : pool) th.join();
   }
 
@@ -377,6 +501,19 @@ BuildResult buildProject(const std::string& projectDir, BuildCache* cache) {
   r.ok = allOk;
   // 5. Emit build metadata.
   writeMetadata(r.metadataPath, r, sourcesByPath);
+  if (log) {
+    size_t rendered = 0, cachedCount = 0, failed = 0;
+    for (auto& t : r.targets) {
+      if (!t.ok) failed++;
+      else if (t.cached) cachedCount++;
+      else rendered++;
+    }
+    log.line("done: " + std::to_string(r.targets.size()) + " target(s) (" +
+             std::to_string(rendered) + " rendered, " +
+             std::to_string(cachedCount) + " cached, " +
+             std::to_string(failed) + " failed), wall " +
+             fmtSecs(BuildLog::secondsSince(buildStart)));
+  }
   return r;
 }
 
@@ -402,18 +539,23 @@ std::map<std::string, Stamp> snapshot(const std::string& projectDir,
 
 void watchProject(const std::string& projectDir,
                   const std::function<void(const BuildResult&)>& onBuild,
-                  const std::function<bool()>& keepRunning, int pollMillis) {
+                  const std::function<bool()>& keepRunning, int pollMillis,
+                  std::function<void(const std::string&)> log) {
   // The daemon owns the incremental cache: rebuilds triggered by an edit
   // only re-render targets whose dependency closure actually changed.
   BuildCache cache;
-  BuildResult r = buildProject(projectDir, &cache);
+  BuildOptions options;
+  options.cache = &cache;
+  options.log = log;
+  BuildResult r = buildProject(projectDir, options);
   onBuild(r);
   auto snap = snapshot(projectDir, r.inputs);
   while (keepRunning()) {
     std::this_thread::sleep_for(std::chrono::milliseconds(pollMillis));
     auto now = snapshot(projectDir, r.inputs);
     if (now == snap) continue;
-    r = buildProject(projectDir, &cache);
+    if (log) log("--- change detected, rebuilding ---");
+    r = buildProject(projectDir, options);
     onBuild(r);
     snap = snapshot(projectDir, r.inputs);
   }

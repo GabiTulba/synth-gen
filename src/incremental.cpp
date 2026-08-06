@@ -100,4 +100,47 @@ uint64_t defClosureHash(const Program& prog, const CheckedModule& mod,
   return hasher.hashDef(mod, def);
 }
 
+std::map<const TopDef*, DefStats> defGraphStats(const Program& prog) {
+  std::map<const TopDef*, DefStats> stats;
+  std::map<const TopDef*, std::vector<const TopDef*>> edges;
+
+  for (auto& mod : prog.modules) {
+    for (auto& def : mod.parsed.defs) {
+      if (def.kind != TopDef::Kind::Let) continue;
+      DefStats& st = stats[&def];
+      st.mod = &mod;
+      st.def = &def;
+      if (!def.body) continue;
+      std::set<std::string> params;
+      for (auto& p : def.params) params.insert(p.name);
+      DepMap deps;
+      collectDeps(*def.body, params, mod, prog, deps);
+      for (auto& [key, dep] : deps) {
+        if (dep.second == &def) continue;
+        st.directDeps++;
+        edges[&def].push_back(dep.second);
+      }
+    }
+  }
+  for (auto& [def, outs] : edges)
+    for (const TopDef* d : outs) {
+      auto it = stats.find(d);
+      if (it != stats.end()) it->second.dependents++;
+    }
+  for (auto& [defPtr, st] : stats) {
+    std::set<const TopDef*> seen;
+    std::vector<const TopDef*> stack{defPtr};
+    while (!stack.empty()) {
+      const TopDef* d = stack.back();
+      stack.pop_back();
+      if (!seen.insert(d).second) continue;
+      auto it = edges.find(d);
+      if (it != edges.end())
+        for (const TopDef* next : it->second) stack.push_back(next);
+    }
+    st.closureSize = (int)seen.size();
+  }
+  return stats;
+}
+
 }  // namespace synth

@@ -4,9 +4,12 @@
 #include <filesystem>
 #include <fstream>
 #include <sstream>
+#include <mutex>
 #include <thread>
 
 #include "build.hpp"
+#include "checker.hpp"
+#include "incremental.hpp"
 #include "test_framework.hpp"
 #include "wav.hpp"
 
@@ -944,4 +947,118 @@ let _ = render_vis_stems ~name:"stack" ~rate:8000.0
        pos = svg.find("<path", pos + 1))
     paths++;
   CHECK(paths == 3);
+}
+
+TEST(build_verbose_log_covers_phases_and_targets) {
+  TempDir tp;
+  tp.write("p.synth", R"(
+let base : Scalar Signal = sine 440.0 ;;
+let half : Scalar Signal = base * 0.5 ;;
+let _ = half |> sample ~from:0s ~to:50ms |> render ~name:"one" ~rate:8000.0 ;;
+let _ = base |> sample ~from:0s ~to:50ms |> render ~name:"two" ~rate:8000.0 ;;
+)");
+  tp.write(".build", "project logs\nsource p.synth\n");
+
+  std::vector<std::string> log;
+  std::mutex mu;
+  BuildOptions options;
+  options.log = [&](const std::string& line) {
+    std::lock_guard<std::mutex> lock(mu);
+    log.push_back(line);
+  };
+  BuildResult r = buildProject(tp.dir.string(), options);
+  CHECK(r.ok);
+
+  auto has = [&](const std::string& needle) {
+    for (auto& l : log)
+      if (l.find(needle) != std::string::npos) return true;
+    return false;
+  };
+  // Phases.
+  CHECK(has("manifest: project 'logs', 1 source(s)"));
+  CHECK(has("front-end: 1 module(s), 4 definition(s)"));
+  CHECK(has("evaluate: 2 target(s), 0 audio input(s)"));
+  CHECK(has("render: 2 target(s) across"));
+  CHECK(has("done: 2 target(s) (2 rendered, 0 cached, 0 failed)"));
+  // Per-target worker lines with timings.
+  CHECK(has("[worker "));
+  CHECK(has("target 'one' (audio)"));
+  CHECK(has("target 'two' (audio)"));
+  CHECK(has("(discretize "));
+  // Dependency stats: target "one" is declared by a def referencing
+  // `half` (1 direct dep) whose closure is _ -> half -> base = 3 defs.
+  CHECK(has("deps: 'one'"));
+  CHECK(has("1 direct dependency, 0 dependent(s), closure 3 definition(s)"));
+  // Target "two" references base directly: closure _ -> base = 2 defs.
+  CHECK(has("deps: 'two'"));
+  CHECK(has("closure 2 definition(s)"));
+  // Every timestamped line carries the elapsed-time header.
+  for (auto& l : log) CHECK(l.find("s] ") != std::string::npos);
+}
+
+TEST(build_verbose_log_reports_cache_hits) {
+  TempDir tp;
+  tp.write("p.synth", R"(
+let _ = sine 440.0 |> sample ~from:0s ~to:20ms |> render ~name:"t" ~rate:8000.0 ;;
+)");
+  tp.write(".build", "project chlog\nsource p.synth\n");
+
+  BuildCache cache;
+  CHECK(buildProject(tp.dir.string(), &cache).ok);
+
+  std::vector<std::string> log;
+  BuildOptions options;
+  options.cache = &cache;
+  options.log = [&](const std::string& line) { log.push_back(line); };
+  BuildResult r = buildProject(tp.dir.string(), options);
+  CHECK(r.ok);
+  auto has = [&](const std::string& needle) {
+    for (auto& l : log)
+      if (l.find(needle) != std::string::npos) return true;
+    return false;
+  };
+  CHECK(has("target 't': cached, artifact reused"));
+  CHECK(has("cache: 1/1 target(s) fresh, 0 to render"));
+  CHECK(has("done: 1 target(s) (0 rendered, 1 cached, 0 failed)"));
+}
+
+TEST(build_def_graph_stats) {
+  TempDir tp;
+  tp.write("p.synth", R"(
+let base : Scalar Signal = sine 440.0 ;;
+let a : Scalar Signal = base * 0.5 ;;
+let b : Scalar Signal = base + a ;;
+let _ = b |> sample ~from:0s ~to:10ms |> render ~name:"t" ~rate:8000.0 ;;
+)");
+  tp.write(".build", "project stats\nsource p.synth\n");
+  DiagnosticBag diags;
+  Program prog = checkProject({(tp.dir / "p.synth").string()}, diags);
+  CHECK(!diags.hasErrors());
+  auto stats = defGraphStats(prog);
+  auto find = [&](const std::string& name) -> const DefStats* {
+    for (auto& [def, st] : stats)
+      if (def->name == name) return &st;
+    return nullptr;
+  };
+  const DefStats* base = find("base");
+  const DefStats* a = find("a");
+  const DefStats* b = find("b");
+  CHECK(base && base->directDeps == 0 && base->dependents == 2);
+  CHECK(base->closureSize == 1);
+  CHECK(a && a->directDeps == 1 && a->dependents == 1);
+  CHECK(b && b->directDeps == 2 && b->dependents == 1);  // the `_` target
+  CHECK(b->closureSize == 3);  // b, a, base
+}
+
+TEST(build_metadata_includes_render_ms) {
+  TempDir tp;
+  tp.write("p.synth", R"(
+let _ = sine 440.0 |> sample ~from:0s ~to:50ms |> render ~name:"t" ~rate:8000.0 ;;
+)");
+  tp.write(".build", "project ms\nsource p.synth\n");
+  BuildResult r = buildProject(tp.dir.string());
+  CHECK(r.ok);
+  CHECK(r.targets[0].renderMillis > 0);
+  std::string meta = slurp(tp.dir / "build" / "metadata.json");
+  CHECK(meta.find("\"render_ms\": ") != std::string::npos);
 }

@@ -32,6 +32,7 @@ struct TargetInfo {
   int channelCount = 0;
   int64_t frames = 0;
   double durationSeconds = 0;
+  double renderMillis = 0;  // evaluate+discretize+write time (0 if cached)
   bool ok = false;
   bool cached = false;  // reused from a previous build (Epic 8)
   std::string error;    // per-target failure, if any
@@ -63,13 +64,24 @@ struct BuildResult {
   std::vector<std::string> inputs;
 };
 
+// Build configuration. `log` is the streaming build log: phase timings,
+// per-target worker/duration lines, and dependency statistics. It may be
+// called from several render workers concurrently but calls are
+// serialized internally; leave it null for a silent build.
+struct BuildOptions {
+  BuildCache* cache = nullptr;
+  std::function<void(const std::string&)> log;
+};
+
 // One-shot build of the project in `projectDir` (§8.2): parse & check all
 // sources, validate project rules, evaluate render targets, write artifacts
 // to <projectDir>/build/artifacts/<name>.wav and metadata to
 // <projectDir>/build/metadata.json. Metadata is written even for failed
 // builds (§6.3-style error surfacing). Independent targets render in
-// parallel across a thread pool (Epic 9). When `cache` is given it is
-// consulted and updated (Epic 8); pass nullptr for a full rebuild.
+// parallel across a thread pool (Epic 9). When a cache is given it is
+// consulted and updated (Epic 8).
+BuildResult buildProject(const std::string& projectDir,
+                         const BuildOptions& options);
 BuildResult buildProject(const std::string& projectDir,
                          BuildCache* cache = nullptr);
 
@@ -85,6 +97,7 @@ DiagnosticBag lintFiles(const std::vector<std::string>& files);
 void watchProject(const std::string& projectDir,
                   const std::function<void(const BuildResult&)>& onBuild,
                   const std::function<bool()>& keepRunning,
-                  int pollMillis = 300);
+                  int pollMillis = 300,
+                  std::function<void(const std::string&)> log = {});
 
 }  // namespace synth

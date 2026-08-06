@@ -16,13 +16,16 @@ int usage() {
       "synthc - SynthGraph compiler & build tool\n"
       "\n"
       "Usage:\n"
-      "  synthc build [PROJECT_DIR]     one-shot build of a project\n"
-      "                                 (PROJECT_DIR defaults to '.')\n"
-      "  synthc watch [PROJECT_DIR]     build daemon: watch the project's\n"
-      "                                 sources, manifest and audio inputs\n"
-      "                                 and rebuild on change\n"
-      "  synthc lint FILE...            front-end checks only (parse +\n"
-      "                                 type-check), no artifacts\n";
+      "  synthc build [PROJECT_DIR] [-v]  one-shot build of a project\n"
+      "                                   (PROJECT_DIR defaults to '.')\n"
+      "  synthc watch [PROJECT_DIR] [-v]  build daemon: watch the project's\n"
+      "                                   sources, manifest and audio inputs\n"
+      "                                   and rebuild on change\n"
+      "  synthc lint FILE...              front-end checks only (parse +\n"
+      "                                   type-check), no artifacts\n"
+      "\n"
+      "  -v, --verbose   stream the build log: phase timings, per-target\n"
+      "                  worker threads and durations, dependency stats\n";
   return 2;
 }
 
@@ -42,8 +45,12 @@ void printDiags(const synth::DiagnosticBag& diags) {
   }
 }
 
-int cmdBuild(const std::string& dir) {
-  synth::BuildResult r = synth::buildProject(dir);
+void logToStderr(const std::string& line) { std::cerr << line << "\n"; }
+
+int cmdBuild(const std::string& dir, bool verbose) {
+  synth::BuildOptions options;
+  if (verbose) options.log = logToStderr;
+  synth::BuildResult r = synth::buildProject(dir, options);
   printDiags(r.diags);
   for (auto& t : r.targets) {
     if (t.ok)
@@ -59,7 +66,7 @@ int cmdBuild(const std::string& dir) {
   return r.ok ? 0 : 1;
 }
 
-int cmdWatch(const std::string& dir) {
+int cmdWatch(const std::string& dir, bool verbose) {
   std::cout << "watching '" << dir << "' (Ctrl-C to stop)\n";
   synth::watchProject(
       dir,
@@ -75,7 +82,9 @@ int cmdWatch(const std::string& dir) {
         std::cout << (r.ok ? "build succeeded" : "build failed")
                   << "; watching for changes...\n";
       },
-      [] { return true; });
+      [] { return true; }, 300,
+      verbose ? std::function<void(const std::string&)>(logToStderr)
+              : std::function<void(const std::string&)>{});
   return 0;
 }
 
@@ -91,15 +100,24 @@ int cmdLint(const std::vector<std::string>& files) {
 
 int main(int argc, char** argv) {
   std::vector<std::string> args(argv + 1, argv + argc);
+  bool verbose = false;
+  for (auto it = args.begin(); it != args.end();) {
+    if (*it == "-v" || *it == "--verbose") {
+      verbose = true;
+      it = args.erase(it);
+    } else {
+      ++it;
+    }
+  }
   if (args.empty()) return usage();
   const std::string& cmd = args[0];
   if (cmd == "build") {
     if (args.size() > 2) return usage();
-    return cmdBuild(args.size() == 2 ? args[1] : ".");
+    return cmdBuild(args.size() == 2 ? args[1] : ".", verbose);
   }
   if (cmd == "watch") {
     if (args.size() > 2) return usage();
-    return cmdWatch(args.size() == 2 ? args[1] : ".");
+    return cmdWatch(args.size() == 2 ? args[1] : ".", verbose);
   }
   if (cmd == "lint") {
     if (args.size() < 2) return usage();

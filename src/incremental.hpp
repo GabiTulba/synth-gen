@@ -16,6 +16,20 @@ namespace synth {
 uint64_t defClosureHash(const Program& prog, const CheckedModule& mod,
                         const TopDef& def);
 
+// Dependency-graph statistics per top-level definition, for build
+// observability: how many definitions each one references directly, how
+// many reference it, and how large its transitive closure is (including
+// itself). Primitives don't count; qualified references resolve across
+// modules.
+struct DefStats {
+  const CheckedModule* mod = nullptr;
+  const TopDef* def = nullptr;
+  int directDeps = 0;
+  int dependents = 0;
+  int closureSize = 0;
+};
+std::map<const TopDef*, DefStats> defGraphStats(const Program& prog);
+
 // FNV-1a helpers shared with the build cache.
 constexpr uint64_t kFnvOffset = 1469598103934665603ull;
 constexpr uint64_t kFnvPrime = 1099511628211ull;

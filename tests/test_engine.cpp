@@ -500,3 +500,111 @@ TEST(engine_shared_stateful_sample_placed_twice) {
   for (int64_t i = len; i < shift; i++)
     CHECK_NEAR(r.interleaved[(size_t)i], 0.0, 1e-12);
 }
+
+// --- Block engine & parallel rendering -------------------------------------
+
+TEST(engine_parallel_matches_sequential) {
+  // A master-shaped graph: a soft-clipped mix of state-disjoint "buses"
+  // (each with its own stateful filters/reverb and placed samples). The
+  // planner must split it across workers and still produce exactly the
+  // sequential result.
+  double rate = 8000.0;
+  auto voice = [&](double freq) {
+    SigPtr env = makeAdsr(0.01, 0.1, 0.4, 0.2, 0.3);
+    SigPtr osc = makeBinOp(SigBinOp::Mul, makeOsc(OscKind::Saw, freq), env);
+    return makeFilter(FilterKind::Lowpass, 1200.0, osc);
+  };
+  auto bus = [&](double base) {
+    std::vector<SigPtr> notes;
+    for (int i = 0; i < 4; i++)
+      notes.push_back(makePlace(voice(base * (1.0 + 0.02 * i)), 0.0, 0.5,
+                                0.4 * i));
+    return makeReverb(0.8, 0.3, 0.25, makeMix(std::move(notes)));
+  };
+  SigPtr master = makeClip(
+      ClipKind::Soft, 0.9,
+      makeBinOp(SigBinOp::Mul,
+                makeMix({bus(110.0), bus(220.0), bus(330.0), bus(440.0)}),
+                makeConst(0.5)));
+  Rendered seq = renderWindow(master, 0.0, 2.5, rate, 1);
+  Rendered par = renderWindow(master, 0.0, 2.5, rate, 4);
+  CHECK(seq.frames == par.frames);
+  CHECK(seq.channels == par.channels);
+  bool identical = true;
+  for (size_t i = 0; i < seq.interleaved.size(); i++)
+    if (seq.interleaved[i] != par.interleaved[i]) identical = false;
+  CHECK(identical);  // bit-identical, not merely close
+}
+
+TEST(engine_parallel_shared_subtree_grouped) {
+  // Two mix items share a stateful node instance directly (no placement
+  // isolation). The planner must put them in one group; the render must
+  // still equal the sequential one exactly.
+  double rate = 8000.0;
+  SigPtr shared = makeFilter(FilterKind::Lowpass, 500.0,
+                             makeOsc(OscKind::Saw, 220.0));
+  SigPtr other = makeFilter(FilterKind::Lowpass, 900.0,
+                            makeOsc(OscKind::Saw, 331.0));
+  SigPtr top = makeMix({shared, makeDelay(0.1, shared), other});
+  Rendered seq = renderWindow(top, 0.0, 1.0, rate, 1);
+  Rendered par = renderWindow(top, 0.0, 1.0, rate, 4);
+  bool identical = true;
+  for (size_t i = 0; i < seq.interleaved.size(); i++)
+    if (seq.interleaved[i] != par.interleaved[i]) identical = false;
+  CHECK(identical);
+}
+
+TEST(engine_silence_shortcircuit_is_exact) {
+  // Outside a placement's window the mix must be exact zeros (not merely
+  // small), and an envelope past its release must gate a voice to exact
+  // silence even inside the window.
+  double rate = 8000.0;
+  SigPtr env = makeAdsr(0.01, 0.05, 0.5, 0.1, 0.1);  // ends at 0.2s
+  SigPtr voice = makeBinOp(SigBinOp::Mul, makeOsc(OscKind::Saw, 440.0), env);
+  SigPtr placed = makePlace(voice, 0.0, 1.0, 1.0);  // window [1s, 2s)
+  Rendered r = renderWindow(makeMix({placed}), 0.0, 3.0, rate);
+  auto exactlyZero = [&](double t0, double t1) {
+    int64_t a = (int64_t)(t0 * rate), b = (int64_t)(t1 * rate);
+    for (int64_t i = a; i < b; i++)
+      if (r.interleaved[(size_t)i] != 0.0) return false;
+    return true;
+  };
+  CHECK(exactlyZero(0.0, 1.0));    // before the placement
+  CHECK(!exactlyZero(1.0, 1.2));   // the voice itself
+  CHECK(exactlyZero(1.3, 2.0));    // envelope finished: gated tail
+  CHECK(exactlyZero(2.0, 3.0));    // after the placement
+}
+
+TEST(engine_block_boundaries_are_seamless) {
+  // A stateful chain rendered in one call must match two renders that are
+  // whole-window but at offsets that straddle block boundaries: the
+  // windowed render re-derives state from the epoch.
+  double rate = 8000.0;
+  SigPtr chain = makeFilter(
+      FilterKind::Lowpass, 600.0,
+      makeFm(220.0, makeBinOp(SigBinOp::Mul, makeOsc(OscKind::Sine, 3.0),
+                              makeConst(20.0))));
+  Rendered whole = renderWindow(chain, 0.0, 2.0, rate);
+  // 1.0s at 8000 Hz = 8000 frames, not a multiple of the block size.
+  Rendered tail = renderWindow(chain, 1.0, 2.0, rate);
+  bool identical = true;
+  for (int64_t i = 0; i < tail.frames; i++)
+    if (whole.interleaved[(size_t)(i + 8000)] != tail.interleaved[(size_t)i])
+      identical = false;
+  CHECK(identical);
+}
+
+TEST(engine_delay_tail_survives_silence_skip) {
+  // A short loud burst into a long delay: the echo must come out intact
+  // even though the input is silent (and skippable) in between.
+  double rate = 8000.0;
+  SigPtr burst = makePlace(makeOsc(OscKind::Sine, 440.0), 0.0, 0.05, 0.0);
+  SigPtr echoed = makeDelay(1.5, burst);
+  Rendered r = renderWindow(makeMix({echoed}), 0.0, 2.0, rate);
+  double peak = 0;
+  for (int64_t i = (int64_t)(1.5 * rate); i < (int64_t)(1.56 * rate); i++)
+    peak = std::max(peak, std::abs(r.interleaved[(size_t)i]));
+  CHECK(peak > 0.9);  // the echo arrived
+  for (int64_t i = (int64_t)(0.06 * rate); i < (int64_t)(1.5 * rate); i++)
+    CHECK(r.interleaved[(size_t)i] == 0.0);  // exact silence before it
+}

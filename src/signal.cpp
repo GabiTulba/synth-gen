@@ -1,19 +1,20 @@
 #include "signal.hpp"
 
 #include <algorithm>
+#include <atomic>
 #include <cmath>
+#include <condition_variable>
+#include <cstring>
+#include <limits>
+#include <mutex>
+#include <thread>
+#include <unordered_map>
+#include <unordered_set>
 
 namespace synth {
 
 namespace {
 constexpr double kPi = 3.14159265358979323846;
-
-Frame scalarFrame(double v) {
-  Frame f;
-  f.ch = -1;
-  f.v[0] = v;
-  return f;
-}
 
 int mergeChannels(int a, int b, const char* what) {
   if (a == -1) return b;
@@ -34,9 +35,26 @@ double applyOp(SigBinOp op, double a, double b) {
   return 0;
 }
 
-// Broadcast-aware element access: a frame with ch == -1 supplies its single
-// value for every channel.
-double chanAt(const Frame& f, int i) { return f.ch == -1 ? f.v[0] : f.v[i]; }
+// A child's block, with broadcast-aware element access: a silent block
+// reads as zeros, a single-channel block (mono or broadcast) supplies its
+// value for every channel of the consumer.
+struct Block {
+  const double* p = nullptr;  // nullptr => known all-zero
+  int cc = 1;                 // the child's concrete channel count
+  bool silent() const { return p == nullptr; }
+  double at(int f, int i) const {
+    if (!p) return 0.0;
+    return cc == 1 ? p[f] : p[(size_t)f * (size_t)cc + (size_t)i];
+  }
+};
+
+Block pull(RenderCtx& ctx, const SigPtr& n, int64_t start, int frames) {
+  Block b;
+  b.cc = n->concreteChannels();
+  bool s = false;
+  b.p = n->renderBlock(ctx, start, frames, s);
+  return b;
+}
 
 }  // namespace
 
@@ -47,18 +65,36 @@ NodeState& RenderCtx::stateFor(const SigNode& node) {
   return *it->second;
 }
 
-Frame SigNode::get(RenderCtx& ctx, int64_t n) const {
+const double* SigNode::renderBlock(RenderCtx& ctx, int64_t start, int frames,
+                                   bool& silent) const {
   NodeState& st = ctx.stateFor(*this);
-  if (n == st.lastN) return st.last;
-  if (stateful()) {
-    if (n < st.lastN)
-      throw EngineError("internal error: stateful node queried backwards");
-    for (int64_t m = st.lastN + 1; m <= n; m++) st.last = compute(ctx, st, m);
-  } else {
-    st.last = compute(ctx, st, n);
+  if (st.cachedStart == start && st.cachedFrames == frames) {
+    silent = st.cachedSilent;
+    return silent ? nullptr : st.buf.data();
   }
-  st.lastN = n;
-  return st.last;
+  if (frames <= 0 || frames > kBlockFrames)
+    throw EngineError("internal error: bad render block size");
+  size_t need = (size_t)kBlockFrames * (size_t)concreteChannels();
+  if (st.buf.size() < need) st.buf.resize(need);
+  if (stateful()) {
+    if (start < st.nextSeq)
+      throw EngineError("internal error: stateful node queried backwards");
+    // Catch up over any gap so state always evolves from the epoch. The
+    // catch-up blocks reuse the state buffer as scratch; only the final
+    // block is cached.
+    while (st.nextSeq < start) {
+      int step = (int)std::min<int64_t>(kBlockFrames, start - st.nextSeq);
+      computeBlock(ctx, st, st.nextSeq, step, st.buf.data());
+      st.nextSeq += step;
+    }
+  }
+  bool s = computeBlock(ctx, st, start, frames, st.buf.data());
+  if (stateful()) st.nextSeq = start + frames;
+  st.cachedStart = start;
+  st.cachedFrames = frames;
+  st.cachedSilent = s;
+  silent = s;
+  return s ? nullptr : st.buf.data();
 }
 
 // --- Generators ------------------------------------------------------------
@@ -68,18 +104,19 @@ struct OscNode final : SigNode {
   double freq;
   OscNode(OscKind k, double f) : kind(k), freq(f) {}
   int channels() const override { return 1; }
-  Frame compute(RenderCtx& ctx, NodeState&, int64_t n) const override {
-    double t = (double)n / ctx.rate;
-    double phase = freq * t;
-    double frac = phase - std::floor(phase);
-    Frame f;
-    f.ch = 1;
-    switch (kind) {
-      case OscKind::Sine: f.v[0] = std::sin(2.0 * kPi * phase); break;
-      case OscKind::Saw: f.v[0] = 2.0 * frac - 1.0; break;
-      case OscKind::Square: f.v[0] = frac < 0.5 ? 1.0 : -1.0; break;
+  bool computeBlock(RenderCtx& ctx, NodeState&, int64_t start, int frames,
+                    double* out) const override {
+    for (int f = 0; f < frames; f++) {
+      double t = (double)(start + f) / ctx.rate;
+      double phase = freq * t;
+      double frac = phase - std::floor(phase);
+      switch (kind) {
+        case OscKind::Sine: out[f] = std::sin(2.0 * kPi * phase); break;
+        case OscKind::Saw: out[f] = 2.0 * frac - 1.0; break;
+        case OscKind::Square: out[f] = frac < 0.5 ? 1.0 : -1.0; break;
+      }
     }
-    return f;
+    return false;
   }
 };
 
@@ -105,15 +142,21 @@ struct FmNode final : SigNode {
   std::unique_ptr<NodeState> makeState() const override {
     return std::make_unique<FmState>();
   }
-  Frame compute(RenderCtx& ctx, NodeState& st0, int64_t n) const override {
+  bool computeBlock(RenderCtx& ctx, NodeState& st0, int64_t start, int frames,
+                    double* out) const override {
     auto& st = static_cast<FmState&>(st0);
-    Frame f;
-    f.ch = 1;
-    f.v[0] = std::sin(2.0 * kPi * st.phase);
-    double freq = carrier + chanAt(modulator->get(ctx, n), 0);
-    st.phase += freq / ctx.rate;
-    st.phase -= std::floor(st.phase);  // keep precision over long renders
-    return f;
+    Block m = pull(ctx, modulator, start, frames);
+    for (int f = 0; f < frames; f++) {
+      out[f] = std::sin(2.0 * kPi * st.phase);
+      double freq = carrier + m.at(f, 0);
+      st.phase += freq / ctx.rate;
+      st.phase -= std::floor(st.phase);  // keep precision over long renders
+    }
+    return false;
+  }
+  void forEachChild(
+      const std::function<void(const SigPtr&)>& fn) const override {
+    fn(modulator);
   }
 };
 
@@ -126,13 +169,18 @@ struct PmNode final : SigNode {
       throw EngineError("pm: the modulator must be a mono signal");
   }
   int channels() const override { return 1; }
-  Frame compute(RenderCtx& ctx, NodeState&, int64_t n) const override {
-    double t = (double)n / ctx.rate;
-    Frame f;
-    f.ch = 1;
-    f.v[0] = std::sin(2.0 * kPi * carrier * t +
-                      chanAt(modulator->get(ctx, n), 0));
-    return f;
+  bool computeBlock(RenderCtx& ctx, NodeState&, int64_t start, int frames,
+                    double* out) const override {
+    Block m = pull(ctx, modulator, start, frames);
+    for (int f = 0; f < frames; f++) {
+      double t = (double)(start + f) / ctx.rate;
+      out[f] = std::sin(2.0 * kPi * carrier * t + m.at(f, 0));
+    }
+    return false;
+  }
+  void forEachChild(
+      const std::function<void(const SigPtr&)>& fn) const override {
+    fn(modulator);
   }
 };
 
@@ -147,24 +195,37 @@ struct AmNode final : SigNode {
       throw EngineError("am: the modulator must be a mono signal");
   }
   int channels() const override { return carrier->channels(); }
-  Frame compute(RenderCtx& ctx, NodeState&, int64_t n) const override {
-    Frame c = carrier->get(ctx, n);
-    double gain = 1.0 + depth * chanAt(modulator->get(ctx, n), 0);
-    Frame out;
-    out.ch = c.ch;
-    int count = c.ch == -1 ? 1 : c.ch;
-    for (int i = 0; i < count; i++) out.v[i] = chanAt(c, i) * gain;
-    return out;
+  bool computeBlock(RenderCtx& ctx, NodeState&, int64_t start, int frames,
+                    double* out) const override {
+    Block c = pull(ctx, carrier, start, frames);
+    Block m = pull(ctx, modulator, start, frames);
+    if (c.silent()) return true;
+    int cc = concreteChannels();
+    for (int f = 0; f < frames; f++) {
+      double gain = 1.0 + depth * m.at(f, 0);
+      for (int i = 0; i < cc; i++) out[f * cc + i] = c.at(f, i) * gain;
+    }
+    return false;
+  }
+  void forEachChild(
+      const std::function<void(const SigPtr&)>& fn) const override {
+    fn(carrier);
+    fn(modulator);
   }
 };
 
 // Feedforward delay: out(t) = in(t - by) for t >= by, silence before.
 // Implemented with a ring buffer rather than by querying the input at
 // shifted indices: the input is pulled at the same monotonically increasing
-// frame as every other consumer, so a subgraph shared between dry and
+// blocks as every other consumer, so a subgraph shared between dry and
 // delayed paths (the echo idiom) keeps its stateful nodes consistent.
 struct DelayState final : NodeState {
   std::vector<double> ring;  // shiftFrames * channelCount doubles, zeroed
+  // Highest frame index at which a possibly-nonzero input was written.
+  // While the input stays silent past the delay length, every ring slot in
+  // play holds an (explicitly written or never-touched) zero, so whole
+  // blocks can be skipped without touching the ring.
+  int64_t lastLoud = std::numeric_limits<int64_t>::min();
 };
 
 struct DelayNode final : SigNode {
@@ -178,24 +239,37 @@ struct DelayNode final : SigNode {
   std::unique_ptr<NodeState> makeState() const override {
     return std::make_unique<DelayState>();
   }
-  Frame compute(RenderCtx& ctx, NodeState& st0, int64_t n) const override {
+  bool computeBlock(RenderCtx& ctx, NodeState& st0, int64_t start, int frames,
+                    double* out) const override {
     auto& st = static_cast<DelayState&>(st0);
-    Frame in = input->get(ctx, n);
+    Block in = pull(ctx, input, start, frames);
     int64_t shift = llround(by * ctx.rate);
-    if (shift == 0) return in;
-    int count = in.ch == -1 ? 1 : in.ch;
-    if (st.ring.empty()) st.ring.assign((size_t)(shift * count), 0.0);
-    size_t slot = (size_t)((n % shift) * count);
-    Frame out;
-    out.ch = in.ch;
-    // The slot still holds the frame written `shift` steps ago (zero for
-    // the first `shift` frames); read it, then overwrite with the current
-    // input for the future read.
-    for (int i = 0; i < count; i++) {
-      out.v[i] = st.ring[slot + (size_t)i];
-      st.ring[slot + (size_t)i] = chanAt(in, i);
+    int cc = concreteChannels();
+    if (shift == 0) {
+      if (in.silent()) return true;
+      std::memcpy(out, in.p, (size_t)frames * (size_t)cc * sizeof(double));
+      return false;
     }
-    return out;
+    bool outSilent = in.silent() && st.lastLoud < start - shift;
+    if (!in.silent()) st.lastLoud = start + frames - 1;
+    if (outSilent) return true;
+    if (st.ring.empty()) st.ring.assign((size_t)(shift * cc), 0.0);
+    for (int f = 0; f < frames; f++) {
+      int64_t n = start + f;
+      size_t slot = (size_t)((n % shift) * cc);
+      // The slot still holds the frame written `shift` steps ago (zero for
+      // the first `shift` frames); read it, then overwrite with the current
+      // input for the future read.
+      for (int i = 0; i < cc; i++) {
+        out[f * cc + i] = st.ring[slot + (size_t)i];
+        st.ring[slot + (size_t)i] = in.at(f, i);
+      }
+    }
+    return false;
+  }
+  void forEachChild(
+      const std::function<void(const SigPtr&)>& fn) const override {
+    fn(input);
   }
 };
 
@@ -217,6 +291,9 @@ struct ReverbState final : NodeState {
   int64_t combLen[4] = {0, 0, 0, 0};
   int64_t allpassLen[2] = {0, 0};
   bool ready = false;
+  // Until the first non-silent input arrives the whole bank is zeros and
+  // blocks can be skipped outright; afterwards the tail must be computed.
+  bool everLoud = false;
 };
 
 struct ReverbNode final : SigNode {
@@ -235,17 +312,20 @@ struct ReverbNode final : SigNode {
   std::unique_ptr<NodeState> makeState() const override {
     return std::make_unique<ReverbState>();
   }
-  Frame compute(RenderCtx& ctx, NodeState& st0, int64_t n) const override {
+  bool computeBlock(RenderCtx& ctx, NodeState& st0, int64_t start, int frames,
+                    double* out) const override {
     auto& st = static_cast<ReverbState&>(st0);
-    Frame in = input->get(ctx, n);
-    int count = in.ch == -1 ? 1 : in.ch;
+    Block in = pull(ctx, input, start, frames);
+    if (in.silent() && !st.everLoud) return true;
+    if (!in.silent()) st.everLoud = true;
+    int cc = concreteChannels();
     if (!st.ready) {
       for (int i = 0; i < 4; i++)
         st.combLen[i] = std::max<int64_t>(1, llround(kCombDelays[i] * ctx.rate));
       for (int i = 0; i < 2; i++)
         st.allpassLen[i] =
             std::max<int64_t>(1, llround(kAllpassDelays[i] * ctx.rate));
-      st.banks.resize(count);
+      st.banks.resize((size_t)cc);
       for (auto& b : st.banks) {
         for (int i = 0; i < 4; i++) b.comb[i].assign((size_t)st.combLen[i], 0.0);
         for (int i = 0; i < 2; i++)
@@ -253,33 +333,38 @@ struct ReverbNode final : SigNode {
       }
       st.ready = true;
     }
-    Frame out;
-    out.ch = in.ch;
-    for (int c = 0; c < count; c++) {
-      auto& b = st.banks[(size_t)c];
-      double x = chanAt(in, c);
-      double wet = 0;
-      for (int i = 0; i < 4; i++) {
-        size_t pos = (size_t)(n % st.combLen[i]);
-        double read = b.comb[i][pos];
-        // Damped feedback: a one-pole lowpass inside the loop.
-        b.combFilt[i] = read * (1.0 - damping) + b.combFilt[i] * damping;
-        double g = decay > 0
-                       ? std::pow(10.0, -3.0 * kCombDelays[i] / decay)
-                       : 0.0;
-        b.comb[i][pos] = x + b.combFilt[i] * g;
-        wet += read;
+    double g[4];
+    for (int i = 0; i < 4; i++)
+      g[i] = decay > 0 ? std::pow(10.0, -3.0 * kCombDelays[i] / decay) : 0.0;
+    for (int f = 0; f < frames; f++) {
+      int64_t n = start + f;
+      for (int c = 0; c < cc; c++) {
+        auto& b = st.banks[(size_t)c];
+        double x = in.at(f, c);
+        double wet = 0;
+        for (int i = 0; i < 4; i++) {
+          size_t pos = (size_t)(n % st.combLen[i]);
+          double read = b.comb[i][pos];
+          // Damped feedback: a one-pole lowpass inside the loop.
+          b.combFilt[i] = read * (1.0 - damping) + b.combFilt[i] * damping;
+          b.comb[i][pos] = x + b.combFilt[i] * g[i];
+          wet += read;
+        }
+        wet *= 0.25;
+        for (int i = 0; i < 2; i++) {
+          size_t pos = (size_t)(n % st.allpassLen[i]);
+          double buffered = b.allpass[i][pos];
+          b.allpass[i][pos] = wet + buffered * kAllpassGain;
+          wet = buffered - wet;
+        }
+        out[f * cc + c] = x * (1.0 - mix) + wet * mix;
       }
-      wet *= 0.25;
-      for (int i = 0; i < 2; i++) {
-        size_t pos = (size_t)(n % st.allpassLen[i]);
-        double buffered = b.allpass[i][pos];
-        b.allpass[i][pos] = wet + buffered * kAllpassGain;
-        wet = buffered - wet;
-      }
-      out.v[c] = x * (1.0 - mix) + wet * mix;
     }
-    return out;
+    return false;
+  }
+  void forEachChild(
+      const std::function<void(const SigPtr&)>& fn) const override {
+    fn(input);
   }
 };
 
@@ -287,12 +372,13 @@ struct ExpDecayNode final : SigNode {
   double rate;
   explicit ExpDecayNode(double r) : rate(r) {}
   int channels() const override { return 1; }
-  Frame compute(RenderCtx& ctx, NodeState&, int64_t n) const override {
-    double t = (double)n / ctx.rate;
-    Frame f;
-    f.ch = 1;
-    f.v[0] = std::exp(-rate * t);
-    return f;
+  bool computeBlock(RenderCtx& ctx, NodeState&, int64_t start, int frames,
+                    double* out) const override {
+    for (int f = 0; f < frames; f++) {
+      double t = (double)(start + f) / ctx.rate;
+      out[f] = std::exp(-rate * t);
+    }
+    return false;
   }
 };
 
@@ -304,21 +390,25 @@ struct AdsrNode final : SigNode {
   AdsrNode(double a_, double d_, double s_, double r_, double h)
       : a(a_), d(d_), s(s_), r(r_), hold(h) {}
   int channels() const override { return 1; }
-  Frame compute(RenderCtx& ctx, NodeState&, int64_t n) const override {
-    double t = (double)n / ctx.rate;
-    double v;
+  bool computeBlock(RenderCtx& ctx, NodeState&, int64_t start, int frames,
+                    double* out) const override {
     double releaseStart = std::max(hold, a + d);
-    if (t < 0) v = 0;
-    else if (t < a) v = a > 0 ? t / a : 1.0;
-    else if (t < a + d) v = d > 0 ? 1.0 - (1.0 - s) * ((t - a) / d) : s;
-    else if (t < releaseStart) v = s;
-    else if (t < releaseStart + r)
-      v = r > 0 ? s * (1.0 - (t - releaseStart) / r) : 0.0;
-    else v = 0;
-    Frame f;
-    f.ch = 1;
-    f.v[0] = v;
-    return f;
+    // The envelope is identically zero past the end of the release, which
+    // is what gates most placed samples' tails into silence.
+    if ((double)start / ctx.rate >= releaseStart + r) return true;
+    for (int f = 0; f < frames; f++) {
+      double t = (double)(start + f) / ctx.rate;
+      double v;
+      if (t < 0) v = 0;
+      else if (t < a) v = a > 0 ? t / a : 1.0;
+      else if (t < a + d) v = d > 0 ? 1.0 - (1.0 - s) * ((t - a) / d) : s;
+      else if (t < releaseStart) v = s;
+      else if (t < releaseStart + r)
+        v = r > 0 ? s * (1.0 - (t - releaseStart) / r) : 0.0;
+      else v = 0;
+      out[f] = v;
+    }
+    return false;
   }
 };
 
@@ -326,17 +416,20 @@ struct ConstNode final : SigNode {
   double value;
   explicit ConstNode(double v) : value(v) {}
   int channels() const override { return -1; }
-  Frame compute(RenderCtx&, NodeState&, int64_t) const override {
-    return scalarFrame(value);
+  bool computeBlock(RenderCtx&, NodeState&, int64_t, int frames,
+                    double* out) const override {
+    if (value == 0.0) return true;
+    std::fill(out, out + frames, value);
+    return false;
   }
 };
 
 // --- Filters ---------------------------------------------------------------
 
 struct FilterState final : NodeState {
-  std::array<double, kMaxChannels> lp{};   // low-pass accumulator
-  std::array<double, kMaxChannels> lastIn{};
+  double lp[kMaxChannels] = {};  // low-pass accumulator
   bool primed = false;
+  bool everLoud = false;
 };
 
 // One-pole filters, stepped sequentially from the epoch.
@@ -351,22 +444,34 @@ struct FilterNode final : SigNode {
   std::unique_ptr<NodeState> makeState() const override {
     return std::make_unique<FilterState>();
   }
-  Frame compute(RenderCtx& ctx, NodeState& st0, int64_t n) const override {
+  bool computeBlock(RenderCtx& ctx, NodeState& st0, int64_t start, int frames,
+                    double* out) const override {
     auto& st = static_cast<FilterState&>(st0);
-    Frame in = input->get(ctx, n);
-    int ch = in.ch == -1 ? 1 : in.ch;
+    Block in = pull(ctx, input, start, frames);
+    if (in.silent() && !st.everLoud) {
+      // Filtering exact silence from the epoch leaves the accumulator at
+      // zero, which is also what priming on a zero input would set.
+      st.primed = true;
+      return true;
+    }
+    if (!in.silent()) st.everLoud = true;
+    int cc = concreteChannels();
     double alpha = 1.0 - std::exp(-2.0 * kPi * cutoff / ctx.rate);
     if (alpha > 1.0) alpha = 1.0;
-    Frame out;
-    out.ch = ch;
-    for (int i = 0; i < ch; i++) {
-      double x = chanAt(in, i);
-      if (!st.primed) st.lp[i] = kind == FilterKind::Lowpass ? x : 0.0;
-      st.lp[i] += alpha * (x - st.lp[i]);
-      out.v[i] = kind == FilterKind::Lowpass ? st.lp[i] : x - st.lp[i];
+    for (int f = 0; f < frames; f++) {
+      for (int i = 0; i < cc; i++) {
+        double x = in.at(f, i);
+        if (!st.primed) st.lp[i] = kind == FilterKind::Lowpass ? x : 0.0;
+        st.lp[i] += alpha * (x - st.lp[i]);
+        out[f * cc + i] = kind == FilterKind::Lowpass ? st.lp[i] : x - st.lp[i];
+      }
+      st.primed = true;
     }
-    st.primed = true;
-    return out;
+    return false;
+  }
+  void forEachChild(
+      const std::function<void(const SigPtr&)>& fn) const override {
+    fn(input);
   }
 };
 
@@ -385,18 +490,24 @@ struct ClipNode final : SigNode {
           ": threshold must be positive");
   }
   int channels() const override { return input->channels(); }
-  Frame compute(RenderCtx& ctx, NodeState&, int64_t n) const override {
-    Frame in = input->get(ctx, n);
-    Frame out;
-    out.ch = in.ch;
-    int count = in.ch == -1 ? 1 : in.ch;
-    for (int i = 0; i < count; i++) {
-      double x = chanAt(in, i);
-      out.v[i] = kind == ClipKind::Hard
-                     ? std::clamp(x, -threshold, threshold)
-                     : threshold * std::tanh(x / threshold);
+  bool computeBlock(RenderCtx& ctx, NodeState&, int64_t start, int frames,
+                    double* out) const override {
+    Block in = pull(ctx, input, start, frames);
+    if (in.silent()) return true;  // both shapes map 0 to 0
+    int cc = concreteChannels();
+    for (int f = 0; f < frames; f++) {
+      for (int i = 0; i < cc; i++) {
+        double x = in.at(f, i);
+        out[f * cc + i] = kind == ClipKind::Hard
+                              ? std::clamp(x, -threshold, threshold)
+                              : threshold * std::tanh(x / threshold);
+      }
     }
-    return out;
+    return false;
+  }
+  void forEachChild(
+      const std::function<void(const SigPtr&)>& fn) const override {
+    fn(input);
   }
 };
 
@@ -410,15 +521,28 @@ struct BinOpNode final : SigNode {
       : op(o), l(std::move(l_)), r(std::move(r_)),
         ch(mergeChannels(l->channels(), r->channels(), "signal arithmetic")) {}
   int channels() const override { return ch; }
-  Frame compute(RenderCtx& ctx, NodeState&, int64_t n) const override {
-    Frame a = l->get(ctx, n);
-    Frame b = r->get(ctx, n);
-    Frame out;
-    out.ch = ch;
-    int count = ch == -1 ? 1 : ch;
-    for (int i = 0; i < count; i++)
-      out.v[i] = applyOp(op, chanAt(a, i), chanAt(b, i));
-    return out;
+  bool computeBlock(RenderCtx& ctx, NodeState&, int64_t start, int frames,
+                    double* out) const override {
+    // Both sides are always pulled, even when silence lets the arithmetic
+    // be skipped: stateful subtrees must keep advancing in lockstep or a
+    // shared node would later be queried backwards.
+    Block a = pull(ctx, l, start, frames);
+    Block b = pull(ctx, r, start, frames);
+    if ((op == SigBinOp::Add || op == SigBinOp::Sub) && a.silent() &&
+        b.silent())
+      return true;
+    if (op == SigBinOp::Mul && (a.silent() || b.silent())) return true;
+    // Div is never short-circuited: 0/0 must still produce NaN.
+    int cc = concreteChannels();
+    for (int f = 0; f < frames; f++)
+      for (int i = 0; i < cc; i++)
+        out[f * cc + i] = applyOp(op, a.at(f, i), b.at(f, i));
+    return false;
+  }
+  void forEachChild(
+      const std::function<void(const SigPtr&)>& fn) const override {
+    fn(l);
+    fn(r);
   }
 };
 
@@ -429,16 +553,32 @@ struct MixNode final : SigNode {
     for (auto& x : items) ch = mergeChannels(ch, x->channels(), "mix_all");
   }
   int channels() const override { return ch; }
-  Frame compute(RenderCtx& ctx, NodeState&, int64_t n) const override {
-    Frame out;
-    out.ch = ch;
-    int count = ch == -1 ? 1 : ch;
-    for (int i = 0; i < count; i++) out.v[i] = 0;
+  bool computeBlock(RenderCtx& ctx, NodeState&, int64_t start, int frames,
+                    double* out) const override {
+    int cc = concreteChannels();
+    size_t total = (size_t)frames * (size_t)cc;
+    bool any = false;
     for (auto& x : items) {
-      Frame f = x->get(ctx, n);
-      for (int i = 0; i < count; i++) out.v[i] += chanAt(f, i);
+      Block b = pull(ctx, x, start, frames);
+      if (b.silent()) continue;  // adding exact zeros is a no-op
+      if (!any) {
+        std::fill(out, out + total, 0.0);
+        any = true;
+      }
+      if (b.cc == 1 && cc > 1) {
+        for (int f = 0; f < frames; f++) {
+          double v = b.p[f];
+          for (int i = 0; i < cc; i++) out[f * cc + i] += v;
+        }
+      } else {
+        for (size_t k = 0; k < total; k++) out[k] += b.p[k];
+      }
     }
-    return out;
+    return !any;
+  }
+  void forEachChild(
+      const std::function<void(const SigPtr&)>& fn) const override {
+    for (auto& x : items) fn(x);
   }
 };
 
@@ -457,12 +597,23 @@ struct ChannelsNode final : SigNode {
     }
   }
   int channels() const override { return (int)items.size(); }
-  Frame compute(RenderCtx& ctx, NodeState&, int64_t n) const override {
-    Frame out;
-    out.ch = (int)items.size();
-    for (size_t i = 0; i < items.size(); i++)
-      out.v[i] = chanAt(items[i]->get(ctx, n), 0);
-    return out;
+  bool computeBlock(RenderCtx& ctx, NodeState&, int64_t start, int frames,
+                    double* out) const override {
+    int nCh = (int)items.size();
+    Block blocks[kMaxChannels];
+    bool anyLoud = false;
+    for (int i = 0; i < nCh; i++) {
+      blocks[i] = pull(ctx, items[(size_t)i], start, frames);
+      anyLoud = anyLoud || !blocks[i].silent();
+    }
+    if (!anyLoud) return true;
+    for (int f = 0; f < frames; f++)
+      for (int i = 0; i < nCh; i++) out[f * nCh + i] = blocks[i].at(f, 0);
+    return false;
+  }
+  void forEachChild(
+      const std::function<void(const SigPtr&)>& fn) const override {
+    for (auto& x : items) fn(x);
   }
 };
 
@@ -493,20 +644,35 @@ struct PlaceNode final : SigNode {
   std::unique_ptr<NodeState> makeState() const override {
     return std::make_unique<PlaceState>();
   }
-  Frame compute(RenderCtx& ctx, NodeState& st0, int64_t n) const override {
+  bool computeBlock(RenderCtx& ctx, NodeState& st0, int64_t start, int frames,
+                    double* out) const override {
     int64_t nAt = llround(at * ctx.rate);
     int64_t nFrom = llround(from * ctx.rate);
     int64_t len = llround((to - from) * ctx.rate);
-    if (n < nAt || n >= nAt + len) {
-      Frame silence;
-      silence.ch = channels();
-      int count = silence.ch == -1 ? 1 : silence.ch;
-      for (int i = 0; i < count; i++) silence.v[i] = 0;
-      return silence;
-    }
+    int64_t end = nAt + len;
+    // Fully outside the placement window: silence, and the source is never
+    // touched. This is what makes long mixes of short samples cheap.
+    if (start >= end || start + (int64_t)frames <= nAt) return true;
     auto& st = static_cast<PlaceState&>(st0);
     if (!st.sub) st.sub = std::make_unique<RenderCtx>(ctx.rate);
-    return source->get(*st.sub, n - nAt + nFrom);
+    int64_t s = std::max(start, nAt);
+    int64_t e = std::min(start + (int64_t)frames, end);
+    int q = (int)(e - s);
+    // The window maps onto a contiguous run of source frames, so the
+    // private context only ever sees monotonically advancing queries.
+    bool srcSilent = false;
+    const double* p =
+        source->renderBlock(*st.sub, s - nAt + nFrom, q, srcSilent);
+    if (srcSilent) return true;
+    int cc = concreteChannels();
+    std::fill(out, out + (size_t)frames * (size_t)cc, 0.0);
+    std::memcpy(out + (size_t)(s - start) * (size_t)cc, p,
+                (size_t)q * (size_t)cc * sizeof(double));
+    return false;
+  }
+  void forEachChild(
+      const std::function<void(const SigPtr&)>& fn) const override {
+    fn(source);
   }
 };
 
@@ -515,6 +681,7 @@ struct PlaceNode final : SigNode {
 struct FileNode final : SigNode {
   std::vector<std::vector<double>> data;  // per channel
   double fileRate;
+  size_t maxLen = 0;
   FileNode(std::vector<std::vector<double>> d, double r)
       : data(std::move(d)), fileRate(r) {
     if (data.empty()) throw EngineError("audio file has no channels");
@@ -522,26 +689,33 @@ struct FileNode final : SigNode {
       throw EngineError("audio files with more than " +
                         std::to_string(kMaxChannels) +
                         " channels are not supported in v1");
+    for (auto& c : data) maxLen = std::max(maxLen, c.size());
   }
   int channels() const override { return (int)data.size(); }
-  Frame compute(RenderCtx& ctx, NodeState&, int64_t n) const override {
-    double t = (double)n / ctx.rate;
-    double pos = t * fileRate;
-    size_t i0 = (size_t)pos;
-    double frac = pos - (double)i0;
-    Frame out;
-    out.ch = (int)data.size();
-    for (size_t c = 0; c < data.size(); c++) {
-      const auto& buf = data[c];
-      double v = 0;
-      if (i0 < buf.size()) {
-        double s0 = buf[i0];
-        double s1 = i0 + 1 < buf.size() ? buf[i0 + 1] : 0.0;
-        v = s0 + (s1 - s0) * frac;
-      }
-      out.v[c] = v;
+  bool computeBlock(RenderCtx& ctx, NodeState&, int64_t start, int frames,
+                    double* out) const override {
+    int nCh = (int)data.size();
+    {
+      double pos0 = ((double)start / ctx.rate) * fileRate;
+      if ((size_t)pos0 >= maxLen) return true;  // past the end of the file
     }
-    return out;
+    for (int f = 0; f < frames; f++) {
+      double t = (double)(start + f) / ctx.rate;
+      double pos = t * fileRate;
+      size_t i0 = (size_t)pos;
+      double frac = pos - (double)i0;
+      for (int c = 0; c < nCh; c++) {
+        const auto& buf = data[(size_t)c];
+        double v = 0;
+        if (i0 < buf.size()) {
+          double s0 = buf[i0];
+          double s1 = i0 + 1 < buf.size() ? buf[i0 + 1] : 0.0;
+          v = s0 + (s1 - s0) * frac;
+        }
+        out[f * nCh + c] = v;
+      }
+    }
+    return false;
   }
 };
 
@@ -612,8 +786,111 @@ SigPtr makeFileSignal(std::vector<std::vector<double>> channelData,
 
 // --- Rendering -------------------------------------------------------------
 
-Rendered renderWindow(const SigPtr& node, double from, double to,
-                      double rate) {
+namespace {
+
+// The parallel-render planner. A render's top is usually a cheap
+// combination "spine" (mixes, arithmetic, channel assembly, elementwise or
+// stateful wrappers) over a handful of expensive, independent subtrees: a
+// master summing buses, a stems overview stacking lanes, a stereo pair
+// built from two big per-side mixes. decompose() walks the spine and
+// collects the subtrees hanging off it as leaves; the leaves render on
+// worker threads and the spine replays on the main thread with the leaves'
+// blocks injected into its context, so the combination arithmetic is the
+// exact same code (and order) as a sequential render.
+constexpr int kDecomposeDepth = 8;
+
+void decomposeInto(const SigPtr& n, int depth, std::vector<SigPtr>& leaves) {
+  if (depth > 0) {
+    if (auto* mix = dynamic_cast<const MixNode*>(n.get())) {
+      for (auto& x : mix->items) decomposeInto(x, depth - 1, leaves);
+      return;
+    }
+    if (auto* chans = dynamic_cast<const ChannelsNode*>(n.get())) {
+      for (auto& x : chans->items) decomposeInto(x, depth - 1, leaves);
+      return;
+    }
+    if (auto* bin = dynamic_cast<const BinOpNode*>(n.get())) {
+      decomposeInto(bin->l, depth - 1, leaves);
+      decomposeInto(bin->r, depth - 1, leaves);
+      return;
+    }
+    // Walk through single-input wrappers (filter, clip, reverb, delay...)
+    // so a `soft_clip (mix_all ...)` master still decomposes. Placements
+    // are opaque: their source evaluates in a private context that the
+    // main thread's injection could not reach.
+    if (!dynamic_cast<const PlaceNode*>(n.get())) {
+      std::vector<SigPtr> kids;
+      n->forEachChild([&](const SigPtr& c) { kids.push_back(c); });
+      if (kids.size() == 1) {
+        decomposeInto(kids[0], depth - 1, leaves);
+        return;
+      }
+    }
+  }
+  leaves.push_back(n);
+}
+
+// Nodes whose per-render state would live in a shared context. The walk
+// stops below placements: a placement replays its source in a private
+// context, so two leaves sharing a source through distinct placements do
+// not actually share any state (and already duplicate that work in a
+// sequential render).
+void collectSharedState(const SigNode* n,
+                        std::unordered_set<const SigNode*>& out) {
+  if (!out.insert(n).second) return;
+  if (dynamic_cast<const PlaceNode*>(n)) return;
+  n->forEachChild(
+      [&](const SigPtr& c) { collectSharedState(c.get(), out); });
+}
+
+struct UnionFind {
+  std::vector<int> p;
+  explicit UnionFind(int n) : p((size_t)n) {
+    for (int i = 0; i < n; i++) p[(size_t)i] = i;
+  }
+  int find(int x) {
+    while (p[(size_t)x] != x) x = p[(size_t)x] = p[(size_t)p[(size_t)x]];
+    return x;
+  }
+  void unite(int a, int b) { p[(size_t)find(a)] = find(b); }
+};
+
+// Groups leaves so that any two leaves sharing a stateful-context node land
+// in the same group; groups are then provably state-disjoint and can render
+// on different threads, each in its own context, while shared work inside a
+// group stays shared (and memoized) exactly as in a sequential render.
+std::vector<std::vector<int>> groupLeaves(const std::vector<SigPtr>& leaves) {
+  int n = (int)leaves.size();
+  UnionFind uf(n);
+  std::unordered_map<const SigNode*, int> firstOwner;
+  for (int i = 0; i < n; i++) {
+    std::unordered_set<const SigNode*> reach;
+    collectSharedState(leaves[(size_t)i].get(), reach);
+    for (const SigNode* node : reach) {
+      auto it = firstOwner.find(node);
+      if (it == firstOwner.end()) firstOwner.emplace(node, i);
+      else uf.unite(i, it->second);
+    }
+  }
+  std::unordered_map<int, int> rootGroup;
+  std::vector<std::vector<int>> groups;
+  for (int i = 0; i < n; i++) {
+    int r = uf.find(i);
+    auto it = rootGroup.find(r);
+    if (it == rootGroup.end()) {
+      rootGroup.emplace(r, (int)groups.size());
+      groups.push_back({i});
+    } else {
+      groups[(size_t)it->second].push_back(i);
+    }
+  }
+  return groups;
+}
+
+}  // namespace
+
+Rendered renderWindow(const SigPtr& node, double from, double to, double rate,
+                      int maxThreads) {
   if (rate <= 0) throw EngineError("render: sample rate must be positive");
   if (from < 0 || to < from)
     throw EngineError("render: invalid sample window");
@@ -623,12 +900,163 @@ Rendered renderWindow(const SigPtr& node, double from, double to,
   int64_t nTo = llround(to * rate);
   out.frames = nTo - nFrom;
   out.interleaved.resize((size_t)(out.frames * out.channels));
-  RenderCtx ctx(rate);
-  for (int64_t n = nFrom; n < nTo; n++) {
-    Frame f = node->get(ctx, n);
-    for (int c = 0; c < out.channels; c++)
-      out.interleaved[(size_t)((n - nFrom) * out.channels + c)] = chanAt(f, c);
+  if (out.frames == 0) return out;
+
+  auto emit = [&](int64_t start, int frames, const double* p, bool silent) {
+    size_t off = (size_t)(start - nFrom) * (size_t)out.channels;
+    size_t count = (size_t)frames * (size_t)out.channels;
+    if (silent)
+      std::fill(out.interleaved.begin() + (ptrdiff_t)off,
+                out.interleaved.begin() + (ptrdiff_t)(off + count), 0.0);
+    else
+      std::memcpy(out.interleaved.data() + off, p, count * sizeof(double));
+  };
+
+  if (maxThreads <= 0) {
+    unsigned hw = std::thread::hardware_concurrency();
+    maxThreads = hw > 0 ? (int)hw : 1;
   }
+
+  std::vector<SigPtr> leaves;
+  decomposeInto(node, kDecomposeDepth, leaves);
+  std::vector<std::vector<int>> groups;
+  if (maxThreads > 1 && leaves.size() > 1) groups = groupLeaves(leaves);
+  int workers = std::min<int>(maxThreads, (int)groups.size());
+
+  RenderCtx mainCtx(rate);
+
+  if (workers < 2) {
+    // Sequential block loop.
+    for (int64_t n = nFrom; n < nTo; n += kBlockFrames) {
+      int f = (int)std::min<int64_t>(kBlockFrames, nTo - n);
+      bool silent = false;
+      const double* p = node->renderBlock(mainCtx, n, f, silent);
+      emit(n, f, p, silent);
+    }
+    return out;
+  }
+
+  std::vector<int> leafGroup(leaves.size(), 0);
+  for (int g = 0; g < (int)groups.size(); g++)
+    for (int li : groups[(size_t)g]) leafGroup[(size_t)li] = g;
+  std::vector<std::unique_ptr<RenderCtx>> groupCtx;
+  groupCtx.reserve(groups.size());
+  for (size_t g = 0; g < groups.size(); g++)
+    groupCtx.push_back(std::make_unique<RenderCtx>(rate));
+
+  // Per-block barrier scheduling: for every block, the workers claim groups
+  // off an atomic counter and render each group's leaves in that group's
+  // private context; the main thread waits for all of them, injects the
+  // leaf blocks into its own context and replays the spine, whose mix/
+  // arithmetic nodes then find every leaf pre-cached. Dynamic claiming
+  // balances load when groups differ wildly in cost (a bus versus a single
+  // placed sample).
+  struct Barrier {
+    std::mutex m;
+    std::condition_variable cvWork, cvDone;
+    int64_t gen = 0;
+    int64_t blockStart = 0;
+    int blockFrames = 0;
+    int workersDone = 0;
+    bool stop = false;
+    std::atomic<int> nextGroup{0};
+    std::exception_ptr error;
+  } bar;
+
+  auto workerMain = [&]() {
+    int64_t seenGen = 0;
+    for (;;) {
+      int64_t bs;
+      int bf;
+      {
+        std::unique_lock<std::mutex> lk(bar.m);
+        bar.cvWork.wait(lk, [&] { return bar.stop || bar.gen != seenGen; });
+        if (bar.stop) return;
+        seenGen = bar.gen;
+        bs = bar.blockStart;
+        bf = bar.blockFrames;
+      }
+      for (;;) {
+        int g = bar.nextGroup.fetch_add(1);
+        if (g >= (int)groups.size()) break;
+        try {
+          for (int li : groups[(size_t)g]) {
+            bool silent = false;
+            leaves[(size_t)li]->renderBlock(*groupCtx[(size_t)g], bs, bf,
+                                            silent);
+          }
+        } catch (...) {
+          std::lock_guard<std::mutex> lk(bar.m);
+          if (!bar.error) bar.error = std::current_exception();
+        }
+      }
+      {
+        std::lock_guard<std::mutex> lk(bar.m);
+        if (++bar.workersDone == workers) bar.cvDone.notify_one();
+      }
+    }
+  };
+
+  std::vector<std::thread> pool;
+  pool.reserve((size_t)workers);
+  for (int w = 0; w < workers; w++) pool.emplace_back(workerMain);
+  auto shutdown = [&] {
+    {
+      std::lock_guard<std::mutex> lk(bar.m);
+      bar.stop = true;
+    }
+    bar.cvWork.notify_all();
+    for (auto& t : pool)
+      if (t.joinable()) t.join();
+  };
+
+  try {
+    for (int64_t n = nFrom; n < nTo; n += kBlockFrames) {
+      int f = (int)std::min<int64_t>(kBlockFrames, nTo - n);
+      {
+        std::lock_guard<std::mutex> lk(bar.m);
+        bar.blockStart = n;
+        bar.blockFrames = f;
+        bar.workersDone = 0;
+        bar.nextGroup.store(0);
+        bar.gen++;
+      }
+      bar.cvWork.notify_all();
+      {
+        std::unique_lock<std::mutex> lk(bar.m);
+        bar.cvDone.wait(lk, [&] { return bar.workersDone == workers; });
+        if (bar.error) {
+          std::exception_ptr err = bar.error;
+          lk.unlock();
+          shutdown();
+          std::rethrow_exception(err);
+        }
+      }
+      // Inject the workers' leaf blocks into the main context as
+      // pre-cached results, then replay the spine over them.
+      for (size_t li = 0; li < leaves.size(); li++) {
+        const SigNode& leaf = *leaves[li];
+        NodeState& gs =
+            groupCtx[(size_t)leafGroup[li]]->stateFor(leaf);
+        NodeState& ms = mainCtx.stateFor(leaf);
+        ms.cachedStart = n;
+        ms.cachedFrames = f;
+        ms.cachedSilent = gs.cachedSilent;
+        if (!gs.cachedSilent) {
+          size_t count = (size_t)f * (size_t)leaf.concreteChannels();
+          if (ms.buf.size() < count) ms.buf.resize(count);
+          std::memcpy(ms.buf.data(), gs.buf.data(), count * sizeof(double));
+        }
+      }
+      bool silent = false;
+      const double* p = node->renderBlock(mainCtx, n, f, silent);
+      emit(n, f, p, silent);
+    }
+  } catch (...) {
+    shutdown();
+    throw;
+  }
+  shutdown();
   return out;
 }
 

@@ -186,8 +186,19 @@ positional argument).
   concurrently across a hardware-sized thread pool (signal graphs are
   immutable; all per-render state is per-context, so shared subgraphs are
   safe). Verified byte-identical output against fresh rebuilds.
-  Sub-expression-level scheduling (9.2) within a single target remains
-  open — worthwhile only for projects dominated by one large target.
+- [x] **Epic 9.2** — Batched + intra-target parallel rendering: nodes
+  compute 1024-frame blocks instead of single frames (per-node dispatch
+  and memoization cost once per block, tight inner loops, and exact
+  silence short-circuiting so placed samples cost nothing outside their
+  windows). A planner decomposes a render's top into its combination
+  spine (mixes, arithmetic, channel assembly, wrappers) plus the heavy
+  subtrees hanging off it, proves the subtrees state-disjoint (grouping
+  any that share nodes), and renders the groups on worker threads with a
+  per-block barrier while the main thread replays the spine over the
+  workers' blocks — so summation order, and therefore the output, is
+  bit-identical to a sequential render. A fresh full darksynth build
+  dropped from ~250 s to ~4 s wall; all showcase artifacts verified
+  byte-identical to the per-frame engine's.
 
 ## Decisions taken on points the design doc leaves open
 

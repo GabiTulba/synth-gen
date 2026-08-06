@@ -325,7 +325,11 @@ follows (all easy to revisit):
   validated at build time to be whole and non-negative.
 - **`place_multi sample:'a Sample ats:Timestamp list : 'a Signal`** —
   places one sample at every timestamp in the list and mixes the
-  placements (overlaps sum): `place_multi kick [0s; 500ms; 1s]`. This is
+  placements (overlaps sum): `place_multi kick [0s; 500ms; 1s]`. The
+  summing is unnormalized, so overlapping or dense patterns can exceed
+  full scale — rendering works in doubles and only hard-clamps to
+  [-1, 1] at WAV write, so manage headroom deliberately by scaling down
+  or with `soft_clip`/`hard_clip`. This is
   the pattern/rhythm workhorse `mix_all (map (place s) ats)` would be —
   which v1 cannot write directly, since partial application doesn't
   exist. Each placement replays the sample from its own state, so

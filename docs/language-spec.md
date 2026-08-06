@@ -223,7 +223,7 @@ val channels  : chans:Scalar Signal list -> Vector Signal
 (* slicing & arrangement *)
 val sample    : signal:'a Signal -> from:Timestamp -> to:Timestamp -> 'a Sample
 val place     : sample:'a Sample -> at:Timestamp -> 'a Signal
-val place_multi : sample:'a Sample -> ats:Timestamp list -> 'a Signal  (* mix of placements *)
+val place_multi : sample:'a Sample -> ats:Timestamp list -> 'a Signal  (* mix of placements; overlaps sum *)
 
 (* the effects *)
 val render    : name:String -> rate:Scalar -> sample:'a Sample -> unit
@@ -269,7 +269,11 @@ Semantics details for the doc's open points (also in the README):
 `am` computes `carrier * (1 + depth*modulator)` with a mono modulator
 broadcast across carrier channels; `delay` is feedforward only; `reverb`
 is a per-channel Schroeder bank (RT60-style `decay`, `damping`/`mix` in
-[0,1]); `noise` is deterministic cascaded FM.
+[0,1]); `noise` is deterministic cascaded FM. `place_multi` sums its
+placements without normalization, so overlapping or dense patterns can
+exceed full scale — rendering works in doubles and only hard-clamps to
+[-1, 1] at WAV write; scale down or use `soft_clip`/`hard_clip` to
+manage headroom deliberately.
 
 ## 7. Out of scope in v1
 

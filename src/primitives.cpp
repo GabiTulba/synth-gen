@@ -119,6 +119,14 @@ const std::vector<PrimSig>& primitives() {
     add(PrimId::Repeat, "repeat", {"n", "x"}, {tScalar(), a}, tList(a));
     add(PrimId::TimeSteps, "time_steps", {"start", "step", "count"},
         {tTimestamp(), tTimestamp(), tScalar()}, tList(tTimestamp()));
+    // Humanization: perturbs each timestamp by a hash-derived delta in
+    // [-spread, +spread] (clamped at 0s). The deltas are statistically
+    // random but a pure function of (seed, index) - the language stays
+    // deterministic, builds stay reproducible and cacheable; distinct
+    // seeds give layers independent feels.
+    add(PrimId::Jitter, "jitter", {"seed", "spread", "steps"},
+        {tScalar(), tTimestamp(), tList(tTimestamp())},
+        tList(tTimestamp()));
     return p;
   }();
   return prims;

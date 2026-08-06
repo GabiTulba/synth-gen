@@ -39,6 +39,7 @@ enum class PrimId {
   ListInit,
   Repeat,
   TimeSteps,
+  Jitter,
 };
 
 struct PrimSig {

@@ -1,5 +1,7 @@
 #include "eval.hpp"
 
+#include <cstring>
+
 #include <cmath>
 #include <filesystem>
 #include <map>
@@ -412,6 +414,29 @@ class Interp {
         ListV out;
         for (int64_t i = 0; i < n; i++)
           out.items.push_back(Value{TimeV{start + step * (double)i}});
+        return Value{std::move(out)};
+      }
+      case PrimId::Jitter: {
+        double seed = scalarArg(args[0]);
+        double spread = timeArg(args[1]);
+        if (spread < 0) throw EvalError("jitter: negative spread");
+        ListV out;
+        int64_t i = 0;
+        for (auto& x : std::get<ListV>(args[2].v).items) {
+          double t = std::get<TimeV>(x.v).seconds;
+          // splitmix64 over (seed bits, index): integer-only, so the
+          // deltas are bit-identical on every platform.
+          uint64_t h;
+          std::memcpy(&h, &seed, sizeof h);
+          h ^= (uint64_t)i * 0x9E3779B97F4A7C15ull;
+          h ^= h >> 30; h *= 0xBF58476D1CE4E5B9ull;
+          h ^= h >> 27; h *= 0x94D049BB133111EBull;
+          h ^= h >> 31;
+          double unit = (double)(h >> 11) / 9007199254740992.0;  // [0,1)
+          double t2 = t + (unit * 2.0 - 1.0) * spread;
+          out.items.push_back(Value{TimeV{std::max(0.0, t2)}});
+          i++;
+        }
         return Value{std::move(out)};
       }
     }

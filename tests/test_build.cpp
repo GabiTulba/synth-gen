@@ -1062,3 +1062,62 @@ let _ = sine 440.0 |> sample ~from:0s ~to:50ms |> render ~name:"t" ~rate:8000.0 
   std::string meta = slurp(tp.dir / "build" / "metadata.json");
   CHECK(meta.find("\"render_ms\": ") != std::string::npos);
 }
+
+TEST(build_jitter_deterministic_and_distinct) {
+  // Humanized timing is pseudo-random but pure: two identical projects
+  // produce byte-identical artifacts, a different seed produces a
+  // different (but valid) one, and the unjittered grid differs from
+  // both.
+  const char* jittered = R"(
+let hit : Scalar Sample = sine 660.0 * exp_decay 20.0 |> sample ~from:0s ~to:100ms ;;
+let beats : Timestamp list =
+  time_steps ~start:100ms ~step:200ms ~count:5.0 |> jitter ~seed:7.0 ~spread:10ms ;;
+let _ = place_multi hit beats |> sample ~from:0s ~to:1200ms
+        |> render ~name:"out" ~rate:8000.0 ;;
+)";
+  TempDir a, b, c, d;
+  a.write("p.synth", jittered);
+  a.write(".build", "project ja\nsource p.synth\n");
+  b.write("p.synth", jittered);
+  b.write(".build", "project jb\nsource p.synth\n");
+  c.write("p.synth", R"(
+let hit : Scalar Sample = sine 660.0 * exp_decay 20.0 |> sample ~from:0s ~to:100ms ;;
+let beats : Timestamp list =
+  time_steps ~start:100ms ~step:200ms ~count:5.0 |> jitter ~seed:8.0 ~spread:10ms ;;
+let _ = place_multi hit beats |> sample ~from:0s ~to:1200ms
+        |> render ~name:"out" ~rate:8000.0 ;;
+)");
+  c.write(".build", "project jc\nsource p.synth\n");
+  d.write("p.synth", R"(
+let hit : Scalar Sample = sine 660.0 * exp_decay 20.0 |> sample ~from:0s ~to:100ms ;;
+let beats : Timestamp list = time_steps ~start:100ms ~step:200ms ~count:5.0 ;;
+let _ = place_multi hit beats |> sample ~from:0s ~to:1200ms
+        |> render ~name:"out" ~rate:8000.0 ;;
+)");
+  d.write(".build", "project jd\nsource p.synth\n");
+  CHECK(buildProject(a.dir.string()).ok);
+  CHECK(buildProject(b.dir.string()).ok);
+  CHECK(buildProject(c.dir.string()).ok);
+  CHECK(buildProject(d.dir.string()).ok);
+  std::string wa = slurp(a.dir / "build" / "artifacts" / "out.wav");
+  std::string wb = slurp(b.dir / "build" / "artifacts" / "out.wav");
+  std::string wc = slurp(c.dir / "build" / "artifacts" / "out.wav");
+  std::string wd = slurp(d.dir / "build" / "artifacts" / "out.wav");
+  CHECK(!wa.empty());
+  CHECK(wa == wb);  // same seed: reproducible
+  CHECK(wa != wc);  // different seed: different feel
+  CHECK(wa != wd);  // and not the robotic grid
+}
+
+TEST(build_jitter_rejects_negative_spread) {
+  TempDir tp;
+  tp.write("p.synth", R"(
+let beats : Timestamp list = [0s] |> jitter ~seed:1.0 ~spread:0ms - 5ms ;;
+let _ = sine 220.0 |> sample ~from:0s ~to:10ms |> render ~name:"x" ~rate:8000.0 ;;
+)");
+  tp.write(".build", "project jn\nsource p.synth\n");
+  // Negative spread must be rejected; whether it parses as a checker or
+  // eval error, the build fails with diagnostics.
+  BuildResult r = buildProject(tp.dir.string());
+  CHECK(!r.ok);
+}

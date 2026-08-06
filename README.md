@@ -318,7 +318,9 @@ follows (all easy to revisit):
   expressible via `list_init` without lambdas); `time_steps
   start:Timestamp step:Timestamp count:Scalar : Timestamp list` builds
   arithmetic timestamp sequences — the natural feed for `place_multi`
-  (`place_multi kick (time_steps ~start:0s ~step:500ms ~count:8.0)`).
+  (`place_multi kick (time_steps ~start:0s ~step:500ms ~count:8.0)`);
+  `jitter ~seed ~spread` humanizes such a list with hash-derived (pure,
+  reproducible) per-note timing deltas.
   There is no Integer type in v1: counts and indices are Scalars,
   validated at build time to be whole and non-negative.
 - **`place_multi sample:'a Sample ats:Timestamp list : 'a Signal`** —

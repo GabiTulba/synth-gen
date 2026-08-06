@@ -31,29 +31,46 @@ import Fx
 
 (* ---------- drums ---------- *)
 let kick_line : Scalar Signal =
-  mix_all [place_multi Drums.kick_hit (time_steps ~start:16s ~step:500ms ~count:31.0);
-           place_multi Drums.kick_hit (time_steps ~start:32s ~step:500ms ~count:32.0);
-           place_multi Drums.kick_hit (time_steps ~start:56s ~step:500ms ~count:15.0);
-           place_multi Drums.kick_hit (time_steps ~start:64s ~step:500ms ~count:48.0);
-           place_multi Drums.kick_hit (time_steps ~start:92s ~step:500ms ~count:7.0);
-           place_multi Drums.kick_hit (time_steps ~start:96s ~step:500ms ~count:32.0);
-           place_multi Drums.kick_hit (time_steps ~start:108250ms ~step:250ms ~count:15.0)]
+  mix_all [place_multi Drums.kick_hit (time_steps ~start:16s ~step:500ms ~count:31.0
+                                         |> jitter ~seed:41.0 ~spread:3ms);
+           place_multi Drums.kick_hit (time_steps ~start:32s ~step:500ms ~count:32.0
+                                         |> jitter ~seed:42.0 ~spread:3ms);
+           place_multi Drums.kick_hit (time_steps ~start:56s ~step:500ms ~count:15.0
+                                         |> jitter ~seed:43.0 ~spread:3ms);
+           place_multi Drums.kick_hit (time_steps ~start:64s ~step:500ms ~count:48.0
+                                         |> jitter ~seed:44.0 ~spread:3ms);
+           place_multi Drums.kick_hit (time_steps ~start:92s ~step:500ms ~count:7.0
+                                         |> jitter ~seed:45.0 ~spread:3ms);
+           place_multi Drums.kick_hit (time_steps ~start:96s ~step:500ms ~count:32.0
+                                         |> jitter ~seed:46.0 ~spread:3ms);
+           place_multi Drums.kick_hit (time_steps ~start:108250ms ~step:250ms ~count:15.0
+                                         |> jitter ~seed:47.0 ~spread:3ms)]
 ;;
 
 let snare_line : Scalar Signal =
-  mix_all [place_multi Drums.snare_hit (time_steps ~start:30s ~step:250ms ~count:6.0);
-           place_multi Drums.snare_hit (time_steps ~start:32500ms ~step:1s ~count:16.0);
-           place_multi Drums.snare_hit (time_steps ~start:62s ~step:250ms ~count:6.0);
-           place_multi Drums.snare_hit (time_steps ~start:64500ms ~step:1s ~count:24.0);
-           place_multi Drums.snare_hit (time_steps ~start:94s ~step:250ms ~count:6.0);
-           place_multi Drums.snare_hit (time_steps ~start:96500ms ~step:1s ~count:16.0)]
+  mix_all [place_multi Drums.snare_hit (time_steps ~start:30s ~step:250ms ~count:6.0
+                                          |> jitter ~seed:31.0 ~spread:4ms);
+           place_multi Drums.snare_hit (time_steps ~start:32500ms ~step:1s ~count:16.0
+                                          |> jitter ~seed:32.0 ~spread:5ms);
+           place_multi Drums.snare_hit (time_steps ~start:62s ~step:250ms ~count:6.0
+                                          |> jitter ~seed:33.0 ~spread:4ms);
+           place_multi Drums.snare_hit (time_steps ~start:64500ms ~step:1s ~count:24.0
+                                          |> jitter ~seed:34.0 ~spread:5ms);
+           place_multi Drums.snare_hit (time_steps ~start:94s ~step:250ms ~count:6.0
+                                          |> jitter ~seed:35.0 ~spread:4ms);
+           place_multi Drums.snare_hit (time_steps ~start:96500ms ~step:1s ~count:16.0
+                                          |> jitter ~seed:36.0 ~spread:5ms)]
 ;;
 
 let hat_line : Scalar Signal =
-  mix_all [place_multi Drums.hat_hit (time_steps ~start:16s ~step:250ms ~count:62.0);
-           place_multi Drums.hat_hit (time_steps ~start:32250ms ~step:500ms ~count:32.0);
-           place_multi Drums.hat_hit (time_steps ~start:64250ms ~step:250ms ~count:94.0);
-           place_multi Drums.hat_hit (time_steps ~start:96250ms ~step:250ms ~count:62.0)]
+  mix_all [place_multi Drums.hat_hit (time_steps ~start:16s ~step:250ms ~count:62.0
+                                        |> jitter ~seed:21.0 ~spread:8ms);
+           place_multi Drums.hat_hit (time_steps ~start:32250ms ~step:500ms ~count:32.0
+                                        |> jitter ~seed:22.0 ~spread:8ms);
+           place_multi Drums.hat_hit (time_steps ~start:64250ms ~step:250ms ~count:94.0
+                                        |> jitter ~seed:23.0 ~spread:8ms);
+           place_multi Drums.hat_hit (time_steps ~start:96250ms ~step:250ms ~count:62.0
+                                        |> jitter ~seed:24.0 ~spread:8ms)]
 ;;
 
 let drum_line : Scalar Signal =
@@ -71,23 +88,31 @@ let alarm_line : Scalar Signal =
 ;;
 
 (* ---------- bass (roots: A1, F1, D2, E1) ---------- *)
-let eighths ~freq:Scalar ~start:Timestamp ~count:Scalar : Scalar Signal =
-  place_multi (Bass.pulse freq) (time_steps ~start:start ~step:250ms ~count:count)
+let eighths ~freq:Scalar ~start:Timestamp ~count:Scalar ~seed:Scalar
+    : Scalar Signal =
+  place_multi (Bass.pulse freq)
+              (time_steps ~start:start ~step:250ms ~count:count
+                 |> jitter ~seed:seed ~spread:5ms)
 ;;
 
 (* Drop bass: the hard-clipped grind voice. The first chord segment
    right after each drop hit runs sixteenths - the most aggressive bar
    of the song. The remaining segments pump: root on the beat, octave
    on the offbeat, which keeps the low end moving instead of looping. *)
-let grind_sixteenths ~freq:Scalar ~start:Timestamp : Scalar Signal =
-  place_multi (Bass.grind freq) (time_steps ~start:start ~step:125ms ~count:32.0)
-;;
-let grind_pump ~freq:Scalar ~start:Timestamp ~offstart:Timestamp
+let grind_sixteenths ~freq:Scalar ~start:Timestamp ~seed:Scalar
     : Scalar Signal =
   place_multi (Bass.grind freq)
-              (time_steps ~start:start ~step:500ms ~count:8.0)
+              (time_steps ~start:start ~step:125ms ~count:32.0
+                 |> jitter ~seed:seed ~spread:4ms)
+;;
+let grind_pump ~freq:Scalar ~start:Timestamp ~offstart:Timestamp ~seed:Scalar
+    : Scalar Signal =
+  place_multi (Bass.grind freq)
+              (time_steps ~start:start ~step:500ms ~count:8.0
+                 |> jitter ~seed:seed ~spread:5ms)
   + place_multi (Bass.grind (freq * 2.0))
-                (time_steps ~start:offstart ~step:500ms ~count:8.0)
+                (time_steps ~start:offstart ~step:500ms ~count:8.0
+                   |> jitter ~seed:(seed + 0.5) ~spread:5ms)
 ;;
 
 let bass_line : Scalar Signal =
@@ -97,36 +122,36 @@ let bass_line : Scalar Signal =
              place_multi (Bass.held 73.42) [8s; 10s];
              place_multi (Bass.held 41.2) [12s; 14s]] in
   let build : Scalar Signal =
-    mix_all [eighths ~freq:55.0 ~start:16s ~count:16.0;
-             eighths ~freq:43.65 ~start:20s ~count:16.0;
-             eighths ~freq:73.42 ~start:24s ~count:16.0;
-             eighths ~freq:41.2 ~start:28s ~count:14.0] in
+    mix_all [eighths ~freq:55.0 ~start:16s ~count:16.0 ~seed:1.0;
+             eighths ~freq:43.65 ~start:20s ~count:16.0 ~seed:2.0;
+             eighths ~freq:73.42 ~start:24s ~count:16.0 ~seed:3.0;
+             eighths ~freq:41.2 ~start:28s ~count:14.0 ~seed:4.0] in
   let drop1 : Scalar Signal =
-    mix_all [grind_pump ~freq:55.0 ~start:32s ~offstart:32250ms;
-             grind_pump ~freq:43.65 ~start:36s ~offstart:36250ms;
-             grind_pump ~freq:73.42 ~start:40s ~offstart:40250ms;
-             grind_pump ~freq:41.2 ~start:44s ~offstart:44250ms] in
+    mix_all [grind_pump ~freq:55.0 ~start:32s ~offstart:32250ms ~seed:5.0;
+             grind_pump ~freq:43.65 ~start:36s ~offstart:36250ms ~seed:6.0;
+             grind_pump ~freq:73.42 ~start:40s ~offstart:40250ms ~seed:7.0;
+             grind_pump ~freq:41.2 ~start:44s ~offstart:44250ms ~seed:8.0] in
   let breakdown : Scalar Signal =
     mix_all [place_multi (Bass.held 55.0) [48s; 50s];
              place_multi (Bass.held 43.65) [52s; 54s];
              place_multi (Bass.held 73.42) [56s; 58s];
              place_multi (Bass.held 41.2) [60s; 62s]] in
   let drop2 : Scalar Signal =
-    mix_all [grind_sixteenths ~freq:55.0 ~start:64s;
-             grind_pump ~freq:43.65 ~start:68s ~offstart:68250ms;
-             grind_pump ~freq:73.42 ~start:72s ~offstart:72250ms;
-             grind_pump ~freq:41.2 ~start:76s ~offstart:76250ms;
-             grind_pump ~freq:55.0 ~start:80s ~offstart:80250ms;
-             grind_sixteenths ~freq:43.65 ~start:84s] in
+    mix_all [grind_sixteenths ~freq:55.0 ~start:64s ~seed:9.0;
+             grind_pump ~freq:43.65 ~start:68s ~offstart:68250ms ~seed:10.0;
+             grind_pump ~freq:73.42 ~start:72s ~offstart:72250ms ~seed:11.0;
+             grind_pump ~freq:41.2 ~start:76s ~offstart:76250ms ~seed:12.0;
+             grind_pump ~freq:55.0 ~start:80s ~offstart:80250ms ~seed:13.0;
+             grind_sixteenths ~freq:43.65 ~start:84s ~seed:14.0] in
   let tolling : Scalar Signal =
     mix_all [place_multi (Bass.held 55.0) [88s; 90s];
              Bass.held 43.65 |> place ~at:92s;
              Bass.held 41.2 |> place ~at:94s] in
   let drop3 : Scalar Signal =
-    mix_all [grind_sixteenths ~freq:55.0 ~start:96s;
-             grind_pump ~freq:43.65 ~start:100s ~offstart:100250ms;
-             grind_pump ~freq:73.42 ~start:104s ~offstart:104250ms;
-             grind_sixteenths ~freq:41.2 ~start:108s] in
+    mix_all [grind_sixteenths ~freq:55.0 ~start:96s ~seed:15.0;
+             grind_pump ~freq:43.65 ~start:100s ~offstart:100250ms ~seed:16.0;
+             grind_pump ~freq:73.42 ~start:104s ~offstart:104250ms ~seed:17.0;
+             grind_sixteenths ~freq:41.2 ~start:108s ~seed:18.0] in
   let outro : Scalar Signal =
     place_multi (Bass.held 55.0) [112s; 114s; 116s] in
   intro * 0.8 + build + drop1 + breakdown * 0.8 + drop2
@@ -142,23 +167,26 @@ let pad_line detune:Scalar : Scalar Signal =
 ;;
 
 (* ---------- distorted guitar (drops only) ---------- *)
-let chugs ~freq:Scalar ~start:Timestamp ~count:Scalar : Scalar Signal =
-  place_multi (Guitar.chug freq) (time_steps ~start:start ~step:250ms ~count:count)
+let chugs ~freq:Scalar ~start:Timestamp ~count:Scalar ~seed:Scalar
+    : Scalar Signal =
+  place_multi (Guitar.chug freq)
+              (time_steps ~start:start ~step:250ms ~count:count
+                 |> jitter ~seed:seed ~spread:7ms)
 ;;
 
 (* Guitar is a drop-2 weapon: drop 1 stays drums-and-bass so the second
    drop lands harder. *)
 let chug_part : Scalar Signal =
-  mix_all [chugs ~freq:110.0 ~start:64s ~count:12.0;
-           chugs ~freq:87.31 ~start:68s ~count:12.0;
-           chugs ~freq:73.42 ~start:72s ~count:12.0;
-           chugs ~freq:82.41 ~start:76s ~count:12.0;
-           chugs ~freq:110.0 ~start:80s ~count:12.0;
-           chugs ~freq:87.31 ~start:84s ~count:12.0;
-           chugs ~freq:110.0 ~start:96s ~count:12.0;
-           chugs ~freq:87.31 ~start:100s ~count:12.0;
-           chugs ~freq:73.42 ~start:104s ~count:12.0;
-           chugs ~freq:82.41 ~start:108s ~count:12.0]
+  mix_all [chugs ~freq:110.0 ~start:64s ~count:12.0 ~seed:61.0;
+           chugs ~freq:87.31 ~start:68s ~count:12.0 ~seed:62.0;
+           chugs ~freq:73.42 ~start:72s ~count:12.0 ~seed:63.0;
+           chugs ~freq:82.41 ~start:76s ~count:12.0 ~seed:64.0;
+           chugs ~freq:110.0 ~start:80s ~count:12.0 ~seed:65.0;
+           chugs ~freq:87.31 ~start:84s ~count:12.0 ~seed:66.0;
+           chugs ~freq:110.0 ~start:96s ~count:12.0 ~seed:67.0;
+           chugs ~freq:87.31 ~start:100s ~count:12.0 ~seed:68.0;
+           chugs ~freq:73.42 ~start:104s ~count:12.0 ~seed:69.0;
+           chugs ~freq:82.41 ~start:108s ~count:12.0 ~seed:70.0]
 ;;
 
 (* Lead runs: four syncopated notes at the tail of each chord segment
@@ -166,33 +194,34 @@ let chug_part : Scalar Signal =
    Drop 1 runs rise; drop 2 flips the contour downward for variation. *)
 let lead_run ~n1:Scalar ~n2:Scalar ~n3:Scalar
              ~at1:Timestamp ~ats2:(Timestamp list) ~at3:Timestamp
+             ~seed:Scalar
     : Scalar Signal =
-  (Guitar.stab n1 |> place ~at:at1)
-  + place_multi (Guitar.stab n2) ats2
-  + (Guitar.stab n3 |> place ~at:at3)
+  place_multi (Guitar.stab n1) ([at1] |> jitter ~seed:seed ~spread:6ms)
+  + place_multi (Guitar.stab n2) (ats2 |> jitter ~seed:(seed + 0.3) ~spread:6ms)
+  + place_multi (Guitar.stab n3) ([at3] |> jitter ~seed:(seed + 0.7) ~spread:6ms)
 ;;
 
 let stab_part : Scalar Signal =
   mix_all [lead_run ~n1:329.63 ~n2:261.63 ~n3:220.0
-                    ~at1:66500ms ~ats2:[67s; 67500ms] ~at3:67250ms;
+                    ~at1:66500ms ~ats2:[67s; 67500ms] ~at3:67250ms ~seed:71.0;
            lead_run ~n1:349.23 ~n2:261.63 ~n3:220.0
-                    ~at1:70500ms ~ats2:[71s; 71500ms] ~at3:71250ms;
+                    ~at1:70500ms ~ats2:[71s; 71500ms] ~at3:71250ms ~seed:72.0;
            lead_run ~n1:293.66 ~n2:220.0 ~n3:174.61
-                    ~at1:74500ms ~ats2:[75s; 75500ms] ~at3:75250ms;
+                    ~at1:74500ms ~ats2:[75s; 75500ms] ~at3:75250ms ~seed:73.0;
            lead_run ~n1:246.94 ~n2:207.65 ~n3:164.81
-                    ~at1:78500ms ~ats2:[79s; 79500ms] ~at3:79250ms;
+                    ~at1:78500ms ~ats2:[79s; 79500ms] ~at3:79250ms ~seed:74.0;
            lead_run ~n1:220.0 ~n2:261.63 ~n3:329.63
-                    ~at1:82500ms ~ats2:[83s; 83500ms] ~at3:83250ms;
+                    ~at1:82500ms ~ats2:[83s; 83500ms] ~at3:83250ms ~seed:75.0;
            lead_run ~n1:349.23 ~n2:261.63 ~n3:220.0
-                    ~at1:86500ms ~ats2:[87s; 87500ms] ~at3:87250ms;
+                    ~at1:86500ms ~ats2:[87s; 87500ms] ~at3:87250ms ~seed:76.0;
            lead_run ~n1:329.63 ~n2:261.63 ~n3:220.0
-                    ~at1:98500ms ~ats2:[99s; 99500ms] ~at3:99250ms;
+                    ~at1:98500ms ~ats2:[99s; 99500ms] ~at3:99250ms ~seed:77.0;
            lead_run ~n1:349.23 ~n2:261.63 ~n3:220.0
-                    ~at1:102500ms ~ats2:[103s; 103500ms] ~at3:103250ms;
+                    ~at1:102500ms ~ats2:[103s; 103500ms] ~at3:103250ms ~seed:78.0;
            lead_run ~n1:293.66 ~n2:220.0 ~n3:174.61
-                    ~at1:106500ms ~ats2:[107s; 107500ms] ~at3:107250ms;
+                    ~at1:106500ms ~ats2:[107s; 107500ms] ~at3:107250ms ~seed:79.0;
            lead_run ~n1:246.94 ~n2:329.63 ~n3:440.0
-                    ~at1:110500ms ~ats2:[111s; 111500ms] ~at3:111250ms]
+                    ~at1:110500ms ~ats2:[111s; 111500ms] ~at3:111250ms ~seed:80.0]
 ;;
 
 (* ---------- bells: far-off tolls that close in ---------- *)
@@ -276,10 +305,10 @@ let master : Vector Signal =
 
 let _ =
   master |> sample ~from:0s ~to:120s
-         |> render ~name:"darksynth" ~rate:44100.0 ;;
+         |> render ~name:"darksynth" ~rate:48000.0 ;;
 
 let _ =
-  render_stems ~name:"darksynth" ~rate:44100.0
+  render_stems ~name:"darksynth" ~rate:48000.0
     ~stems:[("drums", drum_bus |> sample ~from:0s ~to:120s);
             ("bass", bass_bus |> sample ~from:0s ~to:120s);
             ("pads", pad_bus |> sample ~from:0s ~to:120s);

@@ -245,10 +245,23 @@ val fold      : f:('a -> 'b -> 'a) -> init:'a -> xs:'b list -> 'a
 val list_init : n:Scalar -> f:(Scalar -> 'a) -> 'a list   (* [f 0.0; ...; f (n-1)] *)
 val repeat    : n:Scalar -> x:'a -> 'a list
 val time_steps: start:Timestamp -> step:Timestamp -> count:Scalar -> Timestamp list
+val jitter    : seed:Scalar -> spread:Timestamp -> steps:(Timestamp list) -> Timestamp list
 ```
 
 Counts and indices are Scalars (the language's single numeric type);
 counts must be whole and non-negative, validated at build time.
+
+`jitter` humanizes a rhythm: each timestamp moves by a delta in
+`[-spread, +spread]` (clamped at `0s`) derived by hashing
+`(seed, index)`. The deltas are statistically random but the function is
+pure - the same seed always yields the same feel, so builds stay
+reproducible and cacheable; give each layer its own seed so they drift
+independently:
+
+```
+place_multi hat (time_steps ~start:0s ~step:250ms ~count:32.0
+                   |> jitter ~seed:7.0 ~spread:8ms)
+```
 
 Semantics details for the doc's open points (also in the README):
 `adsr` sustains until `hold` then releases; `fm` integrates

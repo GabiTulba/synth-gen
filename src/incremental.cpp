@@ -30,8 +30,8 @@ const TopDef* findDef(const CheckedModule& mod, const std::string& name) {
 // Collects the top-level definitions referenced by an expression:
 // unqualified names that aren't parameters resolve to this module's defs
 // (primitives fall through and are ignored); qualified names resolve
-// through the program. Scoping is simple by design: parameters are the
-// only local bindings in v1. The map is keyed by "Module.name" so the
+// through the program. Local binders are def params, `let ... in` names,
+// and lambda params. The map is keyed by "Module.name" so the
 // hash-combination order is stable across processes and rebuilds.
 using DepMap =
     std::map<std::string, std::pair<const CheckedModule*, const TopDef*>>;
@@ -56,6 +56,15 @@ void collectDeps(const Expr& e, const std::set<std::string>& params,
     std::set<std::string> scoped = params;
     scoped.insert(e.name);
     collectDeps(*e.items[1], scoped, mod, prog, out);
+    return;
+  }
+  if (e.kind == Expr::Kind::Lambda) {
+    // Lambda params shadow same-named defs inside the body; without this
+    // the shadowed def would be recorded as a spurious dependency and
+    // needlessly invalidate cached artifacts.
+    std::set<std::string> scoped = params;
+    for (auto& p : e.params) scoped.insert(p.name);
+    collectDeps(*e.items[0], scoped, mod, prog, out);
     return;
   }
   for (auto& child : e.items) collectDeps(*child, params, mod, prog, out);

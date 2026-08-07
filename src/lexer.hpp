@@ -9,6 +9,7 @@ namespace synth {
 enum class Tok {
   Let,
   In,
+  Fun,
   Import,
   Ident,      // lowercase-initial identifier or `_`
   UpIdent,    // uppercase-initial identifier (types, module names)

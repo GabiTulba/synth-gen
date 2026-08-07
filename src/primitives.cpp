@@ -75,9 +75,8 @@ const std::vector<PrimSig>& primitives() {
     add(PrimId::Place, "place", {"sample", "at"}, {tSample(a), tTimestamp()},
         tSignal(a));
     // place_multi: place one sample at every timestamp in the list and mix
-    // the placements (overlaps sum). Equivalent to mapping `place` over
-    // the list - which v1 cannot express directly, since partial
-    // application does not exist.
+    // the placements (overlaps sum). Equivalent to
+    // `mix_all (map (place s) ats)`, kept as a primitive for ergonomics.
     add(PrimId::PlaceMulti, "place_multi", {"sample", "ats"},
         {tSample(a), tList(tTimestamp())}, tSignal(a));
     // The effects: render writes an audio artifact; render_vis writes a

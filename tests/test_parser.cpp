@@ -186,6 +186,77 @@ TEST(parser_pipe_rejects_non_application_rhs) {
   CHECK(diags.hasErrors());
 }
 
+TEST(parser_lambda) {
+  DiagnosticBag diags;
+  auto defs = parseSrc(
+      "let f : Scalar -> Scalar = fun x:Scalar -> x + 1.0 ;;\n"
+      "let g : Scalar -> Scalar -> Scalar = fun a:Scalar ~b:Scalar -> a + b ;;",
+      diags);
+  CHECK(!diags.hasErrors());
+  const Expr& lam = *defs[0].body;
+  CHECK(lam.kind == Expr::Kind::Lambda);
+  CHECK(lam.params.size() == 1);
+  CHECK(lam.params[0].name == "x");
+  CHECK(lam.params[0].type->kind == Type::Kind::Scalar);
+  CHECK(!lam.params[0].labeled);
+  CHECK(lam.items[0]->kind == Expr::Kind::BinOp);
+  const Expr& lam2 = *defs[1].body;
+  CHECK(lam2.params.size() == 2);
+  CHECK(lam2.params[1].labeled);
+  CHECK(lam2.params[1].name == "b");
+}
+
+TEST(parser_lambda_as_argument) {
+  DiagnosticBag diags;
+  auto defs = parseSrc(
+      "let xs : Scalar list = map (fun x:Scalar -> x * 2.0) [1.0; 2.0] ;;",
+      diags);
+  CHECK(!diags.hasErrors());
+  const Expr& app = *defs[0].body;
+  CHECK(app.kind == Expr::Kind::App);
+  CHECK(app.items[0]->name == "map");
+  CHECK(app.items[1]->kind == Expr::Kind::Lambda);
+}
+
+TEST(parser_lambda_in_pipe) {
+  DiagnosticBag diags;
+  auto defs = parseSrc(
+      "let x : Scalar = 1.0 |> (fun y:Scalar -> y + 1.0) ;;", diags);
+  CHECK(!diags.hasErrors());
+  // Desugars to App(lambda, [1.0]): piped value = final positional arg.
+  const Expr& app = *defs[0].body;
+  CHECK(app.kind == Expr::Kind::App);
+  CHECK(app.items[0]->kind == Expr::Kind::Lambda);
+  CHECK(app.items.size() == 2);
+  CHECK(app.items[1]->kind == Expr::Kind::NumLit);
+  // A bare lambda on the right of |> stays an error.
+  DiagnosticBag bad;
+  parseSrc("let x : Scalar = 1.0 |> fun y:Scalar -> y ;;", bad);
+  CHECK(bad.hasErrors());
+}
+
+TEST(parser_lambda_errors) {
+  DiagnosticBag d1;
+  parseSrc("let f : Scalar -> Scalar = fun -> 1.0 ;;", d1);
+  CHECK(d1.hasErrors());  // no parameters
+  DiagnosticBag d2;
+  parseSrc("let f : Scalar -> Scalar = fun x -> x ;;", d2);
+  CHECK(d2.hasErrors());  // missing annotation
+  DiagnosticBag d3;
+  parseSrc("let f : Scalar -> Scalar = fun x:Scalar x ;;", d3);
+  CHECK(d3.hasErrors());  // missing ->
+}
+
+TEST(parser_computed_callee) {
+  DiagnosticBag diags;
+  auto defs = parseSrc("let x : Scalar = (f 1.0) 2.0 ;;", diags);
+  CHECK(!diags.hasErrors());
+  const Expr& app = *defs[0].body;
+  CHECK(app.kind == Expr::Kind::App);
+  CHECK(app.items[0]->kind == Expr::Kind::App);
+  CHECK(app.items[0]->items[0]->name == "f");
+}
+
 TEST(parser_let_in) {
   DiagnosticBag diags;
   auto defs = parseSrc(R"(

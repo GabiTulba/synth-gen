@@ -78,21 +78,7 @@ class Parser {
     Span lo = advance().span;  // 'let'
     const Token& name = expect(Tok::Ident, "binding name");
     d.name = name.text;
-    // Parameters: [~]ident ':' type, until ':' (return type) or '='.
-    // A leading '~' declares a labeled parameter.
-    while (at(Tok::Ident) || at(Tok::Tilde)) {
-      Param p;
-      if (at(Tok::Tilde)) {
-        advance();
-        p.labeled = true;
-      }
-      const Token& pn = expect(Tok::Ident, "parameter name");
-      p.name = pn.text;
-      expect(Tok::Colon, "':' after parameter name");
-      p.type = parseParamType();
-      p.span = {pn.span.lo, peek().span.lo};
-      d.params.push_back(std::move(p));
-    }
+    parseParams(d.params);
     if (at(Tok::Colon)) {
       advance();
       d.retType = parseType();
@@ -105,6 +91,25 @@ class Parser {
     const Token& end = expect(Tok::SemiSemi, "';;' to end definition");
     d.span = {lo.lo, end.span.hi};
     return d;
+  }
+
+  // Parameters: [~]ident ':' type, until ':' (return type), '=' or '->'.
+  // A leading '~' declares a labeled parameter. Shared by top-level lets
+  // and lambdas.
+  void parseParams(std::vector<Param>& out) {
+    while (at(Tok::Ident) || at(Tok::Tilde)) {
+      Param p;
+      if (at(Tok::Tilde)) {
+        advance();
+        p.labeled = true;
+      }
+      const Token& pn = expect(Tok::Ident, "parameter name");
+      p.name = pn.text;
+      expect(Tok::Colon, "':' after parameter name");
+      p.type = parseParamType();
+      p.span = {pn.span.lo, peek().span.lo};
+      out.push_back(std::move(p));
+    }
   }
 
   // --- Types -------------------------------------------------------------
@@ -184,7 +189,25 @@ class Parser {
 
   ExprPtr parseExpr() {
     if (at(Tok::Let)) return parseLetIn();
+    if (at(Tok::Fun)) return parseLambda();
     return parsePipe();
+  }
+
+  // Anonymous function: fun param+ -> body. Params are annotated exactly
+  // like top-level def params; the return type is synthesized from the
+  // body. The body extends maximally right, so a lambda used as an
+  // argument or pipe right-hand side must be parenthesized.
+  ExprPtr parseLambda() {
+    Span lo = advance().span;  // 'fun'
+    auto e = std::make_unique<Expr>(Expr::Kind::Lambda, lo);
+    parseParams(e->params);
+    if (e->params.empty())
+      fail(peek().span, "expected parameter after 'fun'");
+    expect(Tok::Arrow, "'->' after lambda parameters");
+    ExprPtr body = parseExpr();
+    e->span = {lo.lo, body->span.hi};
+    e->items.push_back(std::move(body));
+    return e;
   }
 
   // Local binding: let name : Type = expr in body. Annotated like every
@@ -217,9 +240,13 @@ class Parser {
     ExprPtr left = parseAdditive();
     while (at(Tok::PipeGt)) {
       advance();
+      if (at(Tok::Fun))
+        fail(peek().span,
+             "parenthesize a lambda on the right of |>: x |> (fun ...)");
       ExprPtr right = parseAdditive();
       Span span{left->span.lo, right->span.hi};
-      if (right->kind == Expr::Kind::Ident) {
+      if (right->kind == Expr::Kind::Ident ||
+          right->kind == Expr::Kind::Lambda) {
         auto app = std::make_unique<Expr>(Expr::Kind::App, span);
         app->items.push_back(std::move(right));
         app->items.push_back(std::move(left));
@@ -232,8 +259,8 @@ class Parser {
         left = std::move(right);
       } else {
         fail(right->span,
-             "the right-hand side of |> must be a function name or "
-             "application");
+             "the right-hand side of |> must be a function name, "
+             "application, or parenthesized lambda");
       }
     }
     return left;

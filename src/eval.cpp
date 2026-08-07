@@ -82,7 +82,9 @@ class Interp {
               i - 1 < e.argLabels.size() ? e.argLabels[i - 1] : "";
           args.emplace_back(std::move(label), eval(*e.items[i], env, mod));
         }
-        Value fn = lookup(*e.items[0], env, mod);
+        // The callee may be any Fun-typed expression (a name, a nested
+        // partial application, a lambda, ...); Ident dispatches to lookup.
+        Value fn = eval(*e.items[0], env, mod);
         return applyValue(fn, std::move(args), mod);
       }
       case Expr::Kind::BinOp: {
@@ -111,6 +113,10 @@ class Interp {
         else env.erase(e.name);
         return out;
       }
+      case Expr::Kind::Lambda:
+        // Capture the local environment by value; the AST is owned by the
+        // Program for the whole build, so the Expr pointer stays valid.
+        return Value{LambdaV{&e, &mod, std::make_shared<Env>(env), nullptr}};
     }
     throw EvalError("internal error: unknown expression kind");
   }
@@ -156,6 +162,7 @@ class Interp {
     const std::map<std::string, Value>* prevBound = nullptr;
     const FunV* f = std::get_if<FunV>(&fn.v);
     const PrimClosureV* pc = std::get_if<PrimClosureV>(&fn.v);
+    const LambdaV* l = std::get_if<LambdaV>(&fn.v);
     const PrimSig* sig = nullptr;
     if (f) {
       for (auto& p : f->def->params) paramNames.push_back(p.name);
@@ -165,6 +172,9 @@ class Interp {
       if (!sig) throw EvalError("internal error: unknown primitive id");
       paramNames = sig->paramNames;
       prevBound = pc->bound.get();
+    } else if (l) {
+      for (auto& p : l->lam->params) paramNames.push_back(p.name);
+      prevBound = l->bound.get();
     } else {
       throw EvalError("internal error: applying a non-function value");
     }
@@ -191,6 +201,8 @@ class Interp {
 
     if (bound->size() < paramNames.size()) {
       if (f) return Value{FunV{f->def, f->mod, std::move(bound)}};
+      if (l) return Value{LambdaV{l->lam, l->mod, l->captured,
+                                  std::move(bound)}};
       return Value{PrimClosureV{pc->primId, std::move(bound)}};
     }
 
@@ -198,6 +210,13 @@ class Interp {
       Env env;
       for (auto& name : paramNames) env[name] = (*bound)[name];
       return eval(*f->def->body, env, *f->mod);
+    }
+    if (l) {
+      // The captured environment plus the bound params (params shadow
+      // captures), evaluated in the lambda's defining module.
+      Env env = *l->captured;
+      for (auto& name : paramNames) env[name] = (*bound)[name];
+      return eval(*l->lam->items[0], env, *l->mod);
     }
     std::vector<Value> ordered;
     for (auto& name : paramNames) ordered.push_back((*bound)[name]);

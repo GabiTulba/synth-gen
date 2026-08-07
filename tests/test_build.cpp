@@ -656,6 +656,32 @@ let _ = render "out" 8000.0
   CHECK_NEAR(at(0.35), 0.0, 0.01);   // both finished
 }
 
+TEST(build_computed_callee_matches_direct_call) {
+  // Applying a parenthesized partial application must render exactly the
+  // same artifact as the direct call.
+  auto write = [](TempDir& tp, const char* body) {
+    tp.write("c.synth", body);
+    tp.write(".build", "project cc\nsource c.synth\n");
+  };
+  TempDir computed, direct;
+  write(computed, R"(
+let _ = render "out" 8000.0
+  (sample ((lowpass ~cutoff:600.0) (saw 220.0)) 0s 500ms) ;;
+)");
+  write(direct, R"(
+let _ = render "out" 8000.0
+  (sample (lowpass 600.0 (saw 220.0)) 0s 500ms) ;;
+)");
+  BuildResult rc = buildProject(computed.dir.string());
+  for (auto& d : rc.diags.items) std::cerr << d.message << "\n";
+  CHECK(rc.ok);
+  CHECK(buildProject(direct.dir.string()).ok);
+  std::string a = slurp(computed.dir / "build" / "artifacts" / "out.wav");
+  std::string b = slurp(direct.dir / "build" / "artifacts" / "out.wav");
+  CHECK(!a.empty());
+  CHECK(a == b);
+}
+
 TEST(build_place_multi_with_stateful_sample) {
   // A reverb-carrying sample placed at several timestamps: every
   // placement replays the same content (state isolation end to end).
@@ -867,6 +893,101 @@ let _ = voice |> sample ~from:0s ~to:50ms |> render ~name:"out" ~rate:8000.0 ;;
   BuildResult r = buildProject(tp.dir.string(), &cache);
   CHECK(r.ok);
   CHECK(r.targets[0].cached);  // the edit touched only the shadowed def
+}
+
+TEST(build_lambda_place_equivalence) {
+  // place_multi, an explicit lambda, and a positionally-curried `place`
+  // must all render byte-identical artifacts.
+  auto write = [](TempDir& tp, const char* song) {
+    std::string src = R"(
+let hit : Scalar Sample = sample ((sine 660.0) * (exp_decay 15.0)) 0s 150ms ;;
+let song : Scalar Signal = )" + std::string(song) + R"( ;;
+let _ = render "out" 8000.0 (sample song 0s 900ms) ;;
+)";
+    tp.write("p.synth", src);
+    tp.write(".build", "project eq\nsource p.synth\n");
+  };
+  TempDir multi, lambda, curried;
+  write(multi, "place_multi hit [0s; 300ms; 600ms]");
+  write(lambda,
+        "mix_all (map (fun t:Timestamp -> place hit t) [0s; 300ms; 600ms])");
+  write(curried, "mix_all (map (place hit) [0s; 300ms; 600ms])");
+  BuildResult rm = buildProject(multi.dir.string());
+  BuildResult rl = buildProject(lambda.dir.string());
+  BuildResult rc = buildProject(curried.dir.string());
+  for (auto& d : rl.diags.items) std::cerr << d.message << "\n";
+  for (auto& d : rc.diags.items) std::cerr << d.message << "\n";
+  CHECK(rm.ok);
+  CHECK(rl.ok);
+  CHECK(rc.ok);
+  std::string a = slurp(multi.dir / "build" / "artifacts" / "out.wav");
+  std::string b = slurp(lambda.dir / "build" / "artifacts" / "out.wav");
+  std::string c = slurp(curried.dir / "build" / "artifacts" / "out.wav");
+  CHECK(!a.empty());
+  CHECK(a == b);
+  CHECK(a == c);
+}
+
+TEST(build_lambda_captures_local) {
+  // A lambda capturing a let...in local and a def parameter renders the
+  // same artifact as the version with the constant inlined.
+  TempDir captured, inlined;
+  captured.write("p.synth", R"(
+let stack detune:Scalar : Scalar Signal =
+  let base : Scalar = 220.0 in
+  mix_all (map (fun i:Scalar -> sine (base + i * detune)) [0.0; 1.0; 2.0]) ;;
+let _ = stack 3.0 |> sample ~from:0s ~to:200ms
+        |> render ~name:"out" ~rate:8000.0 ;;
+)");
+  captured.write(".build", "project cap\nsource p.synth\n");
+  inlined.write("p.synth", R"(
+let stack : Scalar Signal =
+  mix_all [sine 220.0; sine 223.0; sine 226.0] ;;
+let _ = stack |> sample ~from:0s ~to:200ms
+        |> render ~name:"out" ~rate:8000.0 ;;
+)");
+  inlined.write(".build", "project inl\nsource p.synth\n");
+  BuildResult rc = buildProject(captured.dir.string());
+  for (auto& d : rc.diags.items) std::cerr << d.message << "\n";
+  CHECK(rc.ok);
+  CHECK(buildProject(inlined.dir.string()).ok);
+  std::string a = slurp(captured.dir / "build" / "artifacts" / "out.wav");
+  std::string b = slurp(inlined.dir / "build" / "artifacts" / "out.wav");
+  CHECK(!a.empty());
+  CHECK(a == b);
+}
+
+TEST(build_lambda_shadowing_cache_precision) {
+  // A lambda param shadowing a module definition must not create a
+  // dependency on it (editing the shadowed def leaves the target cached),
+  // while a def genuinely referenced inside a lambda body must.
+  const char* fmt = R"(
+let gain : Scalar = %s ;;
+let level : Scalar = %s ;;
+let voice : Scalar Signal =
+  mix_all (map (fun gain:Scalar -> sine (440.0 * gain) * level) [1.0; 2.0]) ;;
+let _ = voice |> sample ~from:0s ~to:50ms |> render ~name:"out" ~rate:8000.0 ;;
+)";
+  auto src = [&](const char* g, const char* l) {
+    char buf[512];
+    snprintf(buf, sizeof buf, fmt, g, l);
+    return std::string(buf);
+  };
+  TempDir tp;
+  tp.write("p.synth", src("0.9", "0.5"));
+  tp.write(".build", "project lshadow\nsource p.synth\n");
+  BuildCache cache;
+  CHECK(buildProject(tp.dir.string(), &cache).ok);
+  // Edit only the shadowed, unused top-level `gain`: still cached.
+  tp.write("p.synth", src("0.1", "0.5"));
+  BuildResult r1 = buildProject(tp.dir.string(), &cache);
+  CHECK(r1.ok);
+  CHECK(r1.targets[0].cached);
+  // Edit `level`, which the lambda body really references: rebuilt.
+  tp.write("p.synth", src("0.1", "0.25"));
+  BuildResult r2 = buildProject(tp.dir.string(), &cache);
+  CHECK(r2.ok);
+  CHECK(!r2.targets[0].cached);
 }
 
 TEST(build_render_stems_produces_named_targets) {

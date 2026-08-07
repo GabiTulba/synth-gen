@@ -13,6 +13,13 @@ using ExprPtr = std::unique_ptr<Expr>;
 
 enum class BinOpKind { Add, Sub, Mul, Div };
 
+struct Param {
+  std::string name;
+  TypePtr type;
+  bool labeled = false;  // declared with ~name:Type
+  Span span{};
+};
+
 struct Expr {
   enum class Kind {
     NumLit,    // num
@@ -24,6 +31,7 @@ struct Expr {
     ListLit,   // items
     TupleLit,  // items (size >= 2)
     Let,       // name, declType; items[0] = bound expr, items[1] = body
+    Lambda,    // params; items[0] = body
   };
   Kind kind;
   Span span{};
@@ -37,18 +45,13 @@ struct Expr {
   std::vector<std::string> argLabels;
   // Let only: the local binding's annotation.
   TypePtr declType;
+  // Lambda only: the anonymous function's parameters.
+  std::vector<Param> params;
 
   // Filled in by the type checker.
   TypePtr type;
 
   explicit Expr(Kind k, Span s) : kind(k), span(s) {}
-};
-
-struct Param {
-  std::string name;
-  TypePtr type;
-  bool labeled = false;  // declared with ~name:Type
-  Span span{};
 };
 
 struct TopDef {

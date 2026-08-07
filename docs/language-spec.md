@@ -13,7 +13,7 @@ accepts and how it is typed and evaluated. The design document
   identifiers name bindings and parameters; uppercase-initial identifiers
   name modules and types. `_` is a valid binding name with special
   meaning (see §4).
-- **Keywords**: `let`, `import`.
+- **Keywords**: `let`, `in`, `fun`, `import`.
 - **Number literals**: `[0-9]+(\.[0-9]+)?` — always `Scalar`.
 - **Timestamp literals**: a number literal immediately followed by a unit
   suffix: `ns` (1e-9 s), `us` (1e-6 s), `ms` (1e-3 s), `s` (1 s),
@@ -41,8 +41,9 @@ postfix-type::= atom-type { "Signal" | "Sample" | "list" }
 atom-type   ::= "Scalar" | "Vector" | "Timestamp" | "String" | "unit"
               | "(" type { "," type } ")"           (tuple if >1 element)
 
-expr        ::= let-in | pipe
+expr        ::= let-in | lambda | pipe
 let-in      ::= "let" Ident ":" type "=" expr "in" expr
+lambda      ::= "fun" param { param } "->" expr
 pipe        ::= additive { "|>" additive }          (lowest, left-assoc)
 additive    ::= multiplicative { ("+" | "-") multiplicative }
 multiplicative ::= unary { ("*" | "/") unary }
@@ -81,9 +82,16 @@ Notes:
     place_multi hit beats
   ;;
   ```
+- **Lambdas**: `fun x:Scalar ~y:Timestamp -> body` is an anonymous
+  function expression. Parameters are annotated exactly like `let`
+  parameters (function-typed ones parenthesized, `~` marks a label); the
+  return type is synthesized from the body. The body extends maximally to
+  the right, so a lambda used as an argument or on the right of `|>` must
+  be parenthesized: `map (fun t:Timestamp -> place hit t) beats`.
 - **Pipe**: `x |> f a b` desugars to the application `f a b x` — the
   piped value becomes the final positional argument. The right-hand side
-  must be a function name or application; chains are left-associative:
+  must be a function name, application, or parenthesized lambda; chains
+  are left-associative:
   `saw 220.0 |> lowpass ~cutoff:800.0 |> soft_clip 0.8`.
 
 ## 3. Type system
@@ -109,22 +117,27 @@ Rules:
   must match the annotation (a var-carrying partial application of a
   polymorphic primitive resolves against it), and the name is visible
   only in the body of the `in`.
-- **Labeled arguments & label-driven currying.** A parameter declared
+- **Labeled arguments & partial application.** A parameter declared
   `~name:Type` is *labeled*; primitive parameters are all labeled with
   their signature names. At a call site, positional arguments fill the
   leftmost unfilled parameters in order, and labeled arguments
   (`f ~x:v`) fill their parameter by name, in any order. If every
-  parameter is filled the call evaluates. If the remaining unfilled
-  parameters are all labeled, the call is a *partial application*: its
-  value is the curried function of the remaining parameters
-  (`lowpass ~cutoff:800.0 : 'a Signal -> 'a Signal`). Unfilled
-  *positional* parameters are an error — positional application remains
-  all-or-nothing. Labels are not part of type equality.
-- **Application otherwise.** A function *name* (user or primitive) may
-  be passed unapplied wherever a matching function type is expected
-  (`map place_pluck [...]`, `map sine [...]`); lambdas do not exist in
-  v1. A stored partial application of a *polymorphic* primitive gets its
-  type variables resolved against the binding's annotation
+  parameter is filled the call evaluates. Otherwise the call is a
+  *partial application*: its value is the curried function of the
+  remaining parameters, in declaration order, keeping their labels
+  (`lowpass ~cutoff:800.0 : 'a Signal -> 'a Signal`,
+  `place hit : at:Timestamp -> Scalar Signal`). Any subset may be left
+  unfilled — a positional prefix, a labeled subset, or a mix. Labels are
+  not part of type equality.
+- **Application otherwise.** Any expression of function type may be
+  applied or passed where a matching function type is expected: a bare
+  name (`map place_pluck [...]`, `map sine [...]`), a partial
+  application (`map (place hit) beats`, `(f 1.0) 2.0`), a
+  function-typed parameter, or a lambda. Primitive signatures'
+  type variables are instantiated fresh at every call site, so partial
+  applications of polymorphic primitives can flow directly into other
+  polymorphic calls (`map (lowpass ~cutoff:600.0) sigs`); a *stored*
+  one also resolves against the binding's annotation
   (`let damp : Scalar Signal -> Scalar Signal = lowpass ~cutoff:600.0`).
 - **`let _` is the effect form.** Its body must have type `unit`, and
   the render primitives (`render`, `render_vis`) are the only sources of
@@ -278,7 +291,8 @@ manage headroom deliberately.
 ## 7. Out of scope in v1
 
 Booleans and control flow, pattern matching, user-defined types,
-recursion and feedback (IIR-style signal cycles), lambdas and partial
-application, user polymorphism, visibility control/interface files,
-cross-directory imports and packaging, cache tuning knobs, native
-extensions. See design doc §13.
+recursion and feedback (IIR-style signal cycles), user polymorphism,
+visibility control/interface files, cross-directory imports and
+packaging, cache tuning knobs, native extensions. See design doc §13.
+(Lambdas and general partial application, listed here originally, are
+now in the language — see §2 and §3.)

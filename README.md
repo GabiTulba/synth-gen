@@ -95,8 +95,8 @@ Fully annotated, no inference, no Booleans/branching/recursion in v1.
 `render` is the language's only effect. Files are modules (`import A`
 resolves `a.synth` in the same directory).
 
-Three ergonomic features on top of the doc's core: **labeled arguments**
-with label-driven currying, the **pipe operator**, and **local
+Ergonomic features on top of the doc's core: **labeled arguments**,
+**partial application**, **lambdas**, the **pipe operator**, and **local
 `let ... in` bindings**:
 
 ```ocaml
@@ -109,16 +109,25 @@ let warm : Scalar Signal =
 let pattern : Scalar Signal =
   let hit : Scalar Sample = warm |> sample ~from:0s ~to:100ms in
   let beats : Timestamp list = time_steps ~start:0s ~step:200ms ~count:5.0 in
-  place_multi hit beats ;;
+  mix_all (map (place hit) beats) ;;   (* or: place_multi hit beats *)
+
+let echoes : Scalar Signal =
+  let hit : Scalar Sample = warm |> sample ~from:0s ~to:100ms in
+  mix_all (map (fun t:Timestamp -> place hit t) [0s; 250ms; 500ms]) ;;
 
 let _ = sample pattern ~from:0s ~to:2s |> render ~name:"warm" ~rate:48000.0 ;;
 ```
 
-Labeled arguments go in any order; providing a subset curries the
-function. Primitive parameters are all labeled with their signature
-names, so any primitive can be called by label or partially applied.
-`x |> f a` desugars to `f a x` (the piped value becomes the final
-positional argument).
+Labeled arguments go in any order; providing any subset of a function's
+arguments — labeled, a positional prefix, or a mix — curries it over the
+remaining parameters. Primitive parameters are all labeled with their
+signature names, so any primitive can be called by label or partially
+applied, and any function-typed expression can be applied
+(`(f 1.0) 2.0`) or passed along. Lambdas (`fun x:Scalar -> ...`)
+annotate their parameters like every other binding, capture enclosing
+locals, and must be parenthesized when used as an argument or pipe
+right-hand side. `x |> f a` desugars to `f a x` (the piped value becomes
+the final positional argument).
 
 ## Repository layout
 
@@ -266,9 +275,10 @@ follows (all easy to revisit):
   sustain:Scalar release:Timestamp hold:Timestamp : Scalar Signal`.
   Durations are Timestamps, the sustain level is a Scalar, and `hold` is
   the gate length: the envelope sustains until `hold`, then releases.
-- **Higher-order arguments are named functions only** — no lambdas in v1,
-  as the doc leans. Any user function whose signature matches may be
-  passed (e.g. to `map`/`fold`).
+- **Higher-order arguments** may be any function-typed expression: a
+  named user function or primitive, a partial application, or a lambda
+  (`map (fun t:Timestamp -> place hit t) beats`). Lambdas capture
+  enclosing locals by value.
 - **Vector channel-count mismatches** are a build error, raised at graph
   construction time (before any audio is computed). Channel counts are
   static once audio files are read, so this never happens mid-render.
@@ -314,8 +324,8 @@ follows (all easy to revisit):
   Parameters are validated at graph construction.
 - **List builders** — `list_init n:Scalar f:(Scalar -> 'a) : 'a list`
   builds `[f 0.0; f 1.0; ...; f (n-1)]` (additive stacks, generated
-  patterns); `repeat n:Scalar x:'a : 'a list` builds n copies (not
-  expressible via `list_init` without lambdas); `time_steps
+  patterns); `repeat n:Scalar x:'a : 'a list` builds n copies (a
+  convenience for `list_init n (fun i:Scalar -> x)`); `time_steps
   start:Timestamp step:Timestamp count:Scalar : Timestamp list` builds
   arithmetic timestamp sequences — the natural feed for `place_multi`
   (`place_multi kick (time_steps ~start:0s ~step:500ms ~count:8.0)`);
@@ -330,9 +340,9 @@ follows (all easy to revisit):
   full scale — rendering works in doubles and only hard-clamps to
   [-1, 1] at WAV write, so manage headroom deliberately by scaling down
   or with `soft_clip`/`hard_clip`. This is
-  the pattern/rhythm workhorse `mix_all (map (place s) ats)` would be —
-  which v1 cannot write directly, since partial application doesn't
-  exist. Each placement replays the sample from its own state, so
+  the pattern/rhythm workhorse: equivalent to
+  `mix_all (map (place s) ats)` (byte-identical artifacts), kept as a
+  primitive for ergonomics. Each placement replays the sample from its own state, so
   stateful content (filters, `fm`, `reverb`) sounds identical at every
   timestamp — a guarantee `place` itself now also provides when the same
   sample value is placed repeatedly.

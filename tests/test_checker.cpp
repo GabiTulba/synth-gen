@@ -453,6 +453,124 @@ let c : Scalar Signal = damp (saw 220.0) ;;
   CHECK(!diags.hasErrors());
 }
 
+TEST(checker_polymorphic_partial_into_polymorphic_prim) {
+  TempProject tp;
+  // A var-carrying partial application flowing straight into another
+  // polymorphic primitive, with no annotated binding in between: per-call
+  // freshening plus two-sided unification must resolve the vars.
+  std::string f = tp.write("ok.synth", R"(
+let xs : Scalar Signal list = map (lowpass ~cutoff:600.0) [saw 220.0; saw 110.0] ;;
+let y : Scalar Signal = mix_all (map (lowpass ~cutoff:600.0) [saw 220.0]) ;;
+)");
+  DiagnosticBag diags;
+  Program prog = checkProject({f}, diags);
+  for (auto& d : diags.items)
+    std::cerr << renderDiagnostic(d, prog.modules.empty()
+                                         ? std::string{}
+                                         : prog.modules[0].parsed.source);
+  CHECK(!diags.hasErrors());
+  CHECK(typeEquals(prog.modules[0].defTypes.at("xs"),
+                   tList(tSignal(tScalar()))));
+}
+
+TEST(checker_computed_callee) {
+  TempProject tp;
+  // Any Fun-typed expression can be applied, not just a name: nested
+  // partial applications, polymorphic primitive partials with no
+  // annotated binding in between, and function-typed parameters.
+  std::string f = tp.write("ok.synth", R"(
+let add a:Scalar b:Scalar : Scalar = a + b ;;
+let three : Scalar = (add 1.0) 2.0 ;;
+let damped : Scalar Signal = (lowpass ~cutoff:600.0) (saw 220.0) ;;
+let twice f:(Scalar -> Scalar) x:Scalar : Scalar = f (f x) ;;
+let two : Scalar = twice (add 1.0) 0.0 ;;
+)");
+  DiagnosticBag diags;
+  Program prog = checkProject({f}, diags);
+  for (auto& d : diags.items)
+    std::cerr << renderDiagnostic(d, prog.modules.empty()
+                                         ? std::string{}
+                                         : prog.modules[0].parsed.source);
+  CHECK(!diags.hasErrors());
+  CHECK(typeEquals(prog.modules[0].defTypes.at("three"), tScalar()));
+  CHECK(typeEquals(prog.modules[0].defTypes.at("damped"),
+                   tSignal(tScalar())));
+  // A non-function expression still cannot be applied.
+  std::string g = tp.write("bad1.synth", "let x : Scalar = (1.0) 2.0 ;;");
+  DiagnosticBag d1;
+  checkProject({g}, d1);
+  CHECK(d1.hasErrors());
+  // Over-application through a computed callee still errors.
+  std::string h = tp.write("bad2.synth", R"(
+let add a:Scalar b:Scalar : Scalar = a + b ;;
+let x : Scalar = (add 1.0) 2.0 3.0 ;;
+)");
+  DiagnosticBag d2;
+  checkProject({h}, d2);
+  CHECK(d2.hasErrors());
+}
+
+TEST(checker_lambda) {
+  TempProject tp;
+  std::string f = tp.write("ok.synth", R"(
+let hit : Scalar Sample = sample (sine 440.0) 0s 100ms ;;
+let song : Scalar Signal =
+  mix_all (map (fun t:Timestamp -> place hit t) [0s; 500ms; 1s]) ;;
+let two : Scalar = (fun x:Scalar -> x + 1.0) 1.0 ;;
+let curried : Scalar = ((fun a:Scalar b:Scalar -> a + b) 1.0) 2.0 ;;
+let scaled base:Scalar : Scalar list =
+  map (fun x:Scalar -> x * base) [1.0; 2.0] ;;
+)");
+  DiagnosticBag diags;
+  Program prog = checkProject({f}, diags);
+  for (auto& d : diags.items)
+    std::cerr << renderDiagnostic(d, prog.modules.empty()
+                                         ? std::string{}
+                                         : prog.modules[0].parsed.source);
+  CHECK(!diags.hasErrors());
+  CHECK(typeEquals(prog.modules[0].defTypes.at("song"), tSignal(tScalar())));
+}
+
+TEST(checker_lambda_capture_and_shadowing) {
+  TempProject tp;
+  // A lambda body sees let...in locals; a lambda param shadows a
+  // same-named top-level def (the param's type wins in the body).
+  std::string f = tp.write("ok.synth", R"(
+let gain : Scalar Signal = sine 2.0 ;;
+let xs : Scalar list =
+  let base : Scalar = 10.0 in
+  map (fun gain:Scalar -> gain * base) [1.0; 2.0] ;;
+)");
+  DiagnosticBag diags;
+  Program prog = checkProject({f}, diags);
+  for (auto& d : diags.items)
+    std::cerr << renderDiagnostic(d, prog.modules.empty()
+                                         ? std::string{}
+                                         : prog.modules[0].parsed.source);
+  CHECK(!diags.hasErrors());
+  // The param's scope ends at the lambda body.
+  std::string g = tp.write("bad1.synth", R"(
+let y : Scalar = ((fun x:Scalar -> x) 1.0) + x ;;
+)");
+  DiagnosticBag d1;
+  checkProject({g}, d1);
+  CHECK(d1.hasErrors());
+  // Duplicate lambda params are rejected.
+  std::string h = tp.write("bad2.synth", R"(
+let f : Scalar -> Scalar -> Scalar = fun x:Scalar x:Scalar -> x ;;
+)");
+  DiagnosticBag d2;
+  checkProject({h}, d2);
+  CHECK(d2.hasErrors());
+  // Body type errors surface.
+  std::string k = tp.write("bad3.synth", R"(
+let f : Scalar -> Scalar = fun x:Scalar -> x + "nope" ;;
+)");
+  DiagnosticBag d3;
+  checkProject({k}, d3);
+  CHECK(d3.hasErrors());
+}
+
 TEST(checker_label_errors) {
   TempProject tp;
   // Unknown label.
@@ -467,14 +585,40 @@ TEST(checker_label_errors) {
   DiagnosticBag d2;
   checkProject({g}, d2);
   CHECK(d2.hasErrors());
-  // Unfilled positional parameter cannot be curried.
-  std::string h = tp.write("bad3.synth", R"(
+}
+
+TEST(checker_positional_partial_application) {
+  TempProject tp;
+  // Unfilled positional parameters curry too: providing ~y leaves the
+  // positional x as the curried function's parameter, and a positional
+  // prefix of a user function curries the rest.
+  std::string f = tp.write("ok.synth", R"(
 let f x:Scalar ~y:Scalar : Scalar = x + y ;;
 let g : Scalar -> Scalar = f ~y:1.0 ;;
+let add a:Scalar b:Scalar : Scalar = a + b ;;
+let inc : Scalar -> Scalar = add 1.0 ;;
+let three : Scalar = inc 2.0 ;;
+let sums : Scalar list = map (add 1.0) [1.0; 2.0] ;;
 )");
-  DiagnosticBag d3;
-  checkProject({h}, d3);
-  CHECK(d3.hasErrors());
+  DiagnosticBag diags;
+  Program prog = checkProject({f}, diags);
+  for (auto& d : diags.items)
+    std::cerr << renderDiagnostic(d, prog.modules.empty()
+                                         ? std::string{}
+                                         : prog.modules[0].parsed.source);
+  CHECK(!diags.hasErrors());
+  const TypePtr& g = prog.modules[0].defTypes.at("g");
+  CHECK(g->kind == Type::Kind::Fun);
+  CHECK(g->items.size() == 1);
+  CHECK(typeEquals(g->items[0], tScalar()));
+  // Over-application still errors.
+  std::string h = tp.write("bad.synth", R"(
+let add a:Scalar b:Scalar : Scalar = a + b ;;
+let x : Scalar = add 1.0 2.0 3.0 ;;
+)");
+  DiagnosticBag d2;
+  checkProject({h}, d2);
+  CHECK(d2.hasErrors());
 }
 
 TEST(checker_pipe_typing) {

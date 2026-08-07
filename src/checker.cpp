@@ -53,6 +53,11 @@ class ModuleChecker {
   CheckedModule& mod_;
   const Program& prog_;
   DiagnosticBag& diags_;
+  // Primitive signatures share global var objects (ids 0 and 1); every call
+  // site instantiates them with fresh ids so two polymorphic calls - or a
+  // partial application fed into another polymorphic call - can never
+  // capture each other's variables.
+  int nextFreshVar_ = 2;
 
   struct Abort {};  // stop checking the current definition
 
@@ -176,6 +181,36 @@ class ModuleChecker {
         else env.erase(e.name);
         return bodyT;
       }
+      case Expr::Kind::Lambda: {
+        // Params bind (shadowing) for the body only; the result type is
+        // the function of the annotated params to the synthesized body
+        // type, labels included - the same shape defFunType builds.
+        for (size_t i = 0; i < e.params.size(); i++)
+          for (size_t j = 0; j < i; j++)
+            if (e.params[i].name == e.params[j].name)
+              fail(e.params[i].span,
+                   "duplicate parameter '" + e.params[i].name + "'");
+        std::vector<std::pair<std::string, std::optional<TypePtr>>> saved;
+        for (auto& p : e.params) {
+          auto prev = env.find(p.name);
+          saved.emplace_back(p.name, prev != env.end()
+                                         ? std::optional<TypePtr>(prev->second)
+                                         : std::nullopt);
+          env[p.name] = p.type;
+        }
+        TypePtr bodyT = check(*e.items[0], env);
+        for (auto it = saved.rbegin(); it != saved.rend(); ++it) {
+          if (it->second) env[it->first] = *it->second;
+          else env.erase(it->first);
+        }
+        std::vector<TypePtr> ps;
+        std::vector<std::string> labels;
+        for (auto& p : e.params) {
+          ps.push_back(p.type);
+          labels.push_back(p.labeled ? p.name : "");
+        }
+        return tFun(std::move(ps), std::move(labels), bodyT);
+      }
     }
     fail(e.span, "internal error: unknown expression kind");
   }
@@ -208,13 +243,18 @@ class ModuleChecker {
   // Application with labels. Positional arguments fill the leftmost
   // unfilled parameters in order; labeled arguments (~x:v) fill their
   // parameter by name, in any order. If every parameter is filled the
-  // call evaluates; if the remaining unfilled parameters are all labeled,
-  // the result is the curried function of those parameters (label-driven
-  // partial application). Unfilled positional parameters are an error.
+  // call evaluates; otherwise the call is a partial application whose
+  // value is the curried function of the remaining parameters, in
+  // declaration order, keeping their labels.
+  // How to refer to the callee in diagnostics: by name when it is one,
+  // generically when it is a computed expression.
+  static std::string calleeDesc(const Expr& callee) {
+    return callee.kind == Expr::Kind::Ident ? "'" + callee.name + "'"
+                                            : "this function";
+  }
+
   TypePtr checkApp(Expr& e, std::map<std::string, TypePtr>& env) {
     Expr& callee = *e.items[0];
-    if (callee.kind != Expr::Kind::Ident)
-      fail(callee.span, "only named functions can be applied");
 
     // Check arguments first; user code is monomorphic so they are concrete
     // (a nested partial application of a polymorphic primitive is the one
@@ -233,20 +273,24 @@ class ModuleChecker {
     std::vector<std::string> paramLabels;
     TypePtr retType;
     const PrimSig* prim = nullptr;
-    if (callee.moduleName.empty() && !env.count(callee.name) &&
-        !mod_.defTypes.count(callee.name))
+    if (callee.kind == Expr::Kind::Ident && callee.moduleName.empty() &&
+        !env.count(callee.name) && !mod_.defTypes.count(callee.name))
       prim = findPrimitive(callee.name);
     if (prim) {
       paramTypes = prim->paramTypes;
       paramLabels = prim->paramNames;
       retType = prim->retType;
+      freshenVars(paramTypes, retType);
       callee.type = tFun(paramTypes, paramLabels, retType);
     } else {
-      TypePtr fnType = checkIdentIn(callee, env);
-      callee.type = fnType;
+      // Any Fun-typed expression can be applied: a name, a nested partial
+      // application, a function-typed parameter, a lambda, ...
+      TypePtr fnType = check(callee, env);
       if (fnType->kind != Type::Kind::Fun)
-        fail(callee.span, "'" + callee.name + "' has type " +
-                              typeName(fnType) + " and cannot be applied");
+        fail(callee.span,
+             (callee.kind == Expr::Kind::Ident ? "'" + callee.name + "'"
+                                               : "this expression") +
+                 " has type " + typeName(fnType) + " and cannot be applied");
       paramTypes = fnType->items;
       for (size_t i = 0; i < paramTypes.size(); i++)
         paramLabels.push_back(fnType->labelAt(i));
@@ -266,7 +310,7 @@ class ModuleChecker {
           }
         if (target == paramTypes.size())
           fail(e.items[j + 1]->span,
-               "'" + callee.name + "' has no unfilled argument labeled '~" +
+               calleeDesc(callee) + " has no unfilled argument labeled '~" +
                    label + "'");
       } else {
         for (size_t i = 0; i < paramTypes.size(); i++)
@@ -275,7 +319,7 @@ class ModuleChecker {
             break;
           }
         if (target == paramTypes.size())
-          fail(e.span, "'" + callee.name + "' expects " +
+          fail(e.span, calleeDesc(callee) + " expects " +
                            std::to_string(paramTypes.size()) +
                            " argument(s), got " +
                            std::to_string(argTypes.size()));
@@ -288,14 +332,17 @@ class ModuleChecker {
     for (size_t i = 0; i < paramTypes.size(); i++) {
       if (argForParam[i] < 0) continue;
       size_t j = (size_t)argForParam[i];
-      bool ok = prim ? unify(paramTypes[i], argTypes[j], subst)
-                     : typeEquals(paramTypes[i], argTypes[j]);
+      // unify degenerates to typeEquals when both sides are var-free (all
+      // user-code types), and handles vars on either side: freshened
+      // primitive parameters, or an argument that is itself a polymorphic
+      // partial application.
+      bool ok = unify(paramTypes[i], argTypes[j], subst);
       if (!ok) {
         std::string label = paramLabels[i].empty()
                                 ? "argument " + std::to_string(i + 1)
                                 : "argument '" + paramLabels[i] + "'";
         fail(e.items[j + 1]->span,
-             label + " of '" + callee.name + "' expects " +
+             label + " of " + calleeDesc(callee) + " expects " +
                  typeName(applySubst(paramTypes[i], subst)) + ", got " +
                  typeName(argTypes[j]));
       }
@@ -307,18 +354,14 @@ class ModuleChecker {
       if (argForParam[i] < 0) unfilled.push_back(i);
     if (unfilled.empty()) {
       TypePtr ret = applySubst(retType, subst);
-      if (prim && containsVar(ret))
-        fail(e.span, "cannot determine the result type of this call to '" +
-                         callee.name + "'");
+      if (containsVar(ret))
+        fail(e.span, "cannot determine the result type of this call to " +
+                         calleeDesc(callee));
       return ret;
     }
 
-    // Partial application: every remaining parameter must be labeled.
-    for (size_t i : unfilled)
-      if (paramLabels[i].empty())
-        fail(e.span, "'" + callee.name +
-                         "' is missing positional argument(s); only "
-                         "labeled arguments may be left for later");
+    // Partial application: the result is the curried function of the
+    // remaining parameters, in declaration order, keeping their labels.
     std::vector<TypePtr> remTypes;
     std::vector<std::string> remLabels;
     for (size_t i : unfilled) {
@@ -327,6 +370,38 @@ class ModuleChecker {
     }
     return tFun(std::move(remTypes), std::move(remLabels),
                 applySubst(retType, subst));
+  }
+
+  // Instantiate a primitive signature: rename every var id occurring in the
+  // parameter/return types to a fresh id (see nextFreshVar_).
+  void freshenVars(std::vector<TypePtr>& paramTypes, TypePtr& retType) {
+    Subst renaming;
+    std::function<void(const TypePtr&)> collect = [&](const TypePtr& t) {
+      switch (t->kind) {
+        case Type::Kind::Var:
+          if (!renaming.count(t->var))
+            renaming[t->var] = tVar(nextFreshVar_++);
+          break;
+        case Type::Kind::Signal:
+        case Type::Kind::Sample:
+        case Type::Kind::List:
+          collect(t->elem);
+          break;
+        case Type::Kind::Tuple:
+        case Type::Kind::Fun: {
+          for (auto& x : t->items) collect(x);
+          if (t->ret) collect(t->ret);
+          break;
+        }
+        default:
+          break;
+      }
+    };
+    for (auto& p : paramTypes) collect(p);
+    collect(retType);
+    if (renaming.empty()) return;
+    for (auto& p : paramTypes) p = applySubst(p, renaming);
+    retType = applySubst(retType, renaming);
   }
 
   static bool containsVar(const TypePtr& t) {

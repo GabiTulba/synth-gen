@@ -13,7 +13,7 @@ accepts and how it is typed and evaluated. The design document
   identifiers name bindings and parameters; uppercase-initial identifiers
   name modules and types. `_` is a valid binding name with special
   meaning (see §4).
-- **Keywords**: `let`, `in`, `fun`, `import`.
+- **Keywords**: `let`, `in`, `fun`, `import`, `open`, `module`.
 - **Number literals**: `[0-9]+(\.[0-9]+)?` — always `Scalar`.
 - **Timestamp literals**: a number literal immediately followed by a unit
   suffix: `ns` (1e-9 s), `us` (1e-6 s), `ms` (1e-3 s), `s` (1 s),
@@ -30,8 +30,11 @@ EBNF; `{x}` is repetition, `[x]` is optionality.
 
 ```
 module      ::= { top-def }
-top-def     ::= import-def | let-def
-import-def  ::= "import" UpIdent [ ";;" ]
+top-def     ::= import-def | open-def | alias-def | let-def
+module-path ::= UpIdent { "." UpIdent }             (Lib or Lib.File)
+import-def  ::= "import" module-path [ ";;" ]
+open-def    ::= "open" module-path [ ";;" ]
+alias-def   ::= "module" UpIdent "=" module-path [ ";;" ]
 let-def     ::= "let" (Ident | "_") { param } [ ":" type ] "=" expr ";;"
 param       ::= [ "~" ] Ident ":" param-type      (~ marks a labeled param)
 
@@ -52,7 +55,7 @@ app         ::= atom { arg }                        (application, left)
 arg         ::= atom | "~" Ident ":" atom           (labeled argument)
 atom        ::= Number | Time | String
               | Ident                               (unqualified name)
-              | UpIdent "." Ident                   (qualified name)
+              | module-path "." Ident               (qualified name)
               | "(" expr { "," expr } ")"           (tuple if >1 element)
               | "[" [ expr { ";" expr } ] "]"       (list literal)
 ```
@@ -110,9 +113,21 @@ Rules:
   site. Users cannot write polymorphic definitions.
 - **Definition before use, no recursion.** A definition may reference
   only parameters, *earlier* definitions of its module, imported modules'
-  definitions (qualified), and primitives. Name resolution order for
-  unqualified names: local binding/parameter (innermost first) → earlier
-  module definition → primitive.
+  definitions (qualified), names brought in by an *earlier* `open`, and
+  primitives. Name resolution order for unqualified names: local
+  binding/parameter (innermost first) → the latest earlier top-level
+  binder (an own definition or an `open`ed name — position-ordered, so
+  an `open` shadows earlier same-named binders and a later definition
+  shadows the open) → primitive. Re-defining one of the module's *own*
+  names is still a duplicate-definition error.
+- **Module references** (`import`/`open`/alias targets and qualified
+  names) resolve their first segment as: module alias bound earlier in
+  the file (later aliases override) → a file module of the current
+  context (the library's listed files, or the same directory for
+  standalone files — a local file wins over a library of the same
+  name) → a discovered library (which must be `dep`-declared). From
+  outside a library only `expose`d files are reachable; inside it, all
+  listed files are.
 - **Local bindings** type-check like top-level ones: the bound expression
   must match the annotation (a var-carrying partial application of a
   polymorphic primitive resolves against it), and the name is visible
@@ -164,18 +179,48 @@ mismatches between Vector Signals are detected when the signal graph is
 built — before any audio is computed — and signals are capped at 16
 channels in v1.
 
-## 4. Modules & projects
+## 4. Modules, libraries & projects
 
 - **File = module.** `foo.synth` defines module `Foo` (stem, first
   letter capitalized). All top-level definitions are visible to
-  importers; access is qualified (`Foo.bar`).
-- **`import A`** resolves `a.synth` (module name lowercased) in the same
-  directory. Unresolved imports and import cycles are build errors.
+  importers; access is qualified (`Foo.bar`). A library member's
+  canonical module id is `Lib.Foo`.
+- **`import A`** resolves the module `A` in the current context: a
+  library's listed sibling file, or (standalone) `a.synth` in the same
+  directory, or a discovered library. `import Lib` makes all of `Lib`'s
+  exposed files reachable as `Lib.File.def`; `import Lib.File` imports
+  one exposed file. Unresolved imports and import cycles are build
+  errors.
+- **`open`** brings names into scope, shadowing by position (see §3):
+  `open Lib` injects the library's exposed *file modules* (so
+  `File.def` works unqualified at the file level); `open File` /
+  `open Lib.File` injects that file's *definitions* directly. An `open`
+  implies the corresponding import.
+- **`module K = Path`** binds (or overrides) a module name: the target
+  may be a file module by any spelling in scope, an earlier alias, or a
+  whole library (`module B = Basic` then `B.Keys.def`).
+- **Library**: a directory whose `.build` declares `library <Name>` plus
+  its files — `expose <file>` for the public surface (at least one),
+  `source <file>` for internal modules, and `dep <Name>` for library
+  dependencies. Internal files are importable within the library only.
+  Libraries may declare render targets; building the library renders
+  them into its own `build/` directory, and consumers' builds do NOT
+  re-render a dependency's targets.
 - **Project**: a directory with a `.build` manifest — line-based,
-  `project <name>` once plus one `source <file>` per source file; `#`
-  starts a comment.
+  `project <name>` once plus one `source <file>` per source file (plus
+  optional `dep <Name>` lines); `#` starts a comment.
+- **Root**: a `.build` with `project <name>` and one `build <path>` rule
+  per buildable unit (a project/library directory or a single `.synth`
+  file). Libraries are discovered dynamically by recursively scanning
+  the tree under the root (skipping `build/` output and hidden
+  directories); `dep` names resolve against that discovered set,
+  wherever the library lives in the tree. Duplicate library names,
+  unknown deps and library dependency cycles are build errors. Building
+  a `dep`-carrying directory on its own finds its enclosing root
+  automatically; `synthc build`/`watch` at the root builds/watches every
+  rule, each with its own `build/` output directory.
 - **Render targets**: every `render` call evaluated at build time
-  declares one. Names must be unique project-wide. Artifacts land in
+  declares one. Names must be unique per build unit. Artifacts land in
   `build/artifacts/<name>.wav`; the machine-readable index in
   `build/metadata.json`.
 
@@ -292,7 +337,9 @@ manage headroom deliberately.
 
 Booleans and control flow, pattern matching, user-defined types,
 recursion and feedback (IIR-style signal cycles), user polymorphism,
-visibility control/interface files, cross-directory imports and
-packaging, cache tuning knobs, native extensions. See design doc §13.
-(Lambdas and general partial application, listed here originally, are
-now in the language — see §2 and §3.)
+`.mli`-style interface files (visibility control exists only at file
+granularity, via a library's `expose` list), cache tuning knobs, native
+extensions. See design doc §13. (Lambdas, general partial application,
+and cross-directory imports/packaging — via libraries, `open` and
+module aliases — were listed here originally and are now in the
+language; see §2, §3 and §4.)

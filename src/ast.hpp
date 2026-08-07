@@ -56,13 +56,15 @@ struct Expr {
 
 struct TopDef {
   enum class Kind {
-    Import,  // moduleName
-    Let,     // name ("_" for effect bindings), params, retType, body
+    Import,       // moduleName (possibly dotted: "Lib" or "Lib.File")
+    Open,         // moduleName (dotted path brought into scope)
+    ModuleAlias,  // name = alias, moduleName = dotted target path
+    Let,          // name ("_" for effect bindings), params, retType, body
   };
   Kind kind;
   Span span{};
-  std::string moduleName;      // Import
-  std::string name;            // Let
+  std::string moduleName;      // Import / Open / ModuleAlias target
+  std::string name;            // Let / ModuleAlias
   std::vector<Param> params;   // Let (empty for constants)
   TypePtr retType;             // Let; null for `let _ = ...` (implied unit)
   ExprPtr body;                // Let

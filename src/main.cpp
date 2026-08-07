@@ -47,44 +47,78 @@ void printDiags(const synth::DiagnosticBag& diags) {
 
 void logToStderr(const std::string& line) { std::cerr << line << "\n"; }
 
-int cmdBuild(const std::string& dir, bool verbose) {
-  synth::BuildOptions options;
-  if (verbose) options.log = logToStderr;
-  synth::BuildResult r = synth::buildProject(dir, options);
+// Is the manifest in `dir` a root manifest (one with 'build' rules)?
+bool isRootDir(const std::string& dir) {
+  std::string text = readAll(dir + "/.build");
+  if (text.empty()) return false;
+  synth::Manifest m;
+  synth::DiagnosticBag diags;
+  synth::parseManifest(text, dir + "/.build", m, diags);
+  return m.isRoot();
+}
+
+void printBuildResult(const synth::BuildResult& r, bool full) {
   printDiags(r.diags);
   for (auto& t : r.targets) {
-    if (t.ok)
+    if (t.ok && full)
       std::cout << "  rendered '" << t.name << "' -> " << t.artifact << " ("
                 << t.durationSeconds << "s, " << t.channelCount << " ch, "
                 << t.rate << " Hz)\n";
+    else if (t.ok)
+      std::cout << "  rendered '" << t.name << "' -> " << t.artifact << "\n";
     else
       std::cout << "  FAILED '" << t.name << "': " << t.error << "\n";
   }
-  if (!r.metadataPath.empty())
+  if (full && !r.metadataPath.empty())
     std::cout << "  metadata: " << r.metadataPath << "\n";
+}
+
+void printRootResult(const synth::RootBuildResult& rr, bool full) {
+  printDiags(rr.diags);
+  for (auto& [rule, br] : rr.rules) {
+    std::cout << "[" << rule << "]\n";
+    printBuildResult(br, full);
+  }
+}
+
+int cmdBuild(const std::string& dir, bool verbose) {
+  synth::BuildOptions options;
+  if (verbose) options.log = logToStderr;
+  if (isRootDir(dir)) {
+    synth::RootBuildResult rr = synth::buildRoot(dir, options);
+    printRootResult(rr, true);
+    std::cout << (rr.ok ? "build succeeded" : "build failed") << "\n";
+    return rr.ok ? 0 : 1;
+  }
+  synth::BuildResult r = synth::buildProject(dir, options);
+  printBuildResult(r, true);
   std::cout << (r.ok ? "build succeeded" : "build failed") << "\n";
   return r.ok ? 0 : 1;
 }
 
 int cmdWatch(const std::string& dir, bool verbose) {
   std::cout << "watching '" << dir << "' (Ctrl-C to stop)\n";
+  auto log = verbose ? std::function<void(const std::string&)>(logToStderr)
+                     : std::function<void(const std::string&)>{};
+  if (isRootDir(dir)) {
+    synth::watchRoot(
+        dir,
+        [](const synth::RootBuildResult& rr) {
+          printRootResult(rr, false);
+          std::cout << (rr.ok ? "build succeeded" : "build failed")
+                    << "; watching for changes...\n";
+        },
+        [] { return true; }, 300, log);
+    return 0;
+  }
   synth::watchProject(
       dir,
       [](const synth::BuildResult& r) {
-        printDiags(r.diags);
-        for (auto& t : r.targets) {
-          if (t.ok)
-            std::cout << "  rendered '" << t.name << "' -> " << t.artifact
-                      << "\n";
-          else
-            std::cout << "  FAILED '" << t.name << "': " << t.error << "\n";
-        }
+        printBuildResult(r, false);
         std::cout << (r.ok ? "build succeeded" : "build failed")
                   << "; watching for changes...\n";
       },
-      [] { return true; }, 300,
-      verbose ? std::function<void(const std::string&)>(logToStderr)
-              : std::function<void(const std::string&)>{});
+      [] { return true; }, 300, log);
   return 0;
 }
 

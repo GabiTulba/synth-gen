@@ -6,21 +6,36 @@
 #include <vector>
 
 #include "diagnostics.hpp"
+#include "library.hpp"
 
 namespace synth {
 
 struct SampleCache;  // signal.hpp; opaque here
 
-// The `.build` project manifest (design doc §8.1). v1 format, line-based:
+// The `.build` manifest (design doc §8.1). Line-based:
 //
 //   # comment
-//   project <name>
-//   source <file.synth>
-//   source <other.synth>
+//   project <name>       # standalone project OR root (with 'build' rules)
+//   library <Name>       # declares a library (capitalized name)
+//   source <file.synth>  # member file; internal when in a library
+//   expose <file.synth>  # library member, public; implies source
+//   dep <Name>           # library dependency, by declared name
+//   build <path>         # root only: a rule (.synth file or a directory
+//                        # containing a .build)
 //
+// Exactly one of 'project'/'library' per manifest. A 'project' manifest
+// with 'build' rules is a root (an orchestrator: no 'source' lines); a
+// 'project' manifest with 'source' lines is a standalone project exactly
+// as before. A 'library' manifest must expose at least one file.
 struct Manifest {
   std::string projectName;
-  std::vector<std::string> sources;  // relative to the project directory
+  std::string libraryName;
+  std::vector<std::string> sources;  // relative; includes exposed files
+  std::vector<std::string> exposed;  // relative; the public subset
+  std::vector<std::string> deps;     // library names
+  std::vector<std::string> buildRules;  // root only: rule paths (relative)
+  bool isLibrary() const { return !libraryName.empty(); }
+  bool isRoot() const { return !buildRules.empty(); }
 };
 
 bool parseManifest(const std::string& text, const std::string& file,
@@ -93,6 +108,28 @@ BuildResult buildProject(const std::string& projectDir,
 BuildResult buildProject(const std::string& projectDir,
                          BuildCache* cache = nullptr);
 
+// A root build: the root manifest's `build` rules built in order, each in
+// its own build/ directory, against the dynamically discovered library
+// registry.
+struct RootBuildResult {
+  bool ok = false;  // every rule built (and the root itself was valid)
+  Manifest manifest;       // the root manifest
+  DiagnosticBag diags;     // root-level: manifest, discovery, registry
+  LibraryRegistry registry;
+  std::vector<std::pair<std::string, BuildResult>> rules;  // rule -> result
+};
+
+// Build the root at `rootDir`: parse the root manifest, discover all
+// libraries under the root, then build every `build` rule (a directory
+// with a .build - project or library - or a single .synth file). Each
+// rule keeps its own build/ output directory. `ruleCaches`, when given,
+// holds one incremental cache per rule (the root daemon owns it);
+// otherwise rules build uncached.
+RootBuildResult buildRoot(const std::string& rootDir,
+                          const BuildOptions& options,
+                          std::map<std::string, BuildCache>* ruleCaches =
+                              nullptr);
+
 // Front-end only (lint): parse + type-check the given files and their
 // imports; no evaluation, no artifacts.
 DiagnosticBag lintFiles(const std::vector<std::string>& files);
@@ -107,5 +144,16 @@ void watchProject(const std::string& projectDir,
                   const std::function<bool()>& keepRunning,
                   int pollMillis = 300,
                   std::function<void(const std::string&)> log = {});
+
+// The root daemon: builds all of the root's rules, then watches the whole
+// tree - every rule's inputs, every directory (for created/removed files)
+// and every .build manifest (a change re-runs library discovery) - and
+// rebuilds on change. Per-rule incremental caches and a shared sample
+// cache persist across rebuilds.
+void watchRoot(const std::string& rootDir,
+               const std::function<void(const RootBuildResult&)>& onBuild,
+               const std::function<bool()>& keepRunning,
+               int pollMillis = 300,
+               std::function<void(const std::string&)> log = {});
 
 }  // namespace synth

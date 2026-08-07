@@ -51,7 +51,9 @@ build/synthc build examples/basic -v
 build/synth-dev examples/pluck
 ```
 
-### The `.build` manifest (v1)
+### The `.build` manifest
+
+A standalone project (exactly as before):
 
 ```
 # comment
@@ -59,6 +61,37 @@ project pluck-demo
 source pluck.synth
 source other.synth
 ```
+
+A **library** — a reusable, importable unit. `expose` marks the public
+files (internal `source` files are importable only within the library);
+`dep` names other libraries it uses:
+
+```
+library Basic
+expose keys.synth
+source internal.synth
+dep Fx
+```
+
+A **project root** — the orchestrator. `build` rules name the units to
+build (directories with a `.build`, or single `.synth` files); libraries
+are discovered dynamically by scanning the tree under the root, so `dep`
+names resolve wherever the library lives:
+
+```
+project my-album
+build lib/basic
+build tunes
+build sketches/idea.synth
+```
+
+`synthc build`/`synthc watch` at the root builds/watches every rule
+(each keeps its own `build/` output dir); in a subdirectory they build
+just that unit, resolving `dep`s through the enclosing root. In code,
+`import Basic` + `Basic.Keys.strike`, `open Basic.Keys` + bare
+`strike`, and `module K = Basic.Keys` + `K.strike` all reach a
+library's exposed modules. A dependency's own render targets are not
+re-rendered into the consumer's build.
 
 ### Build outputs
 
@@ -93,7 +126,11 @@ let _ = render "demo" 48000.0 (sample song 0s 2s)
 
 Fully annotated, no inference, no Booleans/branching/recursion in v1.
 `render` is the language's only effect. Files are modules (`import A`
-resolves `a.synth` in the same directory).
+resolves `a.synth` in the same directory, or a sibling listed by the
+enclosing library); libraries add `import Lib` / `import Lib.File`
+(qualified `Lib.File.def` access), `open Lib` / `open Lib.File`
+(unqualified access, position-ordered shadowing), and module aliases
+(`module K = Basic.Keys`). See `examples/song/preview.synth`.
 
 Ergonomic features on top of the doc's core: **labeled arguments**,
 **partial application**, **lambdas**, the **pipe operator**, and **local
@@ -138,15 +175,17 @@ the final positional argument).
 | `src/signal.*` | Signal engine: lazy signal DAG, render-time discretization, sample/place windowing, filters, mixing |
 | `src/eval.*` | Evaluator: reduces definitions to values, collects render targets, `load_*` build-time validation |
 | `src/wav.*` | WAV read (PCM 16/24/32, float 32/64) and write (PCM 16) |
-| `src/build.*` | `.build` manifest, project validation, target enumeration, cached + parallel rendering, artifact + metadata emission, lint mode, watch loop |
+| `src/build.*` | `.build` manifest (projects, libraries, roots), project validation, target enumeration, cached + parallel rendering, artifact + metadata emission, lint mode, watch loops (project + root daemon) |
+| `src/library.*` | Library registry: dynamic discovery of `library` manifests under a root, dep validation, enclosing-root search |
 | `src/incremental.*` | Dependency tracking: Merkle content hashes over definition closures for the build cache |
 | `src/main.cpp` | `synthc` CLI (`build`, `watch`, `lint`) |
 | `src/devapp/` | `synth-dev`: JSON/metadata reader, SDL audio player, ImGui shell with live refresh and `--self-test` |
 | `tests/` | Unit + end-to-end tests (assert-based, run via CTest) |
 | `examples/pluck/` | The design doc's §3.4 example as a buildable project |
 | `examples/primitives/` | One short, audible render target per library primitive |
-| `examples/basic/` | Basic instrument samples: snare, kick, guitar pluck, piano note |
-| `examples/song/` | A full 16-bar stereo song across five modules — drums, synth pad, piano, guitar, and the arrangement that imports them (`outputs/song/song.wav`) |
+| `examples/basic/` | Basic instrument samples packaged as the `Basic` **library**: snare, kick, guitar pluck, piano note |
+| `examples/song/` | A full 16-bar stereo song across five modules — drums, synth pad, piano, guitar, and the arrangement that imports them (`outputs/song/song.wav`) — plus `preview.synth`, the library-system demo (`dep Basic`, `import`/`open`/`module`) |
+| `examples/.build` | The examples **root**: one `build` rule per example; `synthc build examples` builds them all |
 | `examples/advanced/` | Advanced effect demos: the rapid stereo Doppler fly-by built on FM modulation (`outputs/advanced/`) |
 | `examples/darksynth/` | A ~91 s darksynth track with two drops across six modules — drums, electric bass, dark pads, distorted guitar, riser/impact FX, and the arrangement (`outputs/darksynth/`) |
 | `outputs/` | Committed renders of the showcase projects (`outputs/primitives/`, `outputs/basic/`) — `.wav` to listen to and `render_vis` waveform `.svg`s to look at, without building anything; refresh with `scripts/render-outputs.sh` |

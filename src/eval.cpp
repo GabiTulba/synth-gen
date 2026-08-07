@@ -34,6 +34,10 @@ class Interp {
       currentModule_ = &mod;
       for (auto& def : mod.parsed.defs) {
         if (def.kind != TopDef::Kind::Let) continue;
+        // Modules pulled in from dependency libraries evaluate for their
+        // values only: their `let _` render effects belong to the
+        // library's own build, not to every consumer's.
+        if (mod.external && def.name == "_") continue;
         currentDef_ = &def;
         try {
           if (!def.params.empty()) {

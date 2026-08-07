@@ -23,6 +23,7 @@ add_library(synthgraph_core
   src/vis.cpp
   src/eval.cpp
   src/wav.cpp
+  src/library.cpp
   src/build.cpp
 )
 target_include_directories(synthgraph_core PUBLIC src)

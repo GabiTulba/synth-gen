@@ -39,13 +39,34 @@ bool readFile(const fs::path& p, std::string& out) {
 
 class ModuleChecker {
  public:
-  ModuleChecker(CheckedModule& mod, const Program& prog, DiagnosticBag& diags)
-      : mod_(mod), prog_(prog), diags_(diags) {}
+  ModuleChecker(CheckedModule& mod, const Program& prog, DiagnosticBag& diags,
+                const ModuleLoadContext* ctx = nullptr)
+      : mod_(mod), prog_(prog), diags_(diags), ctx_(ctx) {}
 
   void run() {
+    // Walk definitions in order: opens and module aliases are
+    // position-ordered (they affect only later definitions, and later
+    // binders shadow earlier ones); imports are file-scoped and were
+    // wired into moduleScope at load time.
     for (auto& def : mod_.parsed.defs) {
-      if (def.kind == TopDef::Kind::Import) continue;
-      checkDef(def);
+      switch (def.kind) {
+        case TopDef::Kind::Import:
+          break;
+        case TopDef::Kind::Open:
+          applyOpen(def);
+          break;
+        case TopDef::Kind::ModuleAlias:
+          applyAlias(def);
+          break;
+        case TopDef::Kind::Let: {
+          checkDef(def);
+          // A definition shadows any previously opened name.
+          auto dt = mod_.defTypes.find(def.name);
+          if (dt != mod_.defTypes.end())
+            topScope_[def.name] = {dt->second, ""};
+          break;
+        }
+      }
     }
   }
 
@@ -53,6 +74,11 @@ class ModuleChecker {
   CheckedModule& mod_;
   const Program& prog_;
   DiagnosticBag& diags_;
+  const ModuleLoadContext* ctx_ = nullptr;
+  // The position-ordered top-level value scope: own definitions and names
+  // brought in by `open File`, later binders shadowing earlier ones. The
+  // string is the canonical module id of an opened name ("" = own def).
+  std::map<std::string, std::pair<TypePtr, std::string>> topScope_;
   // Primitive signatures share global var objects (ids 0 and 1); every call
   // site instantiates them with fresh ids so two polymorphic calls - or a
   // partial application fed into another polymorphic call - can never
@@ -221,23 +247,116 @@ class ModuleChecker {
     if (e.moduleName.empty()) {
       auto it = env.find(e.name);
       if (it != env.end()) return it->second;
-      auto dt = mod_.defTypes.find(e.name);
-      if (dt != mod_.defTypes.end()) return dt->second;
+      auto ts = topScope_.find(e.name);
+      if (ts != topScope_.end()) {
+        // An opened name resolves cross-module: rewrite to its canonical
+        // module id so the evaluator and dependency hasher see a
+        // qualified reference. Own definitions stay unqualified.
+        if (!ts->second.second.empty()) e.moduleName = ts->second.second;
+        return ts->second.first;
+      }
       if (const PrimSig* p = findPrimitive(e.name))
         return tFun(p->paramTypes, p->paramNames, p->retType);
       fail(e.span, "unknown name '" + e.name + "'");
     }
-    if (std::find(mod_.imports.begin(), mod_.imports.end(), e.moduleName) ==
-        mod_.imports.end())
-      fail(e.span, "module '" + e.moduleName +
-                       "' is not imported by this module");
-    const CheckedModule* m = prog_.find(e.moduleName);
-    if (!m) fail(e.span, "module '" + e.moduleName + "' was not checked");
+    std::string canonical = resolveModuleRef(e.moduleName, e.span);
+    // Rewrite to the canonical id so the evaluator and the incremental
+    // dependency hasher see one stable module identity regardless of the
+    // surface spelling (short name, library path, open, alias).
+    e.moduleName = canonical;
+    const CheckedModule* m = prog_.find(canonical);
+    if (!m) fail(e.span, "module '" + canonical + "' was not checked");
     auto it = m->defTypes.find(e.name);
     if (it == m->defTypes.end())
-      fail(e.span, "module '" + e.moduleName + "' has no definition named '" +
+      fail(e.span, "module '" + canonical + "' has no definition named '" +
                        e.name + "'");
     return it->second;
+  }
+
+  const LibraryInfo* libByName(const std::string& n) const {
+    if (!ctx_) return nullptr;
+    if (ctx_->currentLib && ctx_->currentLib->name == n)
+      return ctx_->currentLib;
+    return ctx_->registry ? ctx_->registry->find(n) : nullptr;
+  }
+
+  // open Lib: bring the library's exposed file modules into module scope
+  // (so `File.name` works). open File / open Lib.File: bring that file's
+  // definitions into the unqualified value scope, shadowing earlier
+  // same-named binders.
+  void applyOpen(const TopDef& def) {
+    try {
+      const std::string& surface = def.moduleName;
+      // A whole-library open: inject its exposed file modules.
+      if (surface.find('.') == std::string::npos) {
+        auto il = mod_.importedLibs.find(surface);
+        if (il != mod_.importedLibs.end()) {
+          const LibraryInfo* lib = libByName(il->second);
+          if (lib) {
+            for (auto& f : lib->exposedFiles) {
+              std::string m = moduleNameForPath(f);
+              mod_.moduleScope[m] = il->second + "." + m;
+            }
+          }
+          return;
+        }
+      }
+      // A file-module open: inject its definitions as value names.
+      std::string canonical = resolveModuleRef(surface, def.span);
+      const CheckedModule* m = prog_.find(canonical);
+      if (!m) fail(def.span, "module '" + canonical + "' was not checked");
+      for (auto& [name, type] : m->defTypes)
+        topScope_[name] = {type, canonical};
+    } catch (const Abort&) {
+      // Diagnostic recorded; later defs check against the scope so far.
+    }
+  }
+
+  // module Alias = Path: bind (or override) a module name. The target may
+  // be a file module (by any spelling in scope) or a whole library.
+  void applyAlias(const TopDef& def) {
+    try {
+      const std::string& target = def.moduleName;
+      if (target.find('.') == std::string::npos) {
+        auto il = mod_.importedLibs.find(target);
+        if (il != mod_.importedLibs.end()) {
+          mod_.importedLibs[def.name] = il->second;
+          return;
+        }
+      }
+      std::string canonical = resolveModuleRef(target, def.span);
+      mod_.moduleScope[def.name] = canonical;
+    } catch (const Abort&) {
+      // Diagnostic recorded.
+    }
+  }
+
+  // Resolve a surface module qualifier ("Keys", "Basic.Keys", an alias...)
+  // to a canonical module id, or fail with a diagnostic.
+  std::string resolveModuleRef(const std::string& surface, Span span) {
+    auto ms = mod_.moduleScope.find(surface);
+    if (ms != mod_.moduleScope.end()) return ms->second;
+    size_t dot = surface.find('.');
+    if (dot != std::string::npos) {
+      // "Lib.File" under a whole-library import (possibly via an alias
+      // of the library name).
+      std::string first = surface.substr(0, dot);
+      std::string rest = surface.substr(dot + 1);
+      auto il = mod_.importedLibs.find(first);
+      if (il != mod_.importedLibs.end() &&
+          rest.find('.') == std::string::npos) {
+        const LibraryInfo* lib = libByName(il->second);
+        if (lib && lib->fileForModule(rest).empty())
+          fail(span, "library '" + il->second + "' has no module named '" +
+                         rest + "'");
+        if (lib && mod_.libName != lib->name && !lib->isExposedModule(rest))
+          fail(span, "module '" + il->second + "." + rest +
+                         "' is not exposed by library '" + il->second + "'");
+        return il->second + "." + rest;
+      }
+    }
+    fail(span,
+         "module '" + surface + "' is not imported by this module");
   }
 
   // Application with labels. Positional arguments fill the leftmost
@@ -455,20 +574,62 @@ class ModuleChecker {
 
 Program checkProject(const std::vector<std::string>& rootFiles,
                      DiagnosticBag& diags) {
+  return checkProject(rootFiles, diags, nullptr);
+}
+
+Program checkProject(const std::vector<std::string>& rootFiles,
+                     DiagnosticBag& diags, const ModuleLoadContext* ctx) {
   Program prog;
+  const LibraryRegistry* registry = ctx ? ctx->registry : nullptr;
+  const LibraryInfo* currentLib = ctx ? ctx->currentLib : nullptr;
 
   struct Loaded {
     ParsedModule parsed;
-    std::vector<std::string> imports;
-    std::vector<Span> importSpans;
+    std::vector<std::string> loadDeps;  // canonical ids (topo edges)
+    std::map<std::string, std::string> moduleScope;
+    std::map<std::string, std::string> importedLibs;
+    std::string libName;
+    bool external = false;
+    // Raw module-path mentions to resolve: import / open / module alias.
+    struct Mention {
+      TopDef::Kind kind;
+      std::string surface;
+      Span span;
+    };
+    std::vector<Mention> mentions;
   };
-  std::map<std::string, Loaded> byName;  // module name -> parsed module
+  std::map<std::string, Loaded> byName;  // canonical module id -> module
   std::vector<std::string> queue;
 
-  auto loadFile = [&](const fs::path& path, Span errSpan,
-                      const std::string& errFile) -> std::string {
-    std::string modName = moduleNameForPath(path.string());
-    if (byName.count(modName)) return modName;
+  auto libByName = [&](const std::string& n) -> const LibraryInfo* {
+    if (currentLib && currentLib->name == n) return currentLib;
+    return registry ? registry->find(n) : nullptr;
+  };
+
+  // May module `fromLib` (or the unit under build, when empty) use library
+  // `libName`? The unit's declared deps come from the context; a library's
+  // files consult that library's own manifest deps.
+  auto depAllowed = [&](const std::string& libName,
+                        const std::string& fromLib) -> bool {
+    if (fromLib.empty()) {
+      if (currentLib && libName == currentLib->name) return true;
+      if (!ctx) return false;
+      return std::find(ctx->deps.begin(), ctx->deps.end(), libName) !=
+             ctx->deps.end();
+    }
+    if (fromLib == libName) return true;
+    const LibraryInfo* from = libByName(fromLib);
+    if (!from) return false;
+    return std::find(from->deps.begin(), from->deps.end(), libName) !=
+           from->deps.end();
+  };
+
+  // Load one module file under its canonical id. Returns false only when
+  // the file cannot be read (diagnosed).
+  auto loadFile = [&](const fs::path& path, const std::string& canonical,
+                      const std::string& libName, bool external, Span errSpan,
+                      const std::string& errFile) -> bool {
+    if (byName.count(canonical)) return true;
     std::string source;
     if (!readFile(path, source)) {
       if (errFile.empty())
@@ -476,37 +637,165 @@ Program checkProject(const std::vector<std::string>& rootFiles,
       else
         diags.error(errFile, errSpan,
                     "unresolved import: cannot read '" + path.string() + "'");
-      return {};
+      return false;
     }
     Loaded l;
-    l.parsed.name = modName;
+    l.parsed.name = canonical;
     l.parsed.path = path.string();
     l.parsed.source = std::move(source);
+    l.libName = libName;
+    l.external = external;
     std::vector<Token> toks = lex(l.parsed.source, l.parsed.path, diags);
     l.parsed.defs = parse(toks, l.parsed.path, diags);
-    for (auto& d : l.parsed.defs) {
-      if (d.kind == TopDef::Kind::Import) {
-        l.imports.push_back(d.moduleName);
-        l.importSpans.push_back(d.span);
-      }
-    }
-    byName.emplace(modName, std::move(l));
-    queue.push_back(modName);
-    return modName;
+    for (auto& d : l.parsed.defs)
+      if (d.kind != TopDef::Kind::Let)
+        l.mentions.push_back({d.kind, d.moduleName, d.span});
+    byName.emplace(canonical, std::move(l));
+    queue.push_back(canonical);
+    return true;
   };
 
-  for (auto& f : rootFiles) loadFile(fs::path(f), {}, {});
+  for (auto& f : rootFiles) {
+    std::string canonical = moduleNameForPath(f);
+    std::string libName;
+    if (currentLib) {
+      libName = currentLib->name;
+      canonical = libName + "." + canonical;
+    }
+    loadFile(fs::path(f), canonical, libName, false, {}, {});
+  }
 
-  // Resolve imports transitively (same-directory rule: import A -> a.synth).
+  // Resolve module-path mentions transitively. Single names resolve to a
+  // sibling file module first (the current library's listed files, or the
+  // same-directory rule for standalone files), then to a discovered
+  // library; dotted paths are Lib.File through the registry with `dep`
+  // and `expose` enforcement.
   for (size_t qi = 0; qi < queue.size(); qi++) {
     std::string name = queue[qi];
-    Loaded& l = byName.at(name);
-    fs::path dir = fs::path(l.parsed.path).parent_path();
-    for (size_t i = 0; i < l.imports.size(); i++) {
-      const std::string& imp = l.imports[i];
-      if (byName.count(imp)) continue;
-      fs::path target = dir / (lowercase(imp) + ".synth");
-      loadFile(target, l.importSpans[i], l.parsed.path);
+    // Note: byName may rehash as new modules load; re-find each iteration.
+    for (size_t mi = 0; mi < byName.at(name).mentions.size(); mi++) {
+      auto mention = byName.at(name).mentions[mi];
+      const std::string& surface = mention.surface;
+      Span span = mention.span;
+      Loaded& l = byName.at(name);
+      const std::string file = l.parsed.path;
+      // A `module X = Path` target may name an earlier alias, which only
+      // the checker can resolve (aliases are position-ordered). The
+      // loader resolves alias targets opportunistically - creating load
+      // edges when the target is a real file/library - and stays quiet
+      // otherwise; the checker diagnoses genuinely unresolved aliases.
+      bool quiet = mention.kind == TopDef::Kind::ModuleAlias;
+      size_t dot = surface.find('.');
+      if (dot == std::string::npos) {
+        // Sibling file module of the current library?
+        if (!l.libName.empty()) {
+          const LibraryInfo* lib = libByName(l.libName);
+          std::string rel = lib ? lib->fileForModule(surface) : std::string{};
+          if (!rel.empty()) {
+            std::string canonical = l.libName + "." + surface;
+            if (loadFile(fs::path(lib->dir) / rel, canonical, l.libName,
+                         l.external, span, file)) {
+              Loaded& l2 = byName.at(name);
+              l2.moduleScope[surface] = canonical;
+              l2.loadDeps.push_back(canonical);
+            }
+            continue;
+          }
+        } else {
+          // Standalone: an already-loaded flat module of this name
+          // satisfies the import (historical behavior), else the
+          // same-directory rule.
+          if (byName.count(surface)) {
+            l.moduleScope[surface] = surface;
+            l.loadDeps.push_back(surface);
+            continue;
+          }
+          fs::path target =
+              fs::path(file).parent_path() / (lowercase(surface) + ".synth");
+          std::error_code ec;
+          bool haveFile = fs::exists(target, ec);
+          if (haveFile || (!quiet && !libByName(surface))) {
+            if (loadFile(target, surface, "", l.external, span, file)) {
+              Loaded& l2 = byName.at(name);
+              l2.moduleScope[surface] = surface;
+              l2.loadDeps.push_back(surface);
+            }
+            continue;
+          }
+        }
+        // A whole library.
+        const LibraryInfo* lib = libByName(surface);
+        if (!lib) {
+          if (quiet) continue;
+          diags.error(file, span,
+                      "unresolved import: no module or library named '" +
+                          surface + "'");
+          continue;
+        }
+        if (!depAllowed(surface, l.libName)) {
+          if (quiet) continue;
+          diags.error(file, span,
+                      "library '" + surface +
+                          "' is not declared as a dependency (add 'dep " +
+                          surface + "' to the .build manifest)");
+          continue;
+        }
+        bool external = !(currentLib && surface == currentLib->name);
+        for (auto& f : lib->exposedFiles) {
+          std::string canonical = surface + "." + moduleNameForPath(f);
+          if (loadFile(fs::path(lib->dir) / f, canonical, surface, external,
+                       span, file))
+            byName.at(name).loadDeps.push_back(canonical);
+        }
+        byName.at(name).importedLibs[surface] = surface;
+        continue;
+      }
+      // Dotted: Lib.File.
+      std::string libName = surface.substr(0, dot);
+      std::string modName = surface.substr(dot + 1);
+      if (modName.find('.') != std::string::npos) {
+        diags.error(file, span,
+                    "module paths have at most two segments "
+                    "(Library.File): '" + surface + "'");
+        continue;
+      }
+      const LibraryInfo* lib = libByName(libName);
+      if (!lib) {
+        if (quiet) continue;
+        diags.error(file, span, "unknown library '" + libName + "'");
+        continue;
+      }
+      if (!depAllowed(libName, l.libName)) {
+        if (quiet) continue;
+        diags.error(file, span,
+                    "library '" + libName +
+                        "' is not declared as a dependency (add 'dep " +
+                        libName + "' to the .build manifest)");
+        continue;
+      }
+      std::string rel = lib->fileForModule(modName);
+      if (rel.empty()) {
+        if (quiet) continue;
+        diags.error(file, span, "library '" + libName +
+                                    "' has no module named '" + modName +
+                                    "'");
+        continue;
+      }
+      if (l.libName != libName && !lib->isExposedModule(modName)) {
+        if (quiet) continue;
+        diags.error(file, span, "module '" + surface +
+                                    "' is not exposed by library '" +
+                                    libName + "'");
+        continue;
+      }
+      bool external = !(currentLib && libName == currentLib->name);
+      std::string canonical = libName + "." + modName;
+      if (loadFile(fs::path(lib->dir) / rel, canonical, libName, external,
+                   span, file)) {
+        Loaded& l2 = byName.at(name);
+        l2.moduleScope[surface] = canonical;
+        l2.loadDeps.push_back(canonical);
+      }
     }
   }
 
@@ -524,7 +813,7 @@ Program checkProject(const std::vector<std::string>& rootFiles,
           return;
         }
         st = 1;
-        for (auto& imp : it->second.imports) visit(imp);
+        for (auto& dep : it->second.loadDeps) visit(dep);
         st = 2;
         order.push_back(name);
       };
@@ -534,9 +823,13 @@ Program checkProject(const std::vector<std::string>& rootFiles,
     Loaded& l = byName.at(name);
     CheckedModule cm;
     cm.parsed = std::move(l.parsed);
-    cm.imports = l.imports;
+    cm.imports = l.loadDeps;
+    cm.moduleScope = std::move(l.moduleScope);
+    cm.importedLibs = std::move(l.importedLibs);
+    cm.libName = l.libName;
+    cm.external = l.external;
     prog.modules.push_back(std::move(cm));
-    ModuleChecker(prog.modules.back(), prog, diags).run();
+    ModuleChecker(prog.modules.back(), prog, diags, ctx).run();
   }
   return prog;
 }

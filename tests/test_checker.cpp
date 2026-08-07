@@ -4,6 +4,7 @@
 #include <fstream>
 
 #include "checker.hpp"
+#include "library.hpp"
 #include "test_framework.hpp"
 
 using namespace synth;
@@ -27,6 +28,7 @@ struct TempProject {
   }
   std::string write(const std::string& name, const std::string& src) {
     fs::path p = dir / name;
+    fs::create_directories(p.parent_path());
     std::ofstream out(p);
     out << src;
     return p.string();
@@ -194,6 +196,303 @@ TEST(checker_import_cycle) {
   std::string b = tp.write("b.synth", "import A\nlet y : Scalar = 2.0 ;;");
   DiagnosticBag diags;
   checkProject({b}, diags);
+  CHECK(diags.hasErrors());
+}
+
+namespace {
+
+// A library tree fixture: writes a `Basic` library with one exposed and
+// one internal module, discovers the registry, and returns it.
+struct LibFixture {
+  TempProject tp;
+  LibraryRegistry reg;
+  DiagnosticBag regDiags;
+  LibFixture() {
+    tp.write("lib/basic/.build",
+             "library Basic\nexpose keys.synth\nsource internal.synth\n");
+    tp.write("lib/basic/keys.synth",
+             "import Internal\n"
+             "let gain : Scalar = Internal.base * 2.0 ;;\n"
+             "let strike freq:Scalar : Scalar Signal = sine freq * gain ;;\n");
+    tp.write("lib/basic/internal.synth", "let base : Scalar = 0.25 ;;\n");
+    reg = discoverLibraries(tp.dir.string(), regDiags);
+  }
+  ModuleLoadContext consumerCtx(std::vector<std::string> deps) {
+    ModuleLoadContext ctx;
+    ctx.registry = &reg;
+    ctx.deps = std::move(deps);
+    return ctx;
+  }
+};
+
+}  // namespace
+
+TEST(checker_import_library_qualified_access) {
+  LibFixture fx;
+  CHECK(!fx.regDiags.hasErrors());
+  std::string song = fx.tp.write(
+      "song.synth",
+      "import Basic\nlet s : Scalar Signal = Basic.Keys.strike 440.0 ;;\n");
+  ModuleLoadContext ctx = fx.consumerCtx({"Basic"});
+  DiagnosticBag diags;
+  Program prog = checkProject({song}, diags, &ctx);
+  for (auto& d : diags.items) std::cerr << d.message << "\n";
+  CHECK(!diags.hasErrors());
+  // Canonical ids: the library file is Basic.Keys, its internal dep
+  // Basic.Internal; the consumer stays flat.
+  CHECK(prog.find("Basic.Keys") != nullptr);
+  CHECK(prog.find("Basic.Internal") != nullptr);
+  CHECK(prog.find("Song") != nullptr);
+}
+
+TEST(checker_import_library_file) {
+  LibFixture fx;
+  std::string song = fx.tp.write(
+      "song.synth",
+      "import Basic.Keys\n"
+      "let s : Scalar Signal = Basic.Keys.strike 440.0 ;;\n");
+  ModuleLoadContext ctx = fx.consumerCtx({"Basic"});
+  DiagnosticBag diags;
+  Program prog = checkProject({song}, diags, &ctx);
+  for (auto& d : diags.items) std::cerr << d.message << "\n";
+  CHECK(!diags.hasErrors());
+}
+
+TEST(checker_unexposed_file_import_error) {
+  LibFixture fx;
+  // Direct import of an internal module.
+  std::string a = fx.tp.write(
+      "a.synth",
+      "import Basic.Internal\nlet x : Scalar = Basic.Internal.base ;;\n");
+  ModuleLoadContext ctx = fx.consumerCtx({"Basic"});
+  DiagnosticBag d1;
+  checkProject({a}, d1, &ctx);
+  CHECK(d1.hasErrors());
+  // Qualified access to an internal module under a whole-library import.
+  std::string b = fx.tp.write(
+      "b.synth",
+      "import Basic\nlet x : Scalar = Basic.Internal.base ;;\n");
+  DiagnosticBag d2;
+  checkProject({b}, d2, &ctx);
+  CHECK(d2.hasErrors());
+}
+
+TEST(checker_within_library_internal_import_ok) {
+  LibFixture fx;
+  const LibraryInfo* basic = fx.reg.find("Basic");
+  CHECK(basic != nullptr);
+  ModuleLoadContext ctx;
+  ctx.registry = &fx.reg;
+  ctx.currentLib = basic;
+  std::vector<std::string> roots;
+  for (auto& f : basic->files)
+    roots.push_back((fs::path(basic->dir) / f).string());
+  DiagnosticBag diags;
+  Program prog = checkProject(roots, diags, &ctx);
+  for (auto& d : diags.items) std::cerr << d.message << "\n";
+  CHECK(!diags.hasErrors());
+  CHECK(prog.find("Basic.Keys") != nullptr);
+  CHECK(prog.find("Basic.Internal") != nullptr);
+  // The library's own modules are not external.
+  CHECK(!prog.find("Basic.Keys")->external);
+}
+
+TEST(checker_import_undeclared_dep_error) {
+  LibFixture fx;
+  std::string song = fx.tp.write(
+      "song.synth",
+      "import Basic\nlet s : Scalar Signal = Basic.Keys.strike 440.0 ;;\n");
+  ModuleLoadContext ctx = fx.consumerCtx({});  // no deps declared
+  DiagnosticBag diags;
+  checkProject({song}, diags, &ctx);
+  CHECK(diags.hasErrors());
+}
+
+TEST(checker_local_file_shadows_library_name) {
+  LibFixture fx;
+  // A local basic.synth wins over the discovered library `Basic`.
+  fx.tp.write("basic.synth", "let local : Scalar = 7.0 ;;\n");
+  std::string song = fx.tp.write(
+      "song.synth", "import Basic\nlet x : Scalar = Basic.local ;;\n");
+  ModuleLoadContext ctx = fx.consumerCtx({"Basic"});
+  DiagnosticBag diags;
+  Program prog = checkProject({song}, diags, &ctx);
+  for (auto& d : diags.items) std::cerr << d.message << "\n";
+  CHECK(!diags.hasErrors());
+  CHECK(prog.find("Basic") != nullptr);        // the flat local module
+  CHECK(prog.find("Basic.Keys") == nullptr);   // the library was not loaded
+}
+
+TEST(checker_library_short_name_scoped_to_library) {
+  // Two libraries with same-stem member files no longer alias: each gets
+  // its own canonical id.
+  TempProject tp;
+  tp.write("a/.build", "library A\nexpose util.synth\n");
+  tp.write("a/util.synth", "let ua : Scalar = 1.0 ;;\n");
+  tp.write("b/.build", "library B\nexpose util.synth\n");
+  tp.write("b/util.synth", "let ub : Scalar = 2.0 ;;\n");
+  DiagnosticBag regDiags;
+  LibraryRegistry reg = discoverLibraries(tp.dir.string(), regDiags);
+  CHECK(!regDiags.hasErrors());
+  std::string song = tp.write(
+      "song.synth",
+      "import A\nimport B\n"
+      "let x : Scalar = A.Util.ua + B.Util.ub ;;\n");
+  ModuleLoadContext ctx;
+  ctx.registry = &reg;
+  ctx.deps = {"A", "B"};
+  DiagnosticBag diags;
+  Program prog = checkProject({song}, diags, &ctx);
+  for (auto& d : diags.items) std::cerr << d.message << "\n";
+  CHECK(!diags.hasErrors());
+  CHECK(prog.find("A.Util") != nullptr);
+  CHECK(prog.find("B.Util") != nullptr);
+}
+
+TEST(checker_cross_library_module_cycle_error) {
+  // Module-level cycle across two libraries (registry built by hand so
+  // the library-level dep validation doesn't mask the module cycle).
+  TempProject tp;
+  tp.write("a/x.synth", "import B.Y\nlet x : Scalar = 1.0 ;;\n");
+  tp.write("b/y.synth", "import A.X\nlet y : Scalar = 2.0 ;;\n");
+  LibraryRegistry reg;
+  LibraryInfo la;
+  la.name = "A";
+  la.dir = (tp.dir / "a").string();
+  la.files = {"x.synth"};
+  la.exposedFiles = {"x.synth"};
+  la.deps = {"B"};
+  LibraryInfo lb;
+  lb.name = "B";
+  lb.dir = (tp.dir / "b").string();
+  lb.files = {"y.synth"};
+  lb.exposedFiles = {"y.synth"};
+  lb.deps = {"A"};
+  reg.byName.emplace("A", la);
+  reg.byName.emplace("B", lb);
+  std::string song =
+      tp.write("song.synth", "import A.X\nlet s : Scalar = A.X.x ;;\n");
+  ModuleLoadContext ctx;
+  ctx.registry = &reg;
+  ctx.deps = {"A", "B"};
+  DiagnosticBag diags;
+  checkProject({song}, diags, &ctx);
+  CHECK(diags.hasErrors());
+}
+
+TEST(checker_open_library_brings_file_modules) {
+  LibFixture fx;
+  std::string song = fx.tp.write(
+      "song.synth",
+      "open Basic\nlet s : Scalar Signal = Keys.strike 440.0 ;;\n");
+  ModuleLoadContext ctx = fx.consumerCtx({"Basic"});
+  DiagnosticBag diags;
+  Program prog = checkProject({song}, diags, &ctx);
+  for (auto& d : diags.items) std::cerr << d.message << "\n";
+  CHECK(!diags.hasErrors());
+  CHECK(prog.find("Basic.Keys") != nullptr);
+}
+
+TEST(checker_open_file_unqualified_defs) {
+  LibFixture fx;
+  std::string song = fx.tp.write(
+      "song.synth",
+      "open Basic.Keys\nlet s : Scalar Signal = strike 440.0 * gain ;;\n");
+  ModuleLoadContext ctx = fx.consumerCtx({"Basic"});
+  DiagnosticBag diags;
+  Program prog = checkProject({song}, diags, &ctx);
+  for (auto& d : diags.items) std::cerr << d.message << "\n";
+  CHECK(!diags.hasErrors());
+}
+
+TEST(checker_open_standalone_file) {
+  // Same-directory files are openable too.
+  TempProject tp;
+  tp.write("instr.synth", "let tone freq:Scalar : Scalar Signal = sine freq ;;\n");
+  std::string song = tp.write(
+      "song.synth", "open Instr\nlet s : Scalar Signal = tone 440.0 ;;\n");
+  DiagnosticBag diags;
+  Program prog = checkProject({song}, diags);
+  for (auto& d : diags.items) std::cerr << d.message << "\n";
+  CHECK(!diags.hasErrors());
+}
+
+TEST(checker_open_shadowing_position_ordered) {
+  TempProject tp;
+  tp.write("instr.synth", "let gain : Scalar = 0.5 ;;\n");
+  // A def before the open is shadowed by it; a def after the open
+  // shadows it back; params always win.
+  std::string song = tp.write("song.synth", R"(
+let gain : Scalar = 1.0 ;;
+let before : Scalar = gain ;;
+open Instr
+let after_open : Scalar = gain ;;
+let gain2 : Scalar = 2.0 ;;
+let with_param gain:Scalar : Scalar = gain ;;
+)");
+  DiagnosticBag diags;
+  Program prog = checkProject({song}, diags);
+  for (auto& d : diags.items) std::cerr << d.message << "\n";
+  CHECK(!diags.hasErrors());
+  // Re-defining `gain` after the open would be a duplicate-definition
+  // error (own defs are one namespace); shadowing an open with a new
+  // name works, and both binders type-check.
+  std::string bad = tp.write("bad.synth", R"(
+let gain : Scalar = 1.0 ;;
+open Instr
+let gain : Scalar = 2.0 ;;
+)");
+  DiagnosticBag d2;
+  checkProject({bad}, d2);
+  CHECK(d2.hasErrors());
+}
+
+TEST(checker_later_def_shadows_open) {
+  TempProject tp;
+  tp.write("instr.synth", "let tone : Scalar = 5.0 ;;\n");
+  std::string song = tp.write("song.synth", R"(
+open Instr
+let opened : Scalar = tone ;;
+let tone : Scalar Signal = sine 440.0 ;;
+let own : Scalar Signal = tone ;;
+)");
+  DiagnosticBag diags;
+  Program prog = checkProject({song}, diags);
+  for (auto& d : diags.items) std::cerr << d.message << "\n";
+  // `opened` sees Instr's Scalar tone; `own` sees the local Signal tone.
+  CHECK(!diags.hasErrors());
+  const CheckedModule* song_m = prog.find("Song");
+  CHECK(song_m != nullptr);
+  CHECK(typeEquals(song_m->defTypes.at("opened"), tScalar()));
+  CHECK(typeEquals(song_m->defTypes.at("own"), tSignal(tScalar())));
+}
+
+TEST(checker_module_alias_binds_and_overrides) {
+  LibFixture fx;
+  std::string song = fx.tp.write("song.synth", R"(
+import Basic.Keys
+module Keys = Basic.Keys
+module K2 = Keys
+module B = Basic
+let a : Scalar Signal = Keys.strike 440.0 ;;
+let b : Scalar Signal = K2.strike 220.0 ;;
+let c : Scalar Signal = B.Keys.strike 110.0 ;;
+)");
+  ModuleLoadContext ctx = fx.consumerCtx({"Basic"});
+  DiagnosticBag diags;
+  Program prog = checkProject({song}, diags, &ctx);
+  for (auto& d : diags.items) std::cerr << d.message << "\n";
+  CHECK(!diags.hasErrors());
+}
+
+TEST(checker_open_unexposed_cross_library_error) {
+  LibFixture fx;
+  std::string song = fx.tp.write(
+      "song.synth",
+      "open Basic.Internal\nlet x : Scalar = base ;;\n");
+  ModuleLoadContext ctx = fx.consumerCtx({"Basic"});
+  DiagnosticBag diags;
+  checkProject({song}, diags, &ctx);
   CHECK(diags.hasErrors());
 }
 

@@ -10,6 +10,7 @@
 #include "build.hpp"
 #include "checker.hpp"
 #include "incremental.hpp"
+#include "library.hpp"
 #include "test_framework.hpp"
 #include "wav.hpp"
 
@@ -33,6 +34,29 @@ struct TempDir {
   }
   void write(const std::string& name, const std::string& text) {
     std::ofstream out(dir / name);
+    out << text;
+  }
+};
+
+// Like TempDir, but relative paths may contain directories (created on
+// demand) - the fixture for library/root trees.
+struct TempTree {
+  fs::path dir;
+  TempTree() {
+    static int counter = 0;
+    dir = fs::temp_directory_path() /
+          ("synthgraph-tree-test-" + std::to_string(::getpid()) + "-" +
+           std::to_string(counter++));
+    fs::create_directories(dir);
+  }
+  ~TempTree() {
+    std::error_code ec;
+    fs::remove_all(dir, ec);
+  }
+  void write(const std::string& rel, const std::string& text) {
+    fs::path p = dir / rel;
+    fs::create_directories(p.parent_path());
+    std::ofstream out(p);
     out << text;
   }
 };
@@ -82,6 +106,139 @@ TEST(build_manifest_errors) {
   Manifest m2;
   DiagnosticBag diags2;
   CHECK(!parseManifest("project x\nfrobnicate y\n", ".build", m2, diags2));
+}
+
+TEST(build_manifest_library_directives) {
+  Manifest m;
+  DiagnosticBag diags;
+  bool ok = parseManifest(
+      "library Basic\nexpose keys.synth\nexpose pads.synth\n"
+      "source internal.synth\ndep Fx\n",
+      ".build", m, diags);
+  CHECK(ok);
+  CHECK(m.isLibrary());
+  CHECK(m.libraryName == "Basic");
+  CHECK(m.sources.size() == 3);  // expose implies source
+  CHECK(m.exposed.size() == 2);
+  CHECK(m.deps.size() == 1 && m.deps[0] == "Fx");
+  CHECK(!m.isRoot());
+}
+
+TEST(build_manifest_rejects_project_and_library) {
+  Manifest m;
+  DiagnosticBag diags;
+  CHECK(!parseManifest("project x\nlibrary Y\nexpose a.synth\n", ".build", m,
+                       diags));
+}
+
+TEST(build_manifest_expose_rules) {
+  // expose outside a library.
+  Manifest m1;
+  DiagnosticBag d1;
+  CHECK(!parseManifest("project x\nexpose a.synth\n", ".build", m1, d1));
+  // Same file as both source and expose.
+  Manifest m2;
+  DiagnosticBag d2;
+  CHECK(!parseManifest("library L\nsource a.synth\nexpose a.synth\n",
+                       ".build", m2, d2));
+  // A library with no exposed files.
+  Manifest m3;
+  DiagnosticBag d3;
+  CHECK(!parseManifest("library L\nsource a.synth\n", ".build", m3, d3));
+  // Lowercase library name.
+  Manifest m4;
+  DiagnosticBag d4;
+  CHECK(!parseManifest("library basic\nexpose a.synth\n", ".build", m4, d4));
+}
+
+TEST(build_manifest_root_build_rules) {
+  Manifest m;
+  DiagnosticBag diags;
+  bool ok = parseManifest(
+      "project demo\nbuild lib/basic\nbuild tunes/song.synth\n", ".build", m,
+      diags);
+  CHECK(ok);
+  CHECK(m.isRoot());
+  CHECK(m.buildRules.size() == 2);
+  // Roots cannot also list sources.
+  Manifest m2;
+  DiagnosticBag d2;
+  CHECK(!parseManifest("project demo\nbuild a\nsource b.synth\n", ".build",
+                       m2, d2));
+}
+
+TEST(library_discovery_finds_nested_builds) {
+  TempTree tp;
+  tp.write(".build", "project root\nbuild tunes\n");
+  tp.write("lib/basic/.build", "library Basic\nexpose keys.synth\n");
+  tp.write("lib/basic/keys.synth", "let k : Scalar = 1.0 ;;");
+  tp.write("deep/nested/fx/.build",
+           "library Fx\nexpose fx.synth\ndep Basic\n");
+  tp.write("deep/nested/fx/fx.synth", "let f : Scalar = 2.0 ;;");
+  DiagnosticBag diags;
+  LibraryRegistry reg = discoverLibraries(tp.dir.string(), diags);
+  for (auto& d : diags.items) std::cerr << d.message << "\n";
+  CHECK(!diags.hasErrors());
+  CHECK(reg.byName.size() == 2);
+  const LibraryInfo* basic = reg.find("Basic");
+  CHECK(basic != nullptr);
+  CHECK(fs::path(basic->dir) == tp.dir / "lib" / "basic");
+  CHECK(basic->fileForModule("Keys") == "keys.synth");
+  CHECK(basic->isExposedModule("Keys"));
+  const LibraryInfo* fx = reg.find("Fx");
+  CHECK(fx != nullptr);
+  CHECK(fx->deps.size() == 1 && fx->deps[0] == "Basic");
+}
+
+TEST(library_discovery_skips_build_output_dirs) {
+  TempTree tp;
+  tp.write("lib/.build", "library L\nexpose a.synth\n");
+  tp.write("lib/a.synth", "let a : Scalar = 1.0 ;;");
+  // A stray manifest inside an output dir must not register.
+  tp.write("lib/build/.build", "library Ghost\nexpose g.synth\n");
+  DiagnosticBag diags;
+  LibraryRegistry reg = discoverLibraries(tp.dir.string(), diags);
+  CHECK(!diags.hasErrors());
+  CHECK(reg.byName.size() == 1);
+  CHECK(reg.find("Ghost") == nullptr);
+}
+
+TEST(library_discovery_duplicate_names_error) {
+  TempTree tp;
+  tp.write("a/.build", "library Same\nexpose x.synth\n");
+  tp.write("b/.build", "library Same\nexpose y.synth\n");
+  DiagnosticBag diags;
+  discoverLibraries(tp.dir.string(), diags);
+  CHECK(diags.hasErrors());
+}
+
+TEST(library_registry_unknown_dep_error) {
+  TempTree tp;
+  tp.write("a/.build", "library A\nexpose x.synth\ndep Nope\n");
+  DiagnosticBag diags;
+  discoverLibraries(tp.dir.string(), diags);
+  CHECK(diags.hasErrors());
+}
+
+TEST(library_registry_dep_cycle_error) {
+  TempTree tp;
+  tp.write("a/.build", "library A\nexpose x.synth\ndep B\n");
+  tp.write("b/.build", "library B\nexpose y.synth\ndep A\n");
+  DiagnosticBag diags;
+  discoverLibraries(tp.dir.string(), diags);
+  CHECK(diags.hasErrors());
+}
+
+TEST(library_find_enclosing_root) {
+  TempTree tp;
+  tp.write(".build", "project root\nbuild tunes\n");
+  tp.write("tunes/.build", "project tunes\nsource t.synth\n");
+  tp.write("tunes/t.synth", "let x : Scalar = 1.0 ;;");
+  CHECK(fs::path(findEnclosingRoot((tp.dir / "tunes").string())) == tp.dir);
+  // No root above a bare temp dir tree.
+  TempTree lone;
+  lone.write("p/.build", "project p\nsource a.synth\n");
+  CHECK(findEnclosingRoot((lone.dir / "p").string()).empty());
 }
 
 TEST(build_end_to_end_pluck) {
@@ -988,6 +1145,271 @@ let _ = voice |> sample ~from:0s ~to:50ms |> render ~name:"out" ~rate:8000.0 ;;
   BuildResult r2 = buildProject(tp.dir.string(), &cache);
   CHECK(r2.ok);
   CHECK(!r2.targets[0].cached);
+}
+
+TEST(build_open_matches_qualified_output) {
+  // open + unqualified access renders byte-identically to import +
+  // qualified access.
+  TempDir opened, qualified;
+  const char* instr =
+      "let tone freq:Scalar : Scalar Signal = sine freq * exp_decay 8.0 ;;\n";
+  opened.write("instr.synth", instr);
+  opened.write("song.synth",
+               "open Instr\n"
+               "let _ = tone 440.0 |> sample ~from:0s ~to:300ms\n"
+               "        |> render ~name:\"out\" ~rate:8000.0 ;;\n");
+  opened.write(".build", "project o\nsource song.synth\n");
+  qualified.write("instr.synth", instr);
+  qualified.write("song.synth",
+                  "import Instr\n"
+                  "let _ = Instr.tone 440.0 |> sample ~from:0s ~to:300ms\n"
+                  "        |> render ~name:\"out\" ~rate:8000.0 ;;\n");
+  qualified.write(".build", "project q\nsource song.synth\n");
+  BuildResult ro = buildProject(opened.dir.string());
+  for (auto& d : ro.diags.items) std::cerr << d.message << "\n";
+  CHECK(ro.ok);
+  CHECK(buildProject(qualified.dir.string()).ok);
+  std::string a = slurp(opened.dir / "build" / "artifacts" / "out.wav");
+  std::string b = slurp(qualified.dir / "build" / "artifacts" / "out.wav");
+  CHECK(!a.empty());
+  CHECK(a == b);
+}
+
+TEST(build_open_stale_cache_invalidation) {
+  // Editing a def reached through `open` must invalidate the cache - the
+  // opened reference is rewritten to a qualified one, so the dependency
+  // hasher sees the cross-module edge.
+  TempDir tp;
+  auto write = [&](const char* freq) {
+    tp.write("instr.synth", std::string("let tone : Scalar Signal = sine ") +
+                                freq + " * exp_decay 8.0 ;;\n");
+  };
+  write("440.0");
+  tp.write("song.synth",
+           "open Instr\n"
+           "let _ = tone |> sample ~from:0s ~to:200ms\n"
+           "        |> render ~name:\"out\" ~rate:8000.0 ;;\n");
+  tp.write(".build", "project oc\nsource song.synth\n");
+  BuildCache cache;
+  CHECK(buildProject(tp.dir.string(), &cache).ok);
+  std::string before = slurp(tp.dir / "build" / "artifacts" / "out.wav");
+  // Unchanged rebuild: cached.
+  BuildResult r1 = buildProject(tp.dir.string(), &cache);
+  CHECK(r1.ok);
+  CHECK(r1.targets[0].cached);
+  // Edit the opened def: must re-render and the artifact must change.
+  write("220.0");
+  BuildResult r2 = buildProject(tp.dir.string(), &cache);
+  CHECK(r2.ok);
+  CHECK(!r2.targets[0].cached);
+  std::string after = slurp(tp.dir / "build" / "artifacts" / "out.wav");
+  CHECK(before != after);
+}
+
+TEST(build_module_alias_stale_cache_invalidation) {
+  // Same guarantee for references through a module alias.
+  TempDir tp;
+  auto write = [&](const char* freq) {
+    tp.write("instr.synth", std::string("let tone : Scalar Signal = sine ") +
+                                freq + " * exp_decay 8.0 ;;\n");
+  };
+  write("440.0");
+  tp.write("song.synth",
+           "import Instr\n"
+           "module I = Instr\n"
+           "let _ = I.tone |> sample ~from:0s ~to:200ms\n"
+           "        |> render ~name:\"out\" ~rate:8000.0 ;;\n");
+  tp.write(".build", "project ac\nsource song.synth\n");
+  BuildCache cache;
+  CHECK(buildProject(tp.dir.string(), &cache).ok);
+  BuildResult r1 = buildProject(tp.dir.string(), &cache);
+  CHECK(r1.ok);
+  CHECK(r1.targets[0].cached);
+  write("220.0");
+  BuildResult r2 = buildProject(tp.dir.string(), &cache);
+  CHECK(r2.ok);
+  CHECK(!r2.targets[0].cached);
+}
+
+namespace {
+
+// A root tree: a `Basic` library (with its own render target and an
+// internal module) and a `tunes` project consuming it via `dep Basic`.
+void writeRootTree(TempTree& tp) {
+  tp.write(".build", "project demo\nbuild lib/basic\nbuild tunes\n");
+  tp.write("lib/basic/.build",
+           "library Basic\nexpose keys.synth\nsource internal.synth\n");
+  tp.write("lib/basic/keys.synth",
+           "import Internal\n"
+           "let strike freq:Scalar : Scalar Signal =\n"
+           "  sine freq * exp_decay 8.0 * Internal.base ;;\n"
+           "let _ = strike 660.0 |> sample ~from:0s ~to:100ms\n"
+           "        |> render ~name:\"keys-demo\" ~rate:8000.0 ;;\n");
+  tp.write("lib/basic/internal.synth", "let base : Scalar = 0.5 ;;\n");
+  tp.write("tunes/.build", "project tunes\ndep Basic\nsource song.synth\n");
+  tp.write("tunes/song.synth",
+           "import Basic\n"
+           "let _ = Basic.Keys.strike 440.0 |> sample ~from:0s ~to:200ms\n"
+           "        |> render ~name:\"song\" ~rate:8000.0 ;;\n");
+}
+
+}  // namespace
+
+TEST(build_root_builds_all_rules) {
+  TempTree tp;
+  writeRootTree(tp);
+  RootBuildResult rr = buildRoot(tp.dir.string(), BuildOptions{});
+  for (auto& d : rr.diags.items) std::cerr << d.message << "\n";
+  for (auto& [rule, br] : rr.rules)
+    for (auto& d : br.diags.items) std::cerr << rule << ": " << d.message << "\n";
+  CHECK(rr.ok);
+  CHECK(rr.rules.size() == 2);
+  // Each rule renders into its own build/ dir.
+  CHECK(fs::exists(tp.dir / "lib" / "basic" / "build" / "artifacts" /
+                   "keys-demo.wav"));
+  CHECK(fs::exists(tp.dir / "tunes" / "build" / "artifacts" / "song.wav"));
+  CHECK(rr.registry.find("Basic") != nullptr);
+}
+
+TEST(build_dep_library_renders_suppressed) {
+  TempTree tp;
+  writeRootTree(tp);
+  RootBuildResult rr = buildRoot(tp.dir.string(), BuildOptions{});
+  CHECK(rr.ok);
+  // The consumer's build renders only its own target - the library's
+  // `keys-demo` must not leak into tunes/build.
+  const BuildResult* tunes = nullptr;
+  for (auto& [rule, br] : rr.rules)
+    if (rule == "tunes") tunes = &br;
+  CHECK(tunes != nullptr);
+  CHECK(tunes->targets.size() == 1);
+  CHECK(tunes->targets[0].name == "song");
+  CHECK(!fs::exists(tp.dir / "tunes" / "build" / "artifacts" /
+                    "keys-demo.wav"));
+}
+
+TEST(build_root_file_rule) {
+  TempTree tp;
+  tp.write(".build", "project demo\nbuild tone.synth\n");
+  tp.write("tone.synth",
+           "let _ = sine 440.0 |> sample ~from:0s ~to:100ms\n"
+           "        |> render ~name:\"tone\" ~rate:8000.0 ;;\n");
+  RootBuildResult rr = buildRoot(tp.dir.string(), BuildOptions{});
+  for (auto& [rule, br] : rr.rules)
+    for (auto& d : br.diags.items) std::cerr << d.message << "\n";
+  CHECK(rr.ok);
+  CHECK(fs::exists(tp.dir / "build" / "artifacts" / "tone.wav"));
+  // An unknown rule fails.
+  TempTree bad;
+  bad.write(".build", "project demo\nbuild nope\n");
+  RootBuildResult rb = buildRoot(bad.dir.string(), BuildOptions{});
+  CHECK(!rb.ok);
+}
+
+TEST(build_library_standalone) {
+  // A dependency-free library builds on its own (no root needed).
+  TempTree tp;
+  writeRootTree(tp);
+  BuildResult r = buildProject((tp.dir / "lib" / "basic").string());
+  for (auto& d : r.diags.items) std::cerr << d.message << "\n";
+  CHECK(r.ok);
+  CHECK(r.manifest.projectName == "Basic");
+  CHECK(fs::exists(tp.dir / "lib" / "basic" / "build" / "artifacts" /
+                   "keys-demo.wav"));
+}
+
+TEST(build_subdir_build_resolves_deps_via_root) {
+  // Building a dep-carrying project directly resolves libraries through
+  // the enclosing root.
+  TempTree tp;
+  writeRootTree(tp);
+  BuildResult r = buildProject((tp.dir / "tunes").string());
+  for (auto& d : r.diags.items) std::cerr << d.message << "\n";
+  CHECK(r.ok);
+  CHECK(fs::exists(tp.dir / "tunes" / "build" / "artifacts" / "song.wav"));
+  // Without an enclosing root, deps are an error.
+  TempTree lone;
+  lone.write("tunes/.build", "project tunes\ndep Basic\nsource s.synth\n");
+  lone.write("tunes/s.synth", "let x : Scalar = 1.0 ;;\n");
+  BuildResult r2 = buildProject((lone.dir / "tunes").string());
+  CHECK(!r2.ok);
+}
+
+TEST(build_cross_library_byte_identity) {
+  // The same defs consumed via a library render byte-identically to an
+  // inlined standalone version.
+  TempTree tp;
+  writeRootTree(tp);
+  RootBuildResult rr = buildRoot(tp.dir.string(), BuildOptions{});
+  CHECK(rr.ok);
+  TempDir inl;
+  inl.write("song.synth",
+            "let base : Scalar = 0.5 ;;\n"
+            "let strike freq:Scalar : Scalar Signal =\n"
+            "  sine freq * exp_decay 8.0 * base ;;\n"
+            "let _ = strike 440.0 |> sample ~from:0s ~to:200ms\n"
+            "        |> render ~name:\"song\" ~rate:8000.0 ;;\n");
+  inl.write(".build", "project inline\nsource song.synth\n");
+  CHECK(buildProject(inl.dir.string()).ok);
+  std::string a =
+      slurp(tp.dir / "tunes" / "build" / "artifacts" / "song.wav");
+  std::string b = slurp(inl.dir / "build" / "artifacts" / "song.wav");
+  CHECK(!a.empty());
+  CHECK(a == b);
+}
+
+TEST(build_root_duplicate_library_names_fail) {
+  TempTree tp;
+  tp.write(".build", "project demo\nbuild a\n");
+  tp.write("a/.build", "library Same\nexpose x.synth\n");
+  tp.write("a/x.synth", "let x : Scalar = 1.0 ;;\n");
+  tp.write("b/.build", "library Same\nexpose y.synth\n");
+  tp.write("b/y.synth", "let y : Scalar = 1.0 ;;\n");
+  RootBuildResult rr = buildRoot(tp.dir.string(), BuildOptions{});
+  CHECK(!rr.ok);
+  CHECK(rr.diags.hasErrors());
+}
+
+TEST(build_lint_resolves_libraries_via_root) {
+  TempTree tp;
+  writeRootTree(tp);
+  // A consumer file with a library import lints via the enclosing root,
+  // and a library member lints as part of its library.
+  DiagnosticBag d1 = lintFiles({(tp.dir / "tunes" / "song.synth").string()});
+  for (auto& d : d1.items) std::cerr << d.message << "\n";
+  CHECK(!d1.hasErrors());
+  DiagnosticBag d2 =
+      lintFiles({(tp.dir / "lib" / "basic" / "keys.synth").string()});
+  for (auto& d : d2.items) std::cerr << d.message << "\n";
+  CHECK(!d2.hasErrors());
+}
+
+TEST(build_watch_root_rebuilds_on_library_change) {
+  TempTree tp;
+  writeRootTree(tp);
+  int builds = 0;
+  bool edited = false;
+  watchRoot(
+      tp.dir.string(),
+      [&](const RootBuildResult& rr) {
+        builds++;
+        CHECK(rr.ok);
+      },
+      [&]() -> bool {
+        if (builds == 1 && !edited) {
+          std::this_thread::sleep_for(std::chrono::milliseconds(20));
+          tp.write("lib/basic/internal.synth",
+                   "let base : Scalar = 0.25 ;;\n");
+          fs::last_write_time(tp.dir / "lib" / "basic" / "internal.synth",
+                              fs::file_time_type::clock::now() +
+                                  std::chrono::seconds(2));
+          edited = true;
+          return true;
+        }
+        return builds < 2;
+      },
+      10);
+  CHECK(builds == 2);
 }
 
 TEST(build_render_stems_produces_named_targets) {

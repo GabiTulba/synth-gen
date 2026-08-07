@@ -186,6 +186,61 @@ TEST(parser_pipe_rejects_non_application_rhs) {
   CHECK(diags.hasErrors());
 }
 
+TEST(parser_import_dotted_path) {
+  DiagnosticBag diags;
+  auto defs = parseSrc("import Basic\nimport Basic.Keys ;;", diags);
+  CHECK(!diags.hasErrors());
+  CHECK(defs.size() == 2);
+  CHECK(defs[0].kind == TopDef::Kind::Import);
+  CHECK(defs[0].moduleName == "Basic");
+  CHECK(defs[1].kind == TopDef::Kind::Import);
+  CHECK(defs[1].moduleName == "Basic.Keys");
+}
+
+TEST(parser_open_single_and_dotted) {
+  DiagnosticBag diags;
+  auto defs = parseSrc("open Basic\nopen Basic.Keys ;;", diags);
+  CHECK(!diags.hasErrors());
+  CHECK(defs.size() == 2);
+  CHECK(defs[0].kind == TopDef::Kind::Open);
+  CHECK(defs[0].moduleName == "Basic");
+  CHECK(defs[1].kind == TopDef::Kind::Open);
+  CHECK(defs[1].moduleName == "Basic.Keys");
+}
+
+TEST(parser_module_alias) {
+  DiagnosticBag diags;
+  auto defs = parseSrc("module Keys = Basic.Keys ;;\nmodule B = Basic\n",
+                       diags);
+  CHECK(!diags.hasErrors());
+  CHECK(defs.size() == 2);
+  CHECK(defs[0].kind == TopDef::Kind::ModuleAlias);
+  CHECK(defs[0].name == "Keys");
+  CHECK(defs[0].moduleName == "Basic.Keys");
+  CHECK(defs[1].name == "B");
+  CHECK(defs[1].moduleName == "Basic");
+  // Alias name must be capitalized (an UpIdent).
+  DiagnosticBag bad;
+  parseSrc("module keys = Basic.Keys ;;", bad);
+  CHECK(bad.hasErrors());
+}
+
+TEST(parser_qualified_two_segment_ident) {
+  DiagnosticBag diags;
+  auto defs = parseSrc("let x : Scalar = Basic.Keys.gain + A.f 1.0 ;;",
+                       diags);
+  CHECK(!diags.hasErrors());
+  const Expr& sum = *defs[0].body;
+  CHECK(sum.kind == Expr::Kind::BinOp);
+  const Expr& q = *sum.items[0];
+  CHECK(q.kind == Expr::Kind::Ident);
+  CHECK(q.moduleName == "Basic.Keys");
+  CHECK(q.name == "gain");
+  const Expr& app = *sum.items[1];
+  CHECK(app.items[0]->moduleName == "A");
+  CHECK(app.items[0]->name == "f");
+}
+
 TEST(parser_lambda) {
   DiagnosticBag diags;
   auto defs = parseSrc(

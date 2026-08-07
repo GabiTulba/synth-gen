@@ -11,6 +11,8 @@ enum class Tok {
   In,
   Fun,
   Import,
+  Open,
+  Module,
   Ident,      // lowercase-initial identifier or `_`
   UpIdent,    // uppercase-initial identifier (types, module names)
   Number,     // numeric literal (Scalar)

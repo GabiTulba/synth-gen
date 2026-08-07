@@ -74,6 +74,7 @@ TEST(metadata_loads_real_build_output) {
   // End-to-end contract check: what buildProject writes, the dev app reads.
   TempDir tp;
   tp.write("song.synth", R"(
+open Core
 let _ = render "beep" 8000.0 (sample ((sine 440.0) * 0.5) 0s 250ms) ;;
 )");
   tp.write(".build", "project devapp-demo\nsource song.synth\n");
@@ -97,7 +98,7 @@ let _ = render "beep" 8000.0 (sample ((sine 440.0) * 0.5) 0s 250ms) ;;
 
 TEST(metadata_surfaces_failed_builds) {
   TempDir tp;
-  tp.write("bad.synth", "let x : Scalar = sine 440.0 ;;");
+  tp.write("bad.synth", "open Core\nlet x : Scalar = sine 440.0 ;;");
   tp.write(".build", "project broken\nsource bad.synth\n");
   BuildResult r = buildProject(tp.dir.string());
   CHECK(!r.ok);

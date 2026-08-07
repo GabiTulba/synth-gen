@@ -5,6 +5,8 @@
    Basic.Kick.kick, unqualified). Requires `dep Basic` in .build; the
    library is discovered from the examples/ root. *)
 
+open Core
+
 import Basic
 module P = Basic.Piano
 open Basic.Kick

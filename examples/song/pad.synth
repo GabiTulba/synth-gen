@@ -3,6 +3,8 @@
    two stereo sides can run different widths - that difference is what
    makes the pad feel wide. *)
 
+open Core
+
 let tone ~freq:Scalar ~detune:Scalar : Scalar Signal =
   (saw (freq - detune) + saw (freq + detune)) * 0.5
 ;;

@@ -4,6 +4,8 @@
    scripts/render-outputs.sh. Levels are kept below 1.0 to avoid
    clipping in the 16-bit artifacts. *)
 
+open Core
+
 (* Generators *)
 let _ =
   sine 440.0 * 0.8 |> sample ~from:0s ~to:1s
@@ -99,12 +101,12 @@ let _ =
       |> sample ~from:0s ~to:20ms
       |> render_vis ~name:"soft_clip-wave" ~rate:48000.0 ;;
 
-(* List builders: list_init generating an additive harmonic stack from
+(* List builders: List.init generating an additive harmonic stack from
    an inline lambda, and time_steps feeding place_multi with an even
    pattern. (repeat has no audible demo of its own - n copies mix to a
    plain gain change.) *)
 let _ =
-  mix_all (list_init 6.0 (fun i:Scalar ->
+  mix_all (List.init 6.0 (fun i:Scalar ->
     sine (110.0 * (i + 1.0)) * (1.0 / (i + 1.0)))) * 0.3
     |> sample ~from:0s ~to:1500ms
     |> render ~name:"list_init" ~rate:48000.0 ;;

@@ -2,6 +2,8 @@
    pipe and sub-let style. Builds one artifact named "demo": two seconds
    of audio containing four decaying 440 Hz plucks. *)
 
+open Core
+
 let song : Scalar Signal =
   let pluck : Scalar Signal = sine 440.0 * exp_decay 6.0 in
   let hit : Scalar Sample = pluck |> sample ~from:0s ~to:800ms in

@@ -10,6 +10,8 @@
    the buses into one Vector Signal and soft_clip is the master bus
    glue. *)
 
+open Core
+
 import Drums
 import Pad
 import Keys

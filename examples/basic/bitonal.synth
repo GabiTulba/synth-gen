@@ -2,6 +2,8 @@
    against each other at 4 Hz, with a 2 Hz sine amplitude modulation
    riding on top. *)
 
+open Core
+
 let modded : Scalar Signal =
   let bitone : Scalar Signal = (saw 220.0 + saw 224.0) * 0.5 in
   bitone |> am ~modulator:(sine 2.0) ~depth:0.5

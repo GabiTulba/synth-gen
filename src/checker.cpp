@@ -79,6 +79,11 @@ class ModuleChecker {
   // brought in by `open File`, later binders shadowing earlier ones. The
   // string is the canonical module id of an opened name ("" = own def).
   std::map<std::string, std::pair<TypePtr, std::string>> topScope_;
+  // Whether `open Core` / `open Core.List` appeared (position-ordered):
+  // primitives resolve unqualified only under these; qualified Core.name
+  // and Core.List.name always work.
+  bool coreOpen_ = false;
+  bool coreListOpen_ = false;
   // Primitive signatures share global var objects (ids 0 and 1); every call
   // site instantiates them with fresh ids so two polymorphic calls - or a
   // partial application fed into another polymorphic call - can never
@@ -255,8 +260,25 @@ class ModuleChecker {
         if (!ts->second.second.empty()) e.moduleName = ts->second.second;
         return ts->second.first;
       }
-      if (const PrimSig* p = findPrimitive(e.name))
-        return tFun(p->paramTypes, p->paramNames, p->retType);
+      // Primitives live in the built-in Core namespace: reachable
+      // unqualified only under `open Core` / `open Core.List`.
+      if (coreOpen_) {
+        if (const PrimSig* p = findCorePrim(e.name))
+          return tFun(p->paramTypes, p->paramNames, p->retType);
+      }
+      if (coreListOpen_) {
+        if (const PrimSig* p = findCoreListPrim(e.name))
+          return tFun(p->paramTypes, p->paramNames, p->retType);
+      }
+      if (findCorePrim(e.name))
+        fail(e.span, "unknown name '" + e.name +
+                         "' (a Core primitive: add 'open Core' or write "
+                         "Core." + e.name + ")");
+      if (findCoreListPrim(e.name) || findPrimitive(e.name))
+        fail(e.span, "unknown name '" + e.name +
+                         "' (a Core.List function: 'open Core' + List." +
+                         (e.name == "list_init" ? "init" : e.name) +
+                         ", or 'open Core.List')");
       fail(e.span, "unknown name '" + e.name + "'");
     }
     std::string canonical = resolveModuleRef(e.moduleName, e.span);
@@ -264,6 +286,18 @@ class ModuleChecker {
     // dependency hasher see one stable module identity regardless of the
     // surface spelling (short name, library path, open, alias).
     e.moduleName = canonical;
+    if (canonical == "Core") {
+      const PrimSig* p = findCorePrim(e.name);
+      if (!p)
+        fail(e.span, "'Core' has no primitive named '" + e.name + "'");
+      return tFun(p->paramTypes, p->paramNames, p->retType);
+    }
+    if (canonical == "Core.List") {
+      const PrimSig* p = findCoreListPrim(e.name);
+      if (!p)
+        fail(e.span, "'Core.List' has no function named '" + e.name + "'");
+      return tFun(p->paramTypes, p->paramNames, p->retType);
+    }
     const CheckedModule* m = prog_.find(canonical);
     if (!m) fail(e.span, "module '" + canonical + "' was not checked");
     auto it = m->defTypes.find(e.name);
@@ -287,6 +321,19 @@ class ModuleChecker {
   void applyOpen(const TopDef& def) {
     try {
       const std::string& surface = def.moduleName;
+      // The built-in Core namespace: `open Core` makes primitives
+      // callable bare and its List submodule reachable as `List`;
+      // `open Core.List` makes the list functions callable bare.
+      std::string builtin = tryResolveModuleRef(surface, def.span);
+      if (builtin == "Core") {
+        coreOpen_ = true;
+        mod_.moduleScope["List"] = "Core.List";
+        return;
+      }
+      if (builtin == "Core.List") {
+        coreListOpen_ = true;
+        return;
+      }
       // A whole-library open: inject its exposed file modules.
       if (surface.find('.') == std::string::npos) {
         auto il = mod_.importedLibs.find(surface);
@@ -331,17 +378,26 @@ class ModuleChecker {
     }
   }
 
-  // Resolve a surface module qualifier ("Keys", "Basic.Keys", an alias...)
-  // to a canonical module id, or fail with a diagnostic.
-  std::string resolveModuleRef(const std::string& surface, Span span) {
+  // Resolve a surface module qualifier ("Keys", "Basic.Keys", "Core",
+  // an alias...) to a canonical module id, or "" when nothing matches.
+  std::string tryResolveModuleRef(const std::string& surface, Span span) {
     auto ms = mod_.moduleScope.find(surface);
     if (ms != mod_.moduleScope.end()) return ms->second;
+    // The built-in Core namespace is always in scope (unless shadowed by
+    // an alias above).
+    if (surface == "Core") return "Core";
+    if (surface == "Core.List") return "Core.List";
     size_t dot = surface.find('.');
     if (dot != std::string::npos) {
-      // "Lib.File" under a whole-library import (possibly via an alias
-      // of the library name).
       std::string first = surface.substr(0, dot);
       std::string rest = surface.substr(dot + 1);
+      // An alias of Core composes with its List submodule (C.List).
+      auto cs = mod_.moduleScope.find(first);
+      if (cs != mod_.moduleScope.end() && cs->second == "Core" &&
+          rest == "List")
+        return "Core.List";
+      // "Lib.File" under a whole-library import (possibly via an alias
+      // of the library name).
       auto il = mod_.importedLibs.find(first);
       if (il != mod_.importedLibs.end() &&
           rest.find('.') == std::string::npos) {
@@ -355,6 +411,14 @@ class ModuleChecker {
         return il->second + "." + rest;
       }
     }
+    return {};
+  }
+
+  // As tryResolveModuleRef, but unresolved references fail with a
+  // diagnostic.
+  std::string resolveModuleRef(const std::string& surface, Span span) {
+    std::string canonical = tryResolveModuleRef(surface, span);
+    if (!canonical.empty()) return canonical;
     fail(span,
          "module '" + surface + "' is not imported by this module");
   }
@@ -392,9 +456,27 @@ class ModuleChecker {
     std::vector<std::string> paramLabels;
     TypePtr retType;
     const PrimSig* prim = nullptr;
-    if (callee.kind == Expr::Kind::Ident && callee.moduleName.empty() &&
-        !env.count(callee.name) && !mod_.defTypes.count(callee.name))
-      prim = findPrimitive(callee.name);
+    if (callee.kind == Expr::Kind::Ident) {
+      if (callee.moduleName.empty()) {
+        // Bare primitive names resolve only under open Core /
+        // open Core.List, and any explicit binder shadows them.
+        if (!env.count(callee.name) && !topScope_.count(callee.name)) {
+          if (coreOpen_) prim = findCorePrim(callee.name);
+          if (!prim && coreListOpen_) prim = findCoreListPrim(callee.name);
+        }
+      } else {
+        std::string canonical =
+            tryResolveModuleRef(callee.moduleName, callee.span);
+        if (canonical == "Core") {
+          prim = findCorePrim(callee.name);
+        } else if (canonical == "Core.List") {
+          prim = findCoreListPrim(callee.name);
+        }
+        // Rewrite so the evaluator's qualified lookup hits the Core
+        // fast path regardless of alias spelling.
+        if (prim) callee.moduleName = canonical;
+      }
+    }
     if (prim) {
       paramTypes = prim->paramTypes;
       paramLabels = prim->paramNames;
@@ -679,6 +761,9 @@ Program checkProject(const std::vector<std::string>& rootFiles,
       Span span = mention.span;
       Loaded& l = byName.at(name);
       const std::string file = l.parsed.path;
+      // The built-in Core namespace never loads from disk; the checker
+      // resolves it.
+      if (surface == "Core" || surface.rfind("Core.", 0) == 0) continue;
       // A `module X = Path` target may name an earlier alias, which only
       // the checker can resolve (aliases are position-ordered). The
       // loader resolves alias targets opportunistically - creating load

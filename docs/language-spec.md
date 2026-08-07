@@ -114,12 +114,25 @@ Rules:
 - **Definition before use, no recursion.** A definition may reference
   only parameters, *earlier* definitions of its module, imported modules'
   definitions (qualified), names brought in by an *earlier* `open`, and
-  primitives. Name resolution order for unqualified names: local
-  binding/parameter (innermost first) → the latest earlier top-level
-  binder (an own definition or an `open`ed name — position-ordered, so
-  an `open` shadows earlier same-named binders and a later definition
-  shadows the open) → primitive. Re-defining one of the module's *own*
-  names is still a duplicate-definition error.
+  Core primitives (see below). Name resolution order for unqualified
+  names: local binding/parameter (innermost first) → the latest earlier
+  top-level binder (an own definition or an `open`ed name —
+  position-ordered, so an `open` shadows earlier same-named binders and
+  a later definition shadows the open) → a Core primitive, but only
+  under an earlier `open Core` (or `open Core.List` for the list
+  functions). Re-defining one of the module's *own* names is still a
+  duplicate-definition error.
+- **The Core namespace.** All primitives live in the built-in `Core`
+  module — except the list functions, which live in its `Core.List`
+  submodule under OCaml-style names: `List.map`, `List.fold`,
+  `List.init` (= the doc's `list_init`), `List.repeat`. Files start
+  with `open Core`, which makes primitives callable bare and binds
+  `List` (so `List.map f xs` works); `open Core.List` additionally
+  makes the list functions bare. Qualified access (`Core.sine`,
+  `Core.List.map`) always works, with no open or import. `Core`
+  aliases like any module (`module C = Core` then `C.sine`,
+  `C.List.map`); the name `Core` is reserved — a user file or library
+  named Core is not reachable.
 - **Module references** (`import`/`open`/alias targets and qualified
   names) resolve their first segment as: module alias bound earlier in
   the file (later aliases override) → a file module of the current
@@ -244,6 +257,10 @@ channels in v1.
 
 ## 6. Primitive signatures (v1 roster)
 
+Everything below lives in the built-in `Core` module (`open Core` for
+bare names, or `Core.sine`), except the four `Core.List` functions
+listed with their `List.` names.
+
 ```
 (* generators *)
 val sine      : freq:Scalar -> Scalar Signal
@@ -297,11 +314,13 @@ val render_vis_stems : name:String -> rate:Scalar
 val load_mono : path:String -> Scalar Signal
 val load_multi: path:String -> Vector Signal
 
-(* list combinators & builders *)
-val map       : f:('a -> 'b) -> xs:'a list -> 'b list
-val fold      : f:('a -> 'b -> 'a) -> init:'a -> xs:'b list -> 'a
-val list_init : n:Scalar -> f:(Scalar -> 'a) -> 'a list   (* [f 0.0; ...; f (n-1)] *)
-val repeat    : n:Scalar -> x:'a -> 'a list
+(* Core.List: list combinators & builders *)
+val List.map    : f:('a -> 'b) -> xs:'a list -> 'b list
+val List.fold   : f:('a -> 'b -> 'a) -> init:'a -> xs:'b list -> 'a
+val List.init   : n:Scalar -> f:(Scalar -> 'a) -> 'a list   (* [f 0.0; ...; f (n-1)] *)
+val List.repeat : n:Scalar -> x:'a -> 'a list
+
+(* timestamp-list utilities (Core proper) *)
 val time_steps: start:Timestamp -> step:Timestamp -> count:Scalar -> Timestamp list
 val jitter    : seed:Scalar -> spread:Timestamp -> steps:(Timestamp list) -> Timestamp list
 ```

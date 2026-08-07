@@ -2,6 +2,8 @@
    clipper. `pulse` is the driving eighth-note; `held` the long note for
    intro/breakdown. *)
 
+open Core
+
 let voice freq:Scalar : Scalar Signal =
   (saw freq + saw (freq * 1.006)) * 0.5
     |> lowpass ~cutoff:450.0

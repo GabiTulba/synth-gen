@@ -2,6 +2,8 @@
    50 Hz (the modulator is a decaying envelope, in Hz), plus a soft
    noise click at the very start. *)
 
+open Core
+
 let kick : Scalar Signal =
   let pitch_drop : Scalar Signal = exp_decay 25.0 * 120.0 in
   let thump : Scalar Signal = fm ~carrier:50.0 ~modulator:pitch_drop in

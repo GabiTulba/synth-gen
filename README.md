@@ -104,6 +104,8 @@ too, with diagnostics included.
 
 ```ocaml
 (* pluck.synth *)
+open Core
+
 let pluck freq:Scalar : Scalar Signal =
   (sine freq) * (exp_decay 6.0)
 ;;
@@ -117,12 +119,18 @@ let place_pluck at:Timestamp : Scalar Signal =
 ;;
 
 let song : Scalar Signal =
-  mix_all (map place_pluck [0s; 500ms; 1s; 1500ms])
+  mix_all (List.map place_pluck [0s; 500ms; 1s; 1500ms])
 ;;
 
 let _ = render "demo" 48000.0 (sample song 0s 2s)
 ;;
 ```
+
+All primitives live in the built-in **`Core`** module — files start
+with `open Core` (bare `sine`, `render`, ...), or use qualified
+`Core.sine`; the list functions form the `Core.List` submodule
+(`List.map`, `List.fold`, `List.init`, `List.repeat`; `open Core.List`
+makes them bare). `Core` aliases like any module (`module C = Core`).
 
 Fully annotated, no inference, no Booleans/branching/recursion in v1.
 `render` is the language's only effect. Files are modules (`import A`
@@ -137,6 +145,8 @@ Ergonomic features on top of the doc's core: **labeled arguments**,
 `let ... in` bindings**:
 
 ```ocaml
+open Core
+
 let voice ~amp:Scalar ~freq:Scalar : Scalar Signal = (sine freq) * amp ;;
 let quiet : Scalar -> Scalar Signal = voice ~amp:0.25 ;;   (* curried *)
 
@@ -146,11 +156,11 @@ let warm : Scalar Signal =
 let pattern : Scalar Signal =
   let hit : Scalar Sample = warm |> sample ~from:0s ~to:100ms in
   let beats : Timestamp list = time_steps ~start:0s ~step:200ms ~count:5.0 in
-  mix_all (map (place hit) beats) ;;   (* or: place_multi hit beats *)
+  mix_all (List.map (place hit) beats) ;;   (* or: place_multi hit beats *)
 
 let echoes : Scalar Signal =
   let hit : Scalar Sample = warm |> sample ~from:0s ~to:100ms in
-  mix_all (map (fun t:Timestamp -> place hit t) [0s; 250ms; 500ms]) ;;
+  mix_all (List.map (fun t:Timestamp -> place hit t) [0s; 250ms; 500ms]) ;;
 
 let _ = sample pattern ~from:0s ~to:2s |> render ~name:"warm" ~rate:48000.0 ;;
 ```
@@ -316,7 +326,7 @@ follows (all easy to revisit):
   the gate length: the envelope sustains until `hold`, then releases.
 - **Higher-order arguments** may be any function-typed expression: a
   named user function or primitive, a partial application, or a lambda
-  (`map (fun t:Timestamp -> place hit t) beats`). Lambdas capture
+  (`List.map (fun t:Timestamp -> place hit t) beats`). Lambdas capture
   enclosing locals by value.
 - **Vector channel-count mismatches** are a build error, raised at graph
   construction time (before any audio is computed). Channel counts are
@@ -361,10 +371,10 @@ follows (all easy to revisit):
   inside the primitive's per-render state — the *language-level* signal
   graph stays acyclic, exactly like the stateful one-pole filters.
   Parameters are validated at graph construction.
-- **List builders** — `list_init n:Scalar f:(Scalar -> 'a) : 'a list`
+- **List builders** (`Core.List`) — `List.init n:Scalar f:(Scalar -> 'a) : 'a list`
   builds `[f 0.0; f 1.0; ...; f (n-1)]` (additive stacks, generated
-  patterns); `repeat n:Scalar x:'a : 'a list` builds n copies (a
-  convenience for `list_init n (fun i:Scalar -> x)`); `time_steps
+  patterns); `List.repeat n:Scalar x:'a : 'a list` builds n copies (a
+  convenience for `List.init n (fun i:Scalar -> x)`); `time_steps
   start:Timestamp step:Timestamp count:Scalar : Timestamp list` builds
   arithmetic timestamp sequences — the natural feed for `place_multi`
   (`place_multi kick (time_steps ~start:0s ~step:500ms ~count:8.0)`);
@@ -380,7 +390,7 @@ follows (all easy to revisit):
   [-1, 1] at WAV write, so manage headroom deliberately by scaling down
   or with `soft_clip`/`hard_clip`. This is
   the pattern/rhythm workhorse: equivalent to
-  `mix_all (map (place s) ats)` (byte-identical artifacts), kept as a
+  `mix_all (List.map (place s) ats)` (byte-identical artifacts), kept as a
   primitive for ergonomics. Each placement replays the sample from its own state, so
   stateful content (filters, `fm`, `reverb`) sounds identical at every
   timestamp — a guarantee `place` itself now also provides when the same

@@ -1,5 +1,7 @@
 (* Snare drum: a bright noise rattle over a short tonal body. *)
 
+open Core
+
 let snare : Scalar Signal =
   let body : Scalar Signal = sine 185.0 * exp_decay 18.0 * 0.5 in
   let rattle : Scalar Signal = noise 1800.0 * exp_decay 22.0 in

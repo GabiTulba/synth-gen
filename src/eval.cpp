@@ -136,6 +136,18 @@ class Interp {
         return Value{PrimClosureV{(int)p->id, nullptr}};
       throw EvalError("unbound name '" + ident.name + "' at build time");
     }
+    // The built-in Core namespace: primitives as first-class values.
+    if (ident.moduleName == "Core") {
+      if (const PrimSig* p = findCorePrim(ident.name))
+        return Value{PrimClosureV{(int)p->id, nullptr}};
+      throw EvalError("'Core' has no primitive named '" + ident.name + "'");
+    }
+    if (ident.moduleName == "Core.List") {
+      if (const PrimSig* p = findCoreListPrim(ident.name))
+        return Value{PrimClosureV{(int)p->id, nullptr}};
+      throw EvalError("'Core.List' has no function named '" + ident.name +
+                      "'");
+    }
     auto mt = globals_.find(ident.moduleName);
     if (mt == globals_.end())
       throw EvalError("module '" + ident.moduleName + "' was not evaluated");

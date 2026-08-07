@@ -23,6 +23,8 @@
                        bass, dying bell tolls and chain echoes; a last
                        engine Doppler crosses the field *)
 
+open Core
+
 import Drums
 import Bass
 import Pads

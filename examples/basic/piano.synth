@@ -2,6 +2,8 @@
    strings are stiff, so overtones run a little sharp) under a
    fast-attack ADSR, doubled by a softly detuned copy, in a small room. *)
 
+open Core
+
 let partial ~freq:Scalar ~amp:Scalar ~decay:Scalar : Scalar Signal =
   sine freq * exp_decay decay * amp
 ;;

@@ -129,11 +129,54 @@ std::string typeName(const TypePtr& t) {
   return "?";
 }
 
+namespace {
+// Does variable `v` appear in `t`, chasing bindings through `subst`? Guards
+// unification against creating cyclic substitutions.
+bool occurs(int v, const TypePtr& t, const Subst& subst) {
+  switch (t->kind) {
+    case Type::Kind::Var: {
+      if (t->var == v) return true;
+      auto it = subst.find(t->var);
+      return it != subst.end() && occurs(v, it->second, subst);
+    }
+    case Type::Kind::Signal:
+    case Type::Kind::Sample:
+    case Type::Kind::List:
+      return occurs(v, t->elem, subst);
+    case Type::Kind::Tuple:
+    case Type::Kind::Fun: {
+      for (auto& x : t->items)
+        if (occurs(v, x, subst)) return true;
+      return t->ret && occurs(v, t->ret, subst);
+    }
+    default:
+      return false;
+  }
+}
+}  // namespace
+
 bool unify(const TypePtr& sig, const TypePtr& concrete, Subst& subst) {
+  // Chase existing bindings on both sides so each variable is unified
+  // against its current representative, not just checked for equality.
   if (sig->kind == Type::Kind::Var) {
     auto it = subst.find(sig->var);
-    if (it != subst.end()) return typeEquals(it->second, concrete);
+    if (it != subst.end()) return unify(it->second, concrete, subst);
+  }
+  if (concrete->kind == Type::Kind::Var) {
+    auto it = subst.find(concrete->var);
+    if (it != subst.end()) return unify(sig, it->second, subst);
+  }
+  if (sig->kind == Type::Kind::Var && concrete->kind == Type::Kind::Var &&
+      sig->var == concrete->var)
+    return true;
+  if (sig->kind == Type::Kind::Var) {
+    if (occurs(sig->var, concrete, subst)) return false;
     subst[sig->var] = concrete;
+    return true;
+  }
+  if (concrete->kind == Type::Kind::Var) {
+    if (occurs(concrete->var, sig, subst)) return false;
+    subst[concrete->var] = sig;
     return true;
   }
   if (sig->kind != concrete->kind) return false;
@@ -167,8 +210,10 @@ bool unify(const TypePtr& sig, const TypePtr& concrete, Subst& subst) {
 TypePtr applySubst(const TypePtr& t, const Subst& subst) {
   switch (t->kind) {
     case Type::Kind::Var: {
+      // Chase bindings transitively; the occurs check in unify guarantees
+      // the substitution is acyclic, so this terminates.
       auto it = subst.find(t->var);
-      return it != subst.end() ? it->second : t;
+      return it != subst.end() ? applySubst(it->second, subst) : t;
     }
     case Type::Kind::Signal: return tSignal(applySubst(t->elem, subst));
     case Type::Kind::Sample: return tSample(applySubst(t->elem, subst));

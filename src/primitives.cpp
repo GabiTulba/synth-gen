@@ -75,9 +75,8 @@ const std::vector<PrimSig>& primitives() {
     add(PrimId::Place, "place", {"sample", "at"}, {tSample(a), tTimestamp()},
         tSignal(a));
     // place_multi: place one sample at every timestamp in the list and mix
-    // the placements (overlaps sum). Equivalent to mapping `place` over
-    // the list - which v1 cannot express directly, since partial
-    // application does not exist.
+    // the placements (overlaps sum). Equivalent to
+    // `mix_all (map (place s) ats)`, kept as a primitive for ergonomics.
     add(PrimId::PlaceMulti, "place_multi", {"sample", "ats"},
         {tSample(a), tList(tTimestamp())}, tSignal(a));
     // The effects: render writes an audio artifact; render_vis writes a
@@ -141,6 +140,27 @@ const PrimSig* findPrimitive(const std::string& name) {
 const PrimSig* findPrimitiveById(PrimId id) {
   for (auto& p : primitives())
     if (p.id == id) return &p;
+  return nullptr;
+}
+
+namespace {
+bool isListPrim(PrimId id) {
+  return id == PrimId::Map || id == PrimId::Fold || id == PrimId::ListInit ||
+         id == PrimId::Repeat;
+}
+}  // namespace
+
+const PrimSig* findCorePrim(const std::string& name) {
+  const PrimSig* p = findPrimitive(name);
+  return p && !isListPrim(p->id) ? p : nullptr;
+}
+
+const PrimSig* findCoreListPrim(const std::string& name) {
+  // OCaml-style surface names over the underlying list primitives.
+  if (name == "map") return findPrimitiveById(PrimId::Map);
+  if (name == "fold") return findPrimitiveById(PrimId::Fold);
+  if (name == "init") return findPrimitiveById(PrimId::ListInit);
+  if (name == "repeat") return findPrimitiveById(PrimId::Repeat);
   return nullptr;
 }
 

@@ -1,6 +1,8 @@
 (* Drum kit for the song: each hit is a finite Sample, ready for
    place_multi patterns. *)
 
+open Core
+
 let kick_hit : Scalar Sample =
   let pitch_drop : Scalar Signal = exp_decay 25.0 * 120.0 in
   let thump : Scalar Signal = fm ~carrier:50.0 ~modulator:pitch_drop in

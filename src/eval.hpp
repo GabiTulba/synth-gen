@@ -34,12 +34,22 @@ struct PrimClosureV {
   int primId = 0;  // PrimId, kept as int to avoid the header dependency
   std::shared_ptr<std::map<std::string, Value>> bound;  // by param name
 };
+// An anonymous function: the Lambda expression, its defining module, a
+// by-value snapshot of the local environment at creation (top-level defs
+// resolve through the module's globals, not the snapshot), and any
+// already-bound arguments (partial application).
+struct LambdaV {
+  const Expr* lam = nullptr;  // Expr::Kind::Lambda
+  const CheckedModule* mod = nullptr;
+  std::shared_ptr<const std::map<std::string, Value>> captured;
+  std::shared_ptr<std::map<std::string, Value>> bound;  // by param name
+};
 struct ListV { std::vector<Value> items; };
 struct TupleV { std::vector<Value> items; };
 
 struct Value {
   std::variant<UnitV, ScalarV, TimeV, StringV, VectorV, SigPtr, SampleV,
-               ListV, TupleV, FunV, PrimClosureV>
+               ListV, TupleV, FunV, PrimClosureV, LambdaV>
       v;
 };
 

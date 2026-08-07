@@ -1,6 +1,7 @@
 #include "build.hpp"
 
 #include <algorithm>
+#include <cctype>
 #include <chrono>
 #include <cmath>
 #include <condition_variable>
@@ -17,9 +18,12 @@
 
 #include <atomic>
 
+#include <set>
+
 #include "checker.hpp"
 #include "eval.hpp"
 #include "incremental.hpp"
+#include "library.hpp"
 #include "vis.hpp"
 #include "wav.hpp"
 
@@ -181,6 +185,9 @@ bool parseManifest(const std::string& text, const std::string& file,
   std::string line;
   uint32_t offset = 0;
   bool ok = true;
+  auto isCapitalized = [](const std::string& s) {
+    return !s.empty() && std::isupper((unsigned char)s[0]);
+  };
   while (std::getline(in, line)) {
     uint32_t lineLo = offset;
     offset += (uint32_t)line.size() + 1;
@@ -200,6 +207,21 @@ bool parseManifest(const std::string& text, const std::string& file,
       } else {
         out.projectName = rest;
       }
+    } else if (key == "library") {
+      if (rest.empty()) {
+        diags.error(file, span, "manifest: 'library' needs a name");
+        ok = false;
+      } else if (!isCapitalized(rest)) {
+        diags.error(file, span,
+                    "manifest: library names are capitalized ('" + rest +
+                        "' is not)");
+        ok = false;
+      } else if (!out.libraryName.empty()) {
+        diags.error(file, span, "manifest: duplicate 'library' line");
+        ok = false;
+      } else {
+        out.libraryName = rest;
+      }
     } else if (key == "source") {
       if (rest.empty()) {
         diags.error(file, span, "manifest: 'source' needs a file path");
@@ -207,18 +229,90 @@ bool parseManifest(const std::string& text, const std::string& file,
       } else {
         out.sources.push_back(rest);
       }
+    } else if (key == "expose") {
+      if (rest.empty()) {
+        diags.error(file, span, "manifest: 'expose' needs a file path");
+        ok = false;
+      } else if (std::find(out.sources.begin(), out.sources.end(), rest) !=
+                 out.sources.end()) {
+        diags.error(file, span, "manifest: '" + rest +
+                                    "' is listed as both 'source' and "
+                                    "'expose' ('expose' implies 'source')");
+        ok = false;
+      } else if (std::find(out.exposed.begin(), out.exposed.end(), rest) !=
+                 out.exposed.end()) {
+        diags.error(file, span,
+                    "manifest: duplicate 'expose' for '" + rest + "'");
+        ok = false;
+      } else {
+        out.exposed.push_back(rest);
+      }
+    } else if (key == "dep") {
+      if (rest.empty()) {
+        diags.error(file, span, "manifest: 'dep' needs a library name");
+        ok = false;
+      } else if (!isCapitalized(rest)) {
+        diags.error(file, span,
+                    "manifest: library names are capitalized ('" + rest +
+                        "' is not)");
+        ok = false;
+      } else {
+        out.deps.push_back(rest);
+      }
+    } else if (key == "build") {
+      if (rest.empty()) {
+        diags.error(file, span, "manifest: 'build' needs a rule path");
+        ok = false;
+      } else {
+        out.buildRules.push_back(rest);
+      }
     } else {
       diags.error(file, span, "manifest: unknown directive '" + key + "'");
       ok = false;
     }
   }
-  if (out.projectName.empty()) {
-    diags.projectError("manifest: missing 'project <name>'");
+  // 'expose' implies 'source' (the double-listing case erred above).
+  bool anySourceLine = !out.sources.empty();
+  for (auto& e : out.exposed) out.sources.push_back(e);
+  // Manifest-kind validation. Exactly one of project/library; roots
+  // ('build' rules) are orchestrators; libraries must expose something.
+  if (!out.projectName.empty() && !out.libraryName.empty()) {
+    diags.projectError(
+        "manifest: 'project' and 'library' cannot both be declared");
     ok = false;
-  }
-  if (out.sources.empty()) {
-    diags.projectError("manifest: no 'source' entries");
-    ok = false;
+  } else if (out.isLibrary()) {
+    if (!out.buildRules.empty()) {
+      diags.projectError(
+          "manifest: 'build' rules are only allowed in a root 'project' "
+          "manifest");
+      ok = false;
+    }
+    if (out.exposed.empty()) {
+      diags.projectError(
+          "manifest: a library must 'expose' at least one file");
+      ok = false;
+    }
+  } else {
+    if (out.projectName.empty()) {
+      diags.projectError("manifest: missing 'project <name>'");
+      ok = false;
+    }
+    if (!out.exposed.empty()) {
+      diags.projectError(
+          "manifest: 'expose' is only allowed in a 'library' manifest");
+      ok = false;
+    }
+    if (out.isRoot()) {
+      if (anySourceLine) {
+        diags.projectError(
+            "manifest: a root manifest ('build' rules) cannot also list "
+            "'source' files");
+        ok = false;
+      }
+    } else if (out.sources.empty()) {
+      diags.projectError("manifest: no 'source' entries");
+      ok = false;
+    }
   }
   return ok;
 }
@@ -229,8 +323,13 @@ BuildResult buildProject(const std::string& projectDir, BuildCache* cache) {
   return buildProject(projectDir, options);
 }
 
-BuildResult buildProject(const std::string& projectDir,
-                         const BuildOptions& options) {
+// The single-unit pipeline: a standalone project, a library, or a rule of
+// a root build (which passes the discovered registry; single-file rules
+// pass a synthesized manifest).
+static BuildResult buildUnitImpl(const std::string& projectDir,
+                                 const BuildOptions& options,
+                                 const LibraryRegistry* preRegistry,
+                                 const Manifest* overrideManifest) {
   BuildCache* cache = options.cache;
   BuildLog log(options.log);
   auto buildStart = std::chrono::steady_clock::now();
@@ -241,29 +340,75 @@ BuildResult buildProject(const std::string& projectDir,
 
   std::map<std::string, std::string> sourcesByPath;  // for diag rendering
 
-  // 1. Manifest.
-  std::ifstream mf(manifestPath);
-  if (!mf) {
-    r.diags.projectError("no .build manifest found in '" + dir.string() + "'");
+  // 1. Manifest (or a synthesized one for single-file rules).
+  if (overrideManifest) {
+    r.manifest = *overrideManifest;
+  } else {
+    std::ifstream mf(manifestPath);
+    if (!mf) {
+      r.diags.projectError("no .build manifest found in '" + dir.string() +
+                           "'");
+      return r;
+    }
+    std::ostringstream mss;
+    mss << mf.rdbuf();
+    std::string manifestText = mss.str();
+    sourcesByPath[manifestPath.string()] = manifestText;
+    r.inputs.push_back(manifestPath.string());
+    if (!parseManifest(manifestText, manifestPath.string(), r.manifest,
+                       r.diags))
+      return r;
+  }
+  if (r.manifest.isRoot()) {
+    r.diags.projectError("'" + dir.string() +
+                         "' is a project root; its 'build' rules build "
+                         "together (run the build at the root)");
     return r;
   }
-  std::ostringstream mss;
-  mss << mf.rdbuf();
-  std::string manifestText = mss.str();
-  sourcesByPath[manifestPath.string()] = manifestText;
-  r.inputs.push_back(manifestPath.string());
-  if (!parseManifest(manifestText, manifestPath.string(), r.manifest,
-                     r.diags))
-    return r;
+  // A library builds like a project named after itself.
+  if (r.manifest.isLibrary()) r.manifest.projectName = r.manifest.libraryName;
   log.line("manifest: project '" + r.manifest.projectName + "', " +
            std::to_string(r.manifest.sources.size()) + " source(s)");
+
+  // Library context. The registry comes from the caller (a root build) or
+  // from the enclosing root; a dependency-free library also builds
+  // standalone against a registry of itself.
+  LibraryRegistry localReg;
+  const LibraryRegistry* registry = preRegistry;
+  if (!registry && (r.manifest.isLibrary() || !r.manifest.deps.empty())) {
+    std::string rootDir = findEnclosingRoot(dir.string());
+    if (!rootDir.empty()) {
+      localReg = discoverLibraries(rootDir, r.diags);
+      registry = &localReg;
+    } else if (r.manifest.isLibrary() && r.manifest.deps.empty()) {
+      LibraryInfo self;
+      self.name = r.manifest.libraryName;
+      self.dir = dir.string();
+      self.files = r.manifest.sources;
+      self.exposedFiles.insert(r.manifest.exposed.begin(),
+                               r.manifest.exposed.end());
+      localReg.byName.emplace(self.name, std::move(self));
+      registry = &localReg;
+    } else {
+      r.diags.projectError(
+          "library dependencies require an enclosing project root (a "
+          ".build with 'build' rules) to resolve them");
+      return r;
+    }
+  }
+  ModuleLoadContext ctx;
+  ctx.registry = registry;
+  ctx.deps = r.manifest.deps;
+  if (r.manifest.isLibrary() && registry)
+    ctx.currentLib = registry->find(r.manifest.libraryName);
+  const ModuleLoadContext* ctxPtr = registry ? &ctx : nullptr;
 
   // 2. Parse & type-check every source file (plus imports).
   auto frontEndStart = std::chrono::steady_clock::now();
   std::vector<std::string> roots;
   for (auto& s : r.manifest.sources) roots.push_back((dir / s).string());
   for (auto& s : roots) r.inputs.push_back(s);
-  Program prog = checkProject(roots, r.diags);
+  Program prog = checkProject(roots, r.diags, ctxPtr);
   size_t defCount = 0;
   for (auto& m : prog.modules) {
     sourcesByPath[m.parsed.path] = m.parsed.source;
@@ -271,6 +416,15 @@ BuildResult buildProject(const std::string& projectDir,
       r.inputs.push_back(m.parsed.path);
     for (auto& d : m.parsed.defs)
       if (d.kind == TopDef::Kind::Let) defCount++;
+  }
+  // Watch the .build of every library that contributed modules: its
+  // expose/dep lines shape this build.
+  if (registry) {
+    std::set<std::string> libsSeen;
+    for (auto& m : prog.modules)
+      if (!m.libName.empty() && libsSeen.insert(m.libName).second)
+        if (const LibraryInfo* li = registry->find(m.libName))
+          r.inputs.push_back((fs::path(li->dir) / ".build").string());
   }
   log.line("front-end: " + std::to_string(prog.modules.size()) +
            " module(s), " + std::to_string(defCount) +
@@ -680,9 +834,101 @@ BuildResult buildProject(const std::string& projectDir,
   return r;
 }
 
+BuildResult buildProject(const std::string& projectDir,
+                         const BuildOptions& options) {
+  return buildUnitImpl(projectDir, options, nullptr, nullptr);
+}
+
+RootBuildResult buildRoot(const std::string& rootDir,
+                          const BuildOptions& options,
+                          std::map<std::string, BuildCache>* ruleCaches) {
+  RootBuildResult rr;
+  fs::path dir(rootDir);
+  fs::path manifestPath = dir / ".build";
+  std::ifstream mf(manifestPath);
+  if (!mf) {
+    rr.diags.projectError("no .build manifest found in '" + dir.string() +
+                          "'");
+    return rr;
+  }
+  std::ostringstream mss;
+  mss << mf.rdbuf();
+  std::string text = mss.str();
+  if (!parseManifest(text, manifestPath.string(), rr.manifest, rr.diags))
+    return rr;
+  if (!rr.manifest.isRoot()) {
+    rr.diags.projectError("'" + manifestPath.string() +
+                          "' is not a root manifest (no 'build' rules)");
+    return rr;
+  }
+  // Libraries are discovered dynamically: every .build under the root
+  // that declares one, wherever it lives in the tree.
+  rr.registry = discoverLibraries(rootDir, rr.diags);
+  if (rr.diags.hasErrors()) return rr;
+  rr.ok = true;
+  for (auto& rule : rr.manifest.buildRules) {
+    fs::path rulePath = dir / rule;
+    BuildOptions o = options;
+    // Each rule keeps its own incremental cache: caches key targets by
+    // render name, which is only unique per rule.
+    o.cache = ruleCaches ? &(*ruleCaches)[rule] : nullptr;
+    BuildResult br;
+    std::error_code ec;
+    if (fs::is_directory(rulePath, ec)) {
+      br = buildUnitImpl(rulePath.string(), o, &rr.registry, nullptr);
+    } else if (rulePath.extension() == ".synth" && fs::exists(rulePath, ec)) {
+      Manifest m;
+      m.projectName = rulePath.stem().string();
+      m.sources = {rulePath.filename().string()};
+      br = buildUnitImpl(rulePath.parent_path().string(), o, &rr.registry,
+                         &m);
+    } else {
+      br.diags.projectError("build rule '" + rule +
+                            "' is neither a directory with a .build nor a "
+                            ".synth file");
+    }
+    rr.ok = rr.ok && br.ok;
+    rr.rules.emplace_back(rule, std::move(br));
+  }
+  return rr;
+}
+
 DiagnosticBag lintFiles(const std::vector<std::string>& files) {
   DiagnosticBag diags;
-  checkProject(files, diags);
+  // Group files by their enclosing project root (if any) so library
+  // imports resolve; rootless files check standalone. Lint is lenient
+  // about `dep` declarations - every discovered library is in scope.
+  std::map<std::string, std::vector<std::string>> byRoot;
+  for (auto& f : files)
+    byRoot[findEnclosingRoot(fs::path(f).parent_path().string())]
+        .push_back(f);
+  for (auto& [root, group] : byRoot) {
+    if (root.empty()) {
+      checkProject(group, diags);
+      continue;
+    }
+    LibraryRegistry reg = discoverLibraries(root, diags);
+    // Files inside a library lint as that library (sibling imports and
+    // canonical ids resolve as they would in its build).
+    std::map<std::string, std::vector<std::string>> byLib;
+    for (auto& f : group) {
+      std::string owner;
+      std::error_code ec;
+      fs::path fp = fs::absolute(f, ec);
+      for (auto& [name, li] : reg.byName) {
+        fs::path rel = fs::relative(fp, fs::absolute(li.dir, ec), ec);
+        if (!rel.empty() && rel.string().rfind("..", 0) != 0) owner = name;
+      }
+      byLib[owner].push_back(f);
+    }
+    for (auto& [libName, libGroup] : byLib) {
+      ModuleLoadContext ctx;
+      ctx.registry = &reg;
+      for (auto& [name, li] : reg.byName) ctx.deps.push_back(name);
+      if (!libName.empty()) ctx.currentLib = reg.find(libName);
+      checkProject(libGroup, diags, &ctx);
+    }
+  }
   return diags;
 }
 
@@ -695,6 +941,33 @@ std::map<std::string, Stamp> snapshot(const std::string& projectDir,
   // manifest already references (or fixed unresolved imports).
   snap[projectDir] = stampOf(projectDir);
   for (auto& f : inputs) snap[f] = stampOf(f);
+  return snap;
+}
+
+// Stamp every directory and .build file under `root` (skipping output and
+// hidden dirs): directory stamps catch created/removed files, and .build
+// stamps catch manifest edits - including manifests of libraries that no
+// rule has loaded yet, so a new library appearing re-runs discovery.
+void stampTree(const fs::path& root, std::map<std::string, Stamp>& snap) {
+  std::error_code ec;
+  snap[root.string()] = stampOf(root);
+  fs::path manifest = root / ".build";
+  if (fs::exists(manifest, ec)) snap[manifest.string()] = stampOf(manifest);
+  for (auto& entry : fs::directory_iterator(
+           root, fs::directory_options::skip_permission_denied, ec)) {
+    if (!entry.is_directory(ec)) continue;
+    std::string name = entry.path().filename().string();
+    if (name == "build" || (!name.empty() && name[0] == '.')) continue;
+    stampTree(entry.path(), snap);
+  }
+}
+
+std::map<std::string, Stamp> snapshotRoot(const std::string& rootDir,
+                                          const RootBuildResult& rr) {
+  std::map<std::string, Stamp> snap;
+  stampTree(fs::path(rootDir), snap);
+  for (auto& [rule, br] : rr.rules)
+    for (auto& f : br.inputs) snap[f] = stampOf(f);
   return snap;
 }
 
@@ -727,6 +1000,32 @@ void watchProject(const std::string& projectDir,
     r = buildProject(projectDir, options);
     onBuild(r);
     snap = snapshot(projectDir, r.inputs);
+  }
+}
+
+void watchRoot(const std::string& rootDir,
+               const std::function<void(const RootBuildResult&)>& onBuild,
+               const std::function<bool()>& keepRunning, int pollMillis,
+               std::function<void(const std::string&)> log) {
+  // Per-rule incremental caches (render names are unique per rule, not
+  // project-wide) plus one shared structural sample cache - safe across
+  // rules because it is keyed by content hash.
+  std::map<std::string, BuildCache> caches;
+  std::shared_ptr<SampleCache> sampleCache = makeSampleCache();
+  BuildOptions options;
+  options.sampleCache = sampleCache.get();
+  options.log = log;
+  RootBuildResult rr = buildRoot(rootDir, options, &caches);
+  onBuild(rr);
+  auto snap = snapshotRoot(rootDir, rr);
+  while (keepRunning()) {
+    std::this_thread::sleep_for(std::chrono::milliseconds(pollMillis));
+    auto now = snapshotRoot(rootDir, rr);
+    if (now == snap) continue;
+    if (log) log("--- change detected, rebuilding ---");
+    rr = buildRoot(rootDir, options, &caches);
+    onBuild(rr);
+    snap = snapshotRoot(rootDir, rr);
   }
 }
 

@@ -2,6 +2,8 @@
    arpeggio pattern (root . fifth . octave . fifth) built entirely from
    place_multi + time_steps. *)
 
+open Core
+
 let pluck freq:Scalar : Scalar Sample =
   let body : Scalar Signal =
     (sine freq * 0.7 + saw freq * 0.3) * exp_decay 6.0 in

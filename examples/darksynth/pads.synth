@@ -2,6 +2,8 @@
    lowpassed under a slow envelope. Detune is a parameter so each stereo
    side runs a different width. *)
 
+open Core
+
 let wide ~freq:Scalar ~detune:Scalar : Scalar Signal =
   (saw (freq - detune) + saw (freq + detune)) * 0.5
 ;;

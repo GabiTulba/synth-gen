@@ -19,11 +19,17 @@ class Parser {
       try {
         if (at(Tok::Import)) {
           defs.push_back(parseImport());
+        } else if (at(Tok::Open)) {
+          defs.push_back(parseOpen());
+        } else if (at(Tok::Module)) {
+          defs.push_back(parseModuleAlias());
         } else if (at(Tok::Let)) {
           defs.push_back(parseLet());
         } else {
-          fail(peek().span, std::string("expected 'let' or 'import', found ") +
-                                tokenName(peek().kind));
+          fail(peek().span,
+               std::string(
+                   "expected 'let', 'import', 'open' or 'module', found ") +
+                   tokenName(peek().kind));
         }
       } catch (const Recover&) {
         // Skip to just past the next ';;' (or EOF) and continue.
@@ -61,13 +67,54 @@ class Parser {
     return toks_[pos_++];
   }
 
+  // A dotted module path: UpIdent { "." UpIdent }. Returns the joined
+  // path ("Lib" or "Lib.File") and extends `hi` to the last segment.
+  std::string parseModulePath(uint32_t& hi) {
+    const Token& first = expect(Tok::UpIdent, "module name");
+    std::string path = first.text;
+    hi = first.span.hi;
+    while (at(Tok::Dot) && peek(1).kind == Tok::UpIdent) {
+      advance();  // '.'
+      const Token& seg = advance();
+      path += "." + seg.text;
+      hi = seg.span.hi;
+    }
+    return path;
+  }
+
   TopDef parseImport() {
     TopDef d{};
     d.kind = TopDef::Kind::Import;
     Span lo = advance().span;  // 'import'
-    const Token& name = expect(Tok::UpIdent, "module name");
-    d.moduleName = name.text;
-    d.span = {lo.lo, name.span.hi};
+    uint32_t hi = lo.hi;
+    d.moduleName = parseModulePath(hi);
+    d.span = {lo.lo, hi};
+    if (at(Tok::SemiSemi)) advance();  // optional ';;'
+    return d;
+  }
+
+  TopDef parseOpen() {
+    TopDef d{};
+    d.kind = TopDef::Kind::Open;
+    Span lo = advance().span;  // 'open'
+    uint32_t hi = lo.hi;
+    d.moduleName = parseModulePath(hi);
+    d.span = {lo.lo, hi};
+    if (at(Tok::SemiSemi)) advance();  // optional ';;'
+    return d;
+  }
+
+  // module Alias = Dotted.Path [;;]
+  TopDef parseModuleAlias() {
+    TopDef d{};
+    d.kind = TopDef::Kind::ModuleAlias;
+    Span lo = advance().span;  // 'module'
+    const Token& name = expect(Tok::UpIdent, "module alias name");
+    d.name = name.text;
+    expect(Tok::Equals, "'=' after module alias name");
+    uint32_t hi = name.span.hi;
+    d.moduleName = parseModulePath(hi);
+    d.span = {lo.lo, hi};
     if (at(Tok::SemiSemi)) advance();  // optional ';;'
     return d;
   }
@@ -78,21 +125,7 @@ class Parser {
     Span lo = advance().span;  // 'let'
     const Token& name = expect(Tok::Ident, "binding name");
     d.name = name.text;
-    // Parameters: [~]ident ':' type, until ':' (return type) or '='.
-    // A leading '~' declares a labeled parameter.
-    while (at(Tok::Ident) || at(Tok::Tilde)) {
-      Param p;
-      if (at(Tok::Tilde)) {
-        advance();
-        p.labeled = true;
-      }
-      const Token& pn = expect(Tok::Ident, "parameter name");
-      p.name = pn.text;
-      expect(Tok::Colon, "':' after parameter name");
-      p.type = parseParamType();
-      p.span = {pn.span.lo, peek().span.lo};
-      d.params.push_back(std::move(p));
-    }
+    parseParams(d.params);
     if (at(Tok::Colon)) {
       advance();
       d.retType = parseType();
@@ -105,6 +138,25 @@ class Parser {
     const Token& end = expect(Tok::SemiSemi, "';;' to end definition");
     d.span = {lo.lo, end.span.hi};
     return d;
+  }
+
+  // Parameters: [~]ident ':' type, until ':' (return type), '=' or '->'.
+  // A leading '~' declares a labeled parameter. Shared by top-level lets
+  // and lambdas.
+  void parseParams(std::vector<Param>& out) {
+    while (at(Tok::Ident) || at(Tok::Tilde)) {
+      Param p;
+      if (at(Tok::Tilde)) {
+        advance();
+        p.labeled = true;
+      }
+      const Token& pn = expect(Tok::Ident, "parameter name");
+      p.name = pn.text;
+      expect(Tok::Colon, "':' after parameter name");
+      p.type = parseParamType();
+      p.span = {pn.span.lo, peek().span.lo};
+      out.push_back(std::move(p));
+    }
   }
 
   // --- Types -------------------------------------------------------------
@@ -184,7 +236,25 @@ class Parser {
 
   ExprPtr parseExpr() {
     if (at(Tok::Let)) return parseLetIn();
+    if (at(Tok::Fun)) return parseLambda();
     return parsePipe();
+  }
+
+  // Anonymous function: fun param+ -> body. Params are annotated exactly
+  // like top-level def params; the return type is synthesized from the
+  // body. The body extends maximally right, so a lambda used as an
+  // argument or pipe right-hand side must be parenthesized.
+  ExprPtr parseLambda() {
+    Span lo = advance().span;  // 'fun'
+    auto e = std::make_unique<Expr>(Expr::Kind::Lambda, lo);
+    parseParams(e->params);
+    if (e->params.empty())
+      fail(peek().span, "expected parameter after 'fun'");
+    expect(Tok::Arrow, "'->' after lambda parameters");
+    ExprPtr body = parseExpr();
+    e->span = {lo.lo, body->span.hi};
+    e->items.push_back(std::move(body));
+    return e;
   }
 
   // Local binding: let name : Type = expr in body. Annotated like every
@@ -217,9 +287,13 @@ class Parser {
     ExprPtr left = parseAdditive();
     while (at(Tok::PipeGt)) {
       advance();
+      if (at(Tok::Fun))
+        fail(peek().span,
+             "parenthesize a lambda on the right of |>: x |> (fun ...)");
       ExprPtr right = parseAdditive();
       Span span{left->span.lo, right->span.hi};
-      if (right->kind == Expr::Kind::Ident) {
+      if (right->kind == Expr::Kind::Ident ||
+          right->kind == Expr::Kind::Lambda) {
         auto app = std::make_unique<Expr>(Expr::Kind::App, span);
         app->items.push_back(std::move(right));
         app->items.push_back(std::move(left));
@@ -232,8 +306,8 @@ class Parser {
         left = std::move(right);
       } else {
         fail(right->span,
-             "the right-hand side of |> must be a function name or "
-             "application");
+             "the right-hand side of |> must be a function name, "
+             "application, or parenthesized lambda");
       }
     }
     return left;
@@ -346,13 +420,22 @@ class Parser {
         return e;
       }
       case Tok::UpIdent: {
-        // Qualified reference: Module.name
+        // Qualified reference: Module.name or Lib.File.name. All dotted
+        // UpIdent segments form the module path; the final lowercase
+        // identifier is the definition name (unambiguous: definitions
+        // are lowercase-initial).
         advance();
+        std::string qual = t.text;
         expect(Tok::Dot, "'.' after module name");
+        while (at(Tok::UpIdent)) {
+          const Token& seg = advance();
+          qual += "." + seg.text;
+          expect(Tok::Dot, "'.' after module name");
+        }
         const Token& n = expect(Tok::Ident, "identifier after '.'");
         auto e = std::make_unique<Expr>(Expr::Kind::Ident,
                                         Span{t.span.lo, n.span.hi});
-        e->moduleName = t.text;
+        e->moduleName = std::move(qual);
         e->name = n.text;
         return e;
       }

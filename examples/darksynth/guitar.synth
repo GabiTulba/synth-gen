@@ -2,6 +2,8 @@
    hard clipper. `chug` is the palm-muted eighth; `stab` the open,
    brighter accent note. *)
 
+open Core
+
 let dist freq:Scalar : Scalar Signal =
   saw freq + saw (freq * 1.012) + square (freq * 0.5) * 0.5
     |> lowpass ~cutoff:750.0

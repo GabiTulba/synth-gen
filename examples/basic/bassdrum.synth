@@ -4,6 +4,8 @@
    plus a short, dark noise layer riding only on the attack. soft_clip
    rounds the sum off gently. *)
 
+open Core
+
 let bass_drum : Scalar Signal =
   let env : Scalar Signal =
     adsr ~attack:25ms ~decay:60ms ~sustain:0.5 ~release:50ms ~hold:200ms in

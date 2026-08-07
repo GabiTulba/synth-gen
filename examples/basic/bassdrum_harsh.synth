@@ -6,6 +6,8 @@
    through the attack/decay side, dropping to 55 Hz for the
    sustain/release side), then hard_clip flat-tops the sum for grit. *)
 
+open Core
+
 let bass_drum_harsh : Scalar Signal =
   let env : Scalar Signal =
     adsr ~attack:25ms ~decay:60ms ~sustain:0.5 ~release:130ms ~hold:120ms in

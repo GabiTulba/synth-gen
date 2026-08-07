@@ -1,6 +1,8 @@
 (* Darksynth drum kit: a harder FM kick, a clipped noisy snare, and a
    tight hat, each as a placeable Sample. *)
 
+open Core
+
 let kick_hit : Scalar Sample =
   let drop : Scalar Signal = exp_decay 30.0 * 140.0 in
   let body : Scalar Signal = fm ~carrier:45.0 ~modulator:drop in

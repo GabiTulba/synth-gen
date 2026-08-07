@@ -59,8 +59,10 @@ TypePtr tVar(int id);
 bool typeEquals(const TypePtr& a, const TypePtr& b);
 std::string typeName(const TypePtr& t);
 
-// Unification of a primitive signature type (may contain Vars) against a
-// concrete user-side type. `subst` maps var id -> concrete type.
+// Unification of two types, either of which may contain Vars (primitive
+// signature variables, instantiated fresh per call site). `subst` maps
+// var id -> type; bindings are chased on both sides and an occurs check
+// keeps the substitution acyclic.
 using Subst = std::map<int, TypePtr>;
 bool unify(const TypePtr& sig, const TypePtr& concrete, Subst& subst);
 TypePtr applySubst(const TypePtr& t, const Subst& subst);

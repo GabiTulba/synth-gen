@@ -1,0 +1,19 @@
+(* preview.synth - library-system demo. The Basic library (examples/
+   basic) provides instrument voices: `import Basic` gives qualified
+   Basic.File.def access, `module` binds a shorter alias, and `open`
+   brings one file's definitions into scope directly (the kick below is
+   Basic.Kick.kick, unqualified). Requires `dep Basic` in .build; the
+   library is discovered from the examples/ root. *)
+
+open Core
+
+import Basic
+module P = Basic.Piano
+open Basic.Kick
+
+let _ =
+  mix_all [place_multi (sample (P.strike 261.63) 0s 900ms) [0s; 600ms];
+           place_multi (sample kick 0s 250ms)
+                       (time_steps ~start:0s ~step:300ms ~count:4.0)]
+  |> sample ~from:0s ~to:1200ms
+  |> render ~name:"library-preview" ~rate:48000.0 ;;

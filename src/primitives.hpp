@@ -54,4 +54,12 @@ const std::vector<PrimSig>& primitives();
 const PrimSig* findPrimitive(const std::string& name);
 const PrimSig* findPrimitiveById(PrimId id);
 
+// The Core namespace partition. Primitives live in the built-in `Core`
+// module - reachable via `open Core` or qualified `Core.name` - except
+// the list functions, which live in the `Core.List` submodule under
+// OCaml-style names: List.map, List.fold, List.init (= list_init),
+// List.repeat.
+const PrimSig* findCorePrim(const std::string& name);
+const PrimSig* findCoreListPrim(const std::string& name);
+
 }  // namespace synth

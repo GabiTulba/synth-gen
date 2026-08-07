@@ -1,6 +1,8 @@
 (* Piano for the song: the inharmonic additive voice from the basic
    examples, packaged as fixed-length note samples plus the melody line. *)
 
+open Core
+
 let partial ~freq:Scalar ~amp:Scalar ~decay:Scalar : Scalar Signal =
   sine freq * exp_decay decay * amp
 ;;

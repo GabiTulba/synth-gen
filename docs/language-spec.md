@@ -13,7 +13,7 @@ accepts and how it is typed and evaluated. The design document
   identifiers name bindings and parameters; uppercase-initial identifiers
   name modules and types. `_` is a valid binding name with special
   meaning (see §4).
-- **Keywords**: `let`, `import`.
+- **Keywords**: `let`, `in`, `fun`, `import`, `open`, `module`.
 - **Number literals**: `[0-9]+(\.[0-9]+)?` — always `Scalar`.
 - **Timestamp literals**: a number literal immediately followed by a unit
   suffix: `ns` (1e-9 s), `us` (1e-6 s), `ms` (1e-3 s), `s` (1 s),
@@ -30,8 +30,11 @@ EBNF; `{x}` is repetition, `[x]` is optionality.
 
 ```
 module      ::= { top-def }
-top-def     ::= import-def | let-def
-import-def  ::= "import" UpIdent [ ";;" ]
+top-def     ::= import-def | open-def | alias-def | let-def
+module-path ::= UpIdent { "." UpIdent }             (Lib or Lib.File)
+import-def  ::= "import" module-path [ ";;" ]
+open-def    ::= "open" module-path [ ";;" ]
+alias-def   ::= "module" UpIdent "=" module-path [ ";;" ]
 let-def     ::= "let" (Ident | "_") { param } [ ":" type ] "=" expr ";;"
 param       ::= [ "~" ] Ident ":" param-type      (~ marks a labeled param)
 
@@ -41,8 +44,9 @@ postfix-type::= atom-type { "Signal" | "Sample" | "list" }
 atom-type   ::= "Scalar" | "Vector" | "Timestamp" | "String" | "unit"
               | "(" type { "," type } ")"           (tuple if >1 element)
 
-expr        ::= let-in | pipe
+expr        ::= let-in | lambda | pipe
 let-in      ::= "let" Ident ":" type "=" expr "in" expr
+lambda      ::= "fun" param { param } "->" expr
 pipe        ::= additive { "|>" additive }          (lowest, left-assoc)
 additive    ::= multiplicative { ("+" | "-") multiplicative }
 multiplicative ::= unary { ("*" | "/") unary }
@@ -51,7 +55,7 @@ app         ::= atom { arg }                        (application, left)
 arg         ::= atom | "~" Ident ":" atom           (labeled argument)
 atom        ::= Number | Time | String
               | Ident                               (unqualified name)
-              | UpIdent "." Ident                   (qualified name)
+              | module-path "." Ident               (qualified name)
               | "(" expr { "," expr } ")"           (tuple if >1 element)
               | "[" [ expr { ";" expr } ] "]"       (list literal)
 ```
@@ -81,9 +85,16 @@ Notes:
     place_multi hit beats
   ;;
   ```
+- **Lambdas**: `fun x:Scalar ~y:Timestamp -> body` is an anonymous
+  function expression. Parameters are annotated exactly like `let`
+  parameters (function-typed ones parenthesized, `~` marks a label); the
+  return type is synthesized from the body. The body extends maximally to
+  the right, so a lambda used as an argument or on the right of `|>` must
+  be parenthesized: `map (fun t:Timestamp -> place hit t) beats`.
 - **Pipe**: `x |> f a b` desugars to the application `f a b x` — the
   piped value becomes the final positional argument. The right-hand side
-  must be a function name or application; chains are left-associative:
+  must be a function name, application, or parenthesized lambda; chains
+  are left-associative:
   `saw 220.0 |> lowpass ~cutoff:800.0 |> soft_clip 0.8`.
 
 ## 3. Type system
@@ -102,29 +113,59 @@ Rules:
   site. Users cannot write polymorphic definitions.
 - **Definition before use, no recursion.** A definition may reference
   only parameters, *earlier* definitions of its module, imported modules'
-  definitions (qualified), and primitives. Name resolution order for
-  unqualified names: local binding/parameter (innermost first) → earlier
-  module definition → primitive.
+  definitions (qualified), names brought in by an *earlier* `open`, and
+  Core primitives (see below). Name resolution order for unqualified
+  names: local binding/parameter (innermost first) → the latest earlier
+  top-level binder (an own definition or an `open`ed name —
+  position-ordered, so an `open` shadows earlier same-named binders and
+  a later definition shadows the open) → a Core primitive, but only
+  under an earlier `open Core` (or `open Core.List` for the list
+  functions). Re-defining one of the module's *own* names is still a
+  duplicate-definition error.
+- **The Core namespace.** All primitives live in the built-in `Core`
+  module — except the list functions, which live in its `Core.List`
+  submodule under OCaml-style names: `List.map`, `List.fold`,
+  `List.init` (= the doc's `list_init`), `List.repeat`. Files start
+  with `open Core`, which makes primitives callable bare and binds
+  `List` (so `List.map f xs` works); `open Core.List` additionally
+  makes the list functions bare. Qualified access (`Core.sine`,
+  `Core.List.map`) always works, with no open or import. `Core`
+  aliases like any module (`module C = Core` then `C.sine`,
+  `C.List.map`); the name `Core` is reserved — a user file or library
+  named Core is not reachable.
+- **Module references** (`import`/`open`/alias targets and qualified
+  names) resolve their first segment as: module alias bound earlier in
+  the file (later aliases override) → a file module of the current
+  context (the library's listed files, or the same directory for
+  standalone files — a local file wins over a library of the same
+  name) → a discovered library (which must be `dep`-declared). From
+  outside a library only `expose`d files are reachable; inside it, all
+  listed files are.
 - **Local bindings** type-check like top-level ones: the bound expression
   must match the annotation (a var-carrying partial application of a
   polymorphic primitive resolves against it), and the name is visible
   only in the body of the `in`.
-- **Labeled arguments & label-driven currying.** A parameter declared
+- **Labeled arguments & partial application.** A parameter declared
   `~name:Type` is *labeled*; primitive parameters are all labeled with
   their signature names. At a call site, positional arguments fill the
   leftmost unfilled parameters in order, and labeled arguments
   (`f ~x:v`) fill their parameter by name, in any order. If every
-  parameter is filled the call evaluates. If the remaining unfilled
-  parameters are all labeled, the call is a *partial application*: its
-  value is the curried function of the remaining parameters
-  (`lowpass ~cutoff:800.0 : 'a Signal -> 'a Signal`). Unfilled
-  *positional* parameters are an error — positional application remains
-  all-or-nothing. Labels are not part of type equality.
-- **Application otherwise.** A function *name* (user or primitive) may
-  be passed unapplied wherever a matching function type is expected
-  (`map place_pluck [...]`, `map sine [...]`); lambdas do not exist in
-  v1. A stored partial application of a *polymorphic* primitive gets its
-  type variables resolved against the binding's annotation
+  parameter is filled the call evaluates. Otherwise the call is a
+  *partial application*: its value is the curried function of the
+  remaining parameters, in declaration order, keeping their labels
+  (`lowpass ~cutoff:800.0 : 'a Signal -> 'a Signal`,
+  `place hit : at:Timestamp -> Scalar Signal`). Any subset may be left
+  unfilled — a positional prefix, a labeled subset, or a mix. Labels are
+  not part of type equality.
+- **Application otherwise.** Any expression of function type may be
+  applied or passed where a matching function type is expected: a bare
+  name (`map place_pluck [...]`, `map sine [...]`), a partial
+  application (`map (place hit) beats`, `(f 1.0) 2.0`), a
+  function-typed parameter, or a lambda. Primitive signatures'
+  type variables are instantiated fresh at every call site, so partial
+  applications of polymorphic primitives can flow directly into other
+  polymorphic calls (`map (lowpass ~cutoff:600.0) sigs`); a *stored*
+  one also resolves against the binding's annotation
   (`let damp : Scalar Signal -> Scalar Signal = lowpass ~cutoff:600.0`).
 - **`let _` is the effect form.** Its body must have type `unit`, and
   the render primitives (`render`, `render_vis`) are the only sources of
@@ -151,18 +192,48 @@ mismatches between Vector Signals are detected when the signal graph is
 built — before any audio is computed — and signals are capped at 16
 channels in v1.
 
-## 4. Modules & projects
+## 4. Modules, libraries & projects
 
 - **File = module.** `foo.synth` defines module `Foo` (stem, first
   letter capitalized). All top-level definitions are visible to
-  importers; access is qualified (`Foo.bar`).
-- **`import A`** resolves `a.synth` (module name lowercased) in the same
-  directory. Unresolved imports and import cycles are build errors.
+  importers; access is qualified (`Foo.bar`). A library member's
+  canonical module id is `Lib.Foo`.
+- **`import A`** resolves the module `A` in the current context: a
+  library's listed sibling file, or (standalone) `a.synth` in the same
+  directory, or a discovered library. `import Lib` makes all of `Lib`'s
+  exposed files reachable as `Lib.File.def`; `import Lib.File` imports
+  one exposed file. Unresolved imports and import cycles are build
+  errors.
+- **`open`** brings names into scope, shadowing by position (see §3):
+  `open Lib` injects the library's exposed *file modules* (so
+  `File.def` works unqualified at the file level); `open File` /
+  `open Lib.File` injects that file's *definitions* directly. An `open`
+  implies the corresponding import.
+- **`module K = Path`** binds (or overrides) a module name: the target
+  may be a file module by any spelling in scope, an earlier alias, or a
+  whole library (`module B = Basic` then `B.Keys.def`).
+- **Library**: a directory whose `.build` declares `library <Name>` plus
+  its files — `expose <file>` for the public surface (at least one),
+  `source <file>` for internal modules, and `dep <Name>` for library
+  dependencies. Internal files are importable within the library only.
+  Libraries may declare render targets; building the library renders
+  them into its own `build/` directory, and consumers' builds do NOT
+  re-render a dependency's targets.
 - **Project**: a directory with a `.build` manifest — line-based,
-  `project <name>` once plus one `source <file>` per source file; `#`
-  starts a comment.
+  `project <name>` once plus one `source <file>` per source file (plus
+  optional `dep <Name>` lines); `#` starts a comment.
+- **Root**: a `.build` with `project <name>` and one `build <path>` rule
+  per buildable unit (a project/library directory or a single `.synth`
+  file). Libraries are discovered dynamically by recursively scanning
+  the tree under the root (skipping `build/` output and hidden
+  directories); `dep` names resolve against that discovered set,
+  wherever the library lives in the tree. Duplicate library names,
+  unknown deps and library dependency cycles are build errors. Building
+  a `dep`-carrying directory on its own finds its enclosing root
+  automatically; `synthc build`/`watch` at the root builds/watches every
+  rule, each with its own `build/` output directory.
 - **Render targets**: every `render` call evaluated at build time
-  declares one. Names must be unique project-wide. Artifacts land in
+  declares one. Names must be unique per build unit. Artifacts land in
   `build/artifacts/<name>.wav`; the machine-readable index in
   `build/metadata.json`.
 
@@ -185,6 +256,10 @@ channels in v1.
 - Renders are deterministic; incremental rebuilds and caching rely on it.
 
 ## 6. Primitive signatures (v1 roster)
+
+Everything below lives in the built-in `Core` module (`open Core` for
+bare names, or `Core.sine`), except the four `Core.List` functions
+listed with their `List.` names.
 
 ```
 (* generators *)
@@ -223,7 +298,7 @@ val channels  : chans:Scalar Signal list -> Vector Signal
 (* slicing & arrangement *)
 val sample    : signal:'a Signal -> from:Timestamp -> to:Timestamp -> 'a Sample
 val place     : sample:'a Sample -> at:Timestamp -> 'a Signal
-val place_multi : sample:'a Sample -> ats:Timestamp list -> 'a Signal  (* mix of placements *)
+val place_multi : sample:'a Sample -> ats:Timestamp list -> 'a Signal  (* mix of placements; overlaps sum *)
 
 (* the effects *)
 val render    : name:String -> rate:Scalar -> sample:'a Sample -> unit
@@ -239,11 +314,13 @@ val render_vis_stems : name:String -> rate:Scalar
 val load_mono : path:String -> Scalar Signal
 val load_multi: path:String -> Vector Signal
 
-(* list combinators & builders *)
-val map       : f:('a -> 'b) -> xs:'a list -> 'b list
-val fold      : f:('a -> 'b -> 'a) -> init:'a -> xs:'b list -> 'a
-val list_init : n:Scalar -> f:(Scalar -> 'a) -> 'a list   (* [f 0.0; ...; f (n-1)] *)
-val repeat    : n:Scalar -> x:'a -> 'a list
+(* Core.List: list combinators & builders *)
+val List.map    : f:('a -> 'b) -> xs:'a list -> 'b list
+val List.fold   : f:('a -> 'b -> 'a) -> init:'a -> xs:'b list -> 'a
+val List.init   : n:Scalar -> f:(Scalar -> 'a) -> 'a list   (* [f 0.0; ...; f (n-1)] *)
+val List.repeat : n:Scalar -> x:'a -> 'a list
+
+(* timestamp-list utilities (Core proper) *)
 val time_steps: start:Timestamp -> step:Timestamp -> count:Scalar -> Timestamp list
 val jitter    : seed:Scalar -> spread:Timestamp -> steps:(Timestamp list) -> Timestamp list
 ```
@@ -269,12 +346,19 @@ Semantics details for the doc's open points (also in the README):
 `am` computes `carrier * (1 + depth*modulator)` with a mono modulator
 broadcast across carrier channels; `delay` is feedforward only; `reverb`
 is a per-channel Schroeder bank (RT60-style `decay`, `damping`/`mix` in
-[0,1]); `noise` is deterministic cascaded FM.
+[0,1]); `noise` is deterministic cascaded FM. `place_multi` sums its
+placements without normalization, so overlapping or dense patterns can
+exceed full scale — rendering works in doubles and only hard-clamps to
+[-1, 1] at WAV write; scale down or use `soft_clip`/`hard_clip` to
+manage headroom deliberately.
 
 ## 7. Out of scope in v1
 
 Booleans and control flow, pattern matching, user-defined types,
-recursion and feedback (IIR-style signal cycles), lambdas and partial
-application, user polymorphism, visibility control/interface files,
-cross-directory imports and packaging, cache tuning knobs, native
-extensions. See design doc §13.
+recursion and feedback (IIR-style signal cycles), user polymorphism,
+`.mli`-style interface files (visibility control exists only at file
+granularity, via a library's `expose` list), cache tuning knobs, native
+extensions. See design doc §13. (Lambdas, general partial application,
+and cross-directory imports/packaging — via libraries, `open` and
+module aliases — were listed here originally and are now in the
+language; see §2, §3 and §4.)

@@ -51,7 +51,9 @@ build/synthc build examples/basic -v
 build/synth-dev examples/pluck
 ```
 
-### The `.build` manifest (v1)
+### The `.build` manifest
+
+A standalone project (exactly as before):
 
 ```
 # comment
@@ -59,6 +61,37 @@ project pluck-demo
 source pluck.synth
 source other.synth
 ```
+
+A **library** — a reusable, importable unit. `expose` marks the public
+files (internal `source` files are importable only within the library);
+`dep` names other libraries it uses:
+
+```
+library Basic
+expose keys.synth
+source internal.synth
+dep Fx
+```
+
+A **project root** — the orchestrator. `build` rules name the units to
+build (directories with a `.build`, or single `.synth` files); libraries
+are discovered dynamically by scanning the tree under the root, so `dep`
+names resolve wherever the library lives:
+
+```
+project my-album
+build lib/basic
+build tunes
+build sketches/idea.synth
+```
+
+`synthc build`/`synthc watch` at the root builds/watches every rule
+(each keeps its own `build/` output dir); in a subdirectory they build
+just that unit, resolving `dep`s through the enclosing root. In code,
+`import Basic` + `Basic.Keys.strike`, `open Basic.Keys` + bare
+`strike`, and `module K = Basic.Keys` + `K.strike` all reach a
+library's exposed modules. A dependency's own render targets are not
+re-rendered into the consumer's build.
 
 ### Build outputs
 
@@ -71,6 +104,8 @@ too, with diagnostics included.
 
 ```ocaml
 (* pluck.synth *)
+open Core
+
 let pluck freq:Scalar : Scalar Signal =
   (sine freq) * (exp_decay 6.0)
 ;;
@@ -84,22 +119,34 @@ let place_pluck at:Timestamp : Scalar Signal =
 ;;
 
 let song : Scalar Signal =
-  mix_all (map place_pluck [0s; 500ms; 1s; 1500ms])
+  mix_all (List.map place_pluck [0s; 500ms; 1s; 1500ms])
 ;;
 
 let _ = render "demo" 48000.0 (sample song 0s 2s)
 ;;
 ```
 
+All primitives live in the built-in **`Core`** module — files start
+with `open Core` (bare `sine`, `render`, ...), or use qualified
+`Core.sine`; the list functions form the `Core.List` submodule
+(`List.map`, `List.fold`, `List.init`, `List.repeat`; `open Core.List`
+makes them bare). `Core` aliases like any module (`module C = Core`).
+
 Fully annotated, no inference, no Booleans/branching/recursion in v1.
 `render` is the language's only effect. Files are modules (`import A`
-resolves `a.synth` in the same directory).
+resolves `a.synth` in the same directory, or a sibling listed by the
+enclosing library); libraries add `import Lib` / `import Lib.File`
+(qualified `Lib.File.def` access), `open Lib` / `open Lib.File`
+(unqualified access, position-ordered shadowing), and module aliases
+(`module K = Basic.Keys`). See `examples/song/preview.synth`.
 
-Three ergonomic features on top of the doc's core: **labeled arguments**
-with label-driven currying, the **pipe operator**, and **local
+Ergonomic features on top of the doc's core: **labeled arguments**,
+**partial application**, **lambdas**, the **pipe operator**, and **local
 `let ... in` bindings**:
 
 ```ocaml
+open Core
+
 let voice ~amp:Scalar ~freq:Scalar : Scalar Signal = (sine freq) * amp ;;
 let quiet : Scalar -> Scalar Signal = voice ~amp:0.25 ;;   (* curried *)
 
@@ -109,16 +156,25 @@ let warm : Scalar Signal =
 let pattern : Scalar Signal =
   let hit : Scalar Sample = warm |> sample ~from:0s ~to:100ms in
   let beats : Timestamp list = time_steps ~start:0s ~step:200ms ~count:5.0 in
-  place_multi hit beats ;;
+  mix_all (List.map (place hit) beats) ;;   (* or: place_multi hit beats *)
+
+let echoes : Scalar Signal =
+  let hit : Scalar Sample = warm |> sample ~from:0s ~to:100ms in
+  mix_all (List.map (fun t:Timestamp -> place hit t) [0s; 250ms; 500ms]) ;;
 
 let _ = sample pattern ~from:0s ~to:2s |> render ~name:"warm" ~rate:48000.0 ;;
 ```
 
-Labeled arguments go in any order; providing a subset curries the
-function. Primitive parameters are all labeled with their signature
-names, so any primitive can be called by label or partially applied.
-`x |> f a` desugars to `f a x` (the piped value becomes the final
-positional argument).
+Labeled arguments go in any order; providing any subset of a function's
+arguments — labeled, a positional prefix, or a mix — curries it over the
+remaining parameters. Primitive parameters are all labeled with their
+signature names, so any primitive can be called by label or partially
+applied, and any function-typed expression can be applied
+(`(f 1.0) 2.0`) or passed along. Lambdas (`fun x:Scalar -> ...`)
+annotate their parameters like every other binding, capture enclosing
+locals, and must be parenthesized when used as an argument or pipe
+right-hand side. `x |> f a` desugars to `f a x` (the piped value becomes
+the final positional argument).
 
 ## Repository layout
 
@@ -129,15 +185,17 @@ positional argument).
 | `src/signal.*` | Signal engine: lazy signal DAG, render-time discretization, sample/place windowing, filters, mixing |
 | `src/eval.*` | Evaluator: reduces definitions to values, collects render targets, `load_*` build-time validation |
 | `src/wav.*` | WAV read (PCM 16/24/32, float 32/64) and write (PCM 16) |
-| `src/build.*` | `.build` manifest, project validation, target enumeration, cached + parallel rendering, artifact + metadata emission, lint mode, watch loop |
+| `src/build.*` | `.build` manifest (projects, libraries, roots), project validation, target enumeration, cached + parallel rendering, artifact + metadata emission, lint mode, watch loops (project + root daemon) |
+| `src/library.*` | Library registry: dynamic discovery of `library` manifests under a root, dep validation, enclosing-root search |
 | `src/incremental.*` | Dependency tracking: Merkle content hashes over definition closures for the build cache |
 | `src/main.cpp` | `synthc` CLI (`build`, `watch`, `lint`) |
 | `src/devapp/` | `synth-dev`: JSON/metadata reader, SDL audio player, ImGui shell with live refresh and `--self-test` |
 | `tests/` | Unit + end-to-end tests (assert-based, run via CTest) |
 | `examples/pluck/` | The design doc's §3.4 example as a buildable project |
 | `examples/primitives/` | One short, audible render target per library primitive |
-| `examples/basic/` | Basic instrument samples: snare, kick, guitar pluck, piano note |
-| `examples/song/` | A full 16-bar stereo song across five modules — drums, synth pad, piano, guitar, and the arrangement that imports them (`outputs/song/song.wav`) |
+| `examples/basic/` | Basic instrument samples packaged as the `Basic` **library**: snare, kick, guitar pluck, piano note |
+| `examples/song/` | A full 16-bar stereo song across five modules — drums, synth pad, piano, guitar, and the arrangement that imports them (`outputs/song/song.wav`) — plus `preview.synth`, the library-system demo (`dep Basic`, `import`/`open`/`module`) |
+| `examples/.build` | The examples **root**: one `build` rule per example; `synthc build examples` builds them all |
 | `examples/advanced/` | Advanced effect demos: the rapid stereo Doppler fly-by built on FM modulation (`outputs/advanced/`) |
 | `examples/darksynth/` | A ~91 s darksynth track with two drops across six modules — drums, electric bass, dark pads, distorted guitar, riser/impact FX, and the arrangement (`outputs/darksynth/`) |
 | `outputs/` | Committed renders of the showcase projects (`outputs/primitives/`, `outputs/basic/`) — `.wav` to listen to and `render_vis` waveform `.svg`s to look at, without building anything; refresh with `scripts/render-outputs.sh` |
@@ -266,9 +324,10 @@ follows (all easy to revisit):
   sustain:Scalar release:Timestamp hold:Timestamp : Scalar Signal`.
   Durations are Timestamps, the sustain level is a Scalar, and `hold` is
   the gate length: the envelope sustains until `hold`, then releases.
-- **Higher-order arguments are named functions only** — no lambdas in v1,
-  as the doc leans. Any user function whose signature matches may be
-  passed (e.g. to `map`/`fold`).
+- **Higher-order arguments** may be any function-typed expression: a
+  named user function or primitive, a partial application, or a lambda
+  (`List.map (fun t:Timestamp -> place hit t) beats`). Lambdas capture
+  enclosing locals by value.
 - **Vector channel-count mismatches** are a build error, raised at graph
   construction time (before any audio is computed). Channel counts are
   static once audio files are read, so this never happens mid-render.
@@ -312,10 +371,10 @@ follows (all easy to revisit):
   inside the primitive's per-render state — the *language-level* signal
   graph stays acyclic, exactly like the stateful one-pole filters.
   Parameters are validated at graph construction.
-- **List builders** — `list_init n:Scalar f:(Scalar -> 'a) : 'a list`
+- **List builders** (`Core.List`) — `List.init n:Scalar f:(Scalar -> 'a) : 'a list`
   builds `[f 0.0; f 1.0; ...; f (n-1)]` (additive stacks, generated
-  patterns); `repeat n:Scalar x:'a : 'a list` builds n copies (not
-  expressible via `list_init` without lambdas); `time_steps
+  patterns); `List.repeat n:Scalar x:'a : 'a list` builds n copies (a
+  convenience for `List.init n (fun i:Scalar -> x)`); `time_steps
   start:Timestamp step:Timestamp count:Scalar : Timestamp list` builds
   arithmetic timestamp sequences — the natural feed for `place_multi`
   (`place_multi kick (time_steps ~start:0s ~step:500ms ~count:8.0)`);
@@ -325,10 +384,14 @@ follows (all easy to revisit):
   validated at build time to be whole and non-negative.
 - **`place_multi sample:'a Sample ats:Timestamp list : 'a Signal`** —
   places one sample at every timestamp in the list and mixes the
-  placements (overlaps sum): `place_multi kick [0s; 500ms; 1s]`. This is
-  the pattern/rhythm workhorse `mix_all (map (place s) ats)` would be —
-  which v1 cannot write directly, since partial application doesn't
-  exist. Each placement replays the sample from its own state, so
+  placements (overlaps sum): `place_multi kick [0s; 500ms; 1s]`. The
+  summing is unnormalized, so overlapping or dense patterns can exceed
+  full scale — rendering works in doubles and only hard-clamps to
+  [-1, 1] at WAV write, so manage headroom deliberately by scaling down
+  or with `soft_clip`/`hard_clip`. This is
+  the pattern/rhythm workhorse: equivalent to
+  `mix_all (List.map (place s) ats)` (byte-identical artifacts), kept as a
+  primitive for ergonomics. Each placement replays the sample from its own state, so
   stateful content (filters, `fm`, `reverb`) sounds identical at every
   timestamp — a guarantee `place` itself now also provides when the same
   sample value is placed repeatedly.

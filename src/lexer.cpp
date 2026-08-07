@@ -27,7 +27,10 @@ const char* tokenName(Tok t) {
   switch (t) {
     case Tok::Let: return "'let'";
     case Tok::In: return "'in'";
+    case Tok::Fun: return "'fun'";
     case Tok::Import: return "'import'";
+    case Tok::Open: return "'open'";
+    case Tok::Module: return "'module'";
     case Tok::Ident: return "identifier";
     case Tok::UpIdent: return "capitalized identifier";
     case Tok::Number: return "number";
@@ -100,8 +103,14 @@ std::vector<Token> lex(const std::string& src, const std::string& file,
         push(Tok::Let, lo, i);
       else if (word == "in")
         push(Tok::In, lo, i);
+      else if (word == "fun")
+        push(Tok::Fun, lo, i);
       else if (word == "import")
         push(Tok::Import, lo, i);
+      else if (word == "open")
+        push(Tok::Open, lo, i);
+      else if (word == "module")
+        push(Tok::Module, lo, i);
       else if (std::isupper((unsigned char)word[0]))
         push(Tok::UpIdent, lo, i, word);
       else

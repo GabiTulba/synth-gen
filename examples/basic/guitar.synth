@@ -1,6 +1,8 @@
 (* Guitar pluck (G3): additive harmonics where higher partials both start
    quieter and die faster, plus a tiny noise transient for the pick. *)
 
+open Core
+
 let harm ~freq:Scalar ~amp:Scalar ~decay:Scalar : Scalar Signal =
   sine freq * exp_decay decay * amp
 ;;

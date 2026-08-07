@@ -76,15 +76,12 @@ let alarm_hit : Scalar Sample =
 let dop_shape : Scalar Signal =
   pm ~carrier:0.42 ~modulator:(exp_decay 0.0 * 1.5707963) ;;
 
-let dop_partial ~base:Scalar ~i:Scalar : Scalar Signal =
-  let n : Scalar = i + 1.0 in
-  (fm ~carrier:(base * n) ~modulator:(dop_shape * (base * n * 0.1)))
-    * (1.0 / n)
-;;
-
 let doppler_whoosh : Vector Sample =
   let raw : Scalar Signal =
-    mix_all (list_init ~n:6.0 ~f:(dop_partial ~base:110.0)) * 0.5 in
+    mix_all (list_init ~n:6.0 ~f:(fun i:Scalar ->
+      let n : Scalar = i + 1.0 in
+      (fm ~carrier:(110.0 * n) ~modulator:(dop_shape * (110.0 * n * 0.1)))
+        * (1.0 / n))) * 0.5 in
   let engine : Scalar Signal =
     raw |> am ~modulator:(sine 27.0) ~depth:0.55
         |> soft_clip ~threshold:0.55 in

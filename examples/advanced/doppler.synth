@@ -16,17 +16,13 @@ let shape : Scalar Signal =
   pm ~carrier:0.25 ~modulator:(exp_decay 0.0 * 1.5707963) ;;
 
 (* A saw as a stack of six Doppler-swept FM partials: harmonic n at
-   base*n with amplitude 1/n. list_init drives the stack; currying ~base
-   turns the two-argument builder into the Scalar -> Scalar Signal
-   generator it needs. *)
-let partial ~base:Scalar ~i:Scalar : Scalar Signal =
-  let n : Scalar = i + 1.0 in
-  (fm ~carrier:(base * n) ~modulator:(shape * (base * n * 0.08)))
-    * (1.0 / n)
-;;
-
+   base*n with amplitude 1/n. list_init drives the stack; the lambda
+   captures `base`, so one inline generator serves any root. *)
 let swept_saw base:Scalar : Scalar Signal =
-  mix_all (list_init ~n:6.0 ~f:(partial ~base:base)) * 0.4
+  mix_all (list_init ~n:6.0 ~f:(fun i:Scalar ->
+    let n : Scalar = i + 1.0 in
+    (fm ~carrier:(base * n) ~modulator:(shape * (base * n * 0.08)))
+      * (1.0 / n))) * 0.4
 ;;
 
 let source : Scalar Signal =

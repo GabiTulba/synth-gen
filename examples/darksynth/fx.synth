@@ -3,6 +3,9 @@
 
 open Core
 
+import Effects
+module Dop = Effects.Doppler
+
 let riser : Scalar Sample =
   let ramp : Scalar Signal =
     adsr ~attack:3800ms ~decay:1ms ~sustain:1.0 ~release:200ms
@@ -70,27 +73,18 @@ let alarm_hit : Scalar Sample =
     |> sample ~from:0s ~to:180ms
 ;;
 
-(* An engine-like stereo Doppler pass (the examples/advanced technique,
-   roughened): 1.2 s, six FM partials on a low 110 Hz base swept +/-10%
-   by a cosine half-period, with a 27 Hz AM growl and a soft clipper for
-   the motor rasp; sin^2 proximity swell and pan gains crossing left to
-   right. *)
-let dop_shape : Scalar Signal =
-  pm ~carrier:0.42 ~modulator:(exp_decay 0.0 * 1.5707963) ;;
-
+(* An engine-like stereo Doppler pass (the shared Effects.Doppler
+   technique, roughened): 1.2 s, six FM partials on a low 110 Hz base
+   swept +/-10% by a cosine half-period at 0.42 Hz, with a 27 Hz AM
+   growl and a soft clipper for the motor rasp; sin^2 proximity swell
+   and pan gains crossing left to right. *)
 let doppler_whoosh : Vector Sample =
   let raw : Scalar Signal =
-    mix_all (List.init ~n:6.0 ~f:(fun i:Scalar ->
-      let n : Scalar = i + 1.0 in
-      (fm ~carrier:(110.0 * n) ~modulator:(dop_shape * (110.0 * n * 0.1)))
-        * (1.0 / n))) * 0.5 in
+    Dop.swept_saw ~base:110.0 ~rate:0.42 ~depth:0.1 ~gain:0.5 in
   let engine : Scalar Signal =
     raw |> am ~modulator:(sine 27.0) ~depth:0.55
         |> soft_clip ~threshold:0.55 in
-  let prox : Scalar Signal =
-    (exp_decay 0.0 - dop_shape * dop_shape) * 0.85 + 0.15 in
-  let src : Scalar Signal = engine * prox in
-  channels [src * ((dop_shape + 1.0) * 0.5);
-            src * ((1.0 - dop_shape) * 0.5)]
+  let src : Scalar Signal = engine * Dop.proximity 0.42 in
+  Dop.pan src 0.42
     |> sample ~from:0s ~to:1200ms
 ;;

@@ -46,17 +46,18 @@ LibraryRegistry discoverLibraries(const std::string& rootDir,
   LibraryRegistry reg;
   std::map<std::string, std::string> dirByName;  // for collision messages
 
-  // Depth-first scan; skip output dirs ("build") and hidden entries.
+  // Depth-first scan; skip output dirs ("_build", plus legacy/cmake
+  // "build") and hidden entries.
   std::function<void(const fs::path&)> scan = [&](const fs::path& dir) {
     std::error_code ec;
-    fs::path manifestPath = dir / ".build";
+    fs::path manifestPath = dir / kManifestFileName;
     if (fs::exists(manifestPath, ec)) {
       std::string text;
       if (readFileText(manifestPath, text)) {
         Manifest m;
         DiagnosticBag local;
         bool ok = parseManifest(text, manifestPath.string(), m, local);
-        if (m.isLibrary() || text.find("library ") != std::string::npos) {
+        if (m.isLibrary() || text.find("\"library\"") != std::string::npos) {
           if (!ok) {
             // A broken library manifest breaks name resolution for
             // everyone; surface its diagnostics now.
@@ -87,7 +88,7 @@ LibraryRegistry discoverLibraries(const std::string& rootDir,
              dir, fs::directory_options::skip_permission_denied, ec)) {
       if (!entry.is_directory(ec)) continue;
       std::string name = entry.path().filename().string();
-      if (name == "build" || isHiddenName(name)) continue;
+      if (name == "_build" || name == "build" || isHiddenName(name)) continue;
       scan(entry.path());
     }
   };
@@ -124,7 +125,7 @@ std::string findEnclosingRoot(const std::string& dir) {
   fs::path p = fs::absolute(fs::path(dir), ec);
   if (ec) p = fs::path(dir);
   for (; !p.empty(); p = p.parent_path()) {
-    fs::path manifestPath = p / ".build";
+    fs::path manifestPath = p / kManifestFileName;
     if (fs::exists(manifestPath, ec)) {
       std::string text;
       if (readFileText(manifestPath, text)) {

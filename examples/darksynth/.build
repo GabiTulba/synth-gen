@@ -1,8 +1,0 @@
-# Darksynth: ~91 s, two drops, five instrument modules + arrangement.
-project darksynth
-source song.synth
-source drums.synth
-source bass.synth
-source pads.synth
-source guitar.synth
-source fx.synth

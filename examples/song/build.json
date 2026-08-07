@@ -1,0 +1,13 @@
+{
+  "project": "stereo-song",
+  "description": "Full stereo song: arrangement in song.synth, instruments in their own modules. preview.synth demonstrates the library system against the Basic library (discovered from the examples/ root).",
+  "dependencies": ["Basic", "Voices"],
+  "sources": [
+    "song.synth",
+    "drums.synth",
+    "pad.synth",
+    "keys.synth",
+    "strings.synth",
+    "preview.synth"
+  ]
+}

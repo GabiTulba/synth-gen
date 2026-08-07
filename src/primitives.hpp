@@ -40,6 +40,15 @@ enum class PrimId {
   Repeat,
   TimeSteps,
   Jitter,
+  Constant,
+  ConstantMulti,
+  Time,
+  SignalFn,
+  SignalFnMulti,
+  Exp,
+  Sqrt,
+  Log,
+  Pow,
 };
 
 struct PrimSig {

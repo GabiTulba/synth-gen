@@ -1,9 +1,11 @@
 // synth-dev — the SynthGraph dev app (design doc §9, §10).
 //
-// A pure consumer of build outputs: it reads <project>/build/metadata.json,
-// lists render targets with their basic facts, plays artifacts, and
-// live-refreshes when the metadata changes (i.e. whenever the daemon or a
-// one-shot build rewrites it). It never talks to compiler internals.
+// A pure consumer of build outputs: it reads the project's metadata.json
+// from <root>/_build/<project>/ (where <root> is the enclosing project
+// root, or the project dir itself when standalone), lists render targets
+// with their basic facts, plays artifacts, and live-refreshes when the
+// metadata changes (i.e. whenever the daemon or a one-shot build rewrites
+// it). Beyond root resolution it never talks to compiler internals.
 
 #include <SDL.h>
 
@@ -14,6 +16,7 @@
 #include "imgui.h"
 #include "imgui_impl_sdl2.h"
 #include "imgui_impl_sdlrenderer2.h"
+#include "library.hpp"
 #include "metadata.hpp"
 #include "player.hpp"
 
@@ -24,6 +27,7 @@ namespace {
 
 struct AppState {
   std::string projectDir;
+  std::string rootDir;  // enclosing root; artifact paths are relative to it
   std::string metadataPath;
   MetadataLoadResult loaded;
   FileStamp stamp;
@@ -98,7 +102,7 @@ void drawTargets(AppState& app) {
 
     ImGui::TableNextColumn();
     std::string artifactPath =
-        (fs::path(app.projectDir) / t.artifact).string();
+        (fs::path(app.rootDir) / t.artifact).string();
     bool isPlaying =
         app.player.playing() && app.player.currentPath() == artifactPath;
     if (t.kind == "visual") {
@@ -214,8 +218,19 @@ int main(int argc, char** argv) {
 
   AppState app;
   app.projectDir = projectDir;
+  // Outputs live under the enclosing root's _build/, mirroring the source
+  // tree; a project with no enclosing root is its own root.
+  std::string root = synth::findEnclosingRoot(projectDir);
+  fs::path base = root.empty() ? fs::path(projectDir) : fs::path(root);
+  fs::path rel;
+  if (!root.empty()) {
+    std::error_code ec;
+    rel = fs::relative(fs::absolute(projectDir), base, ec).lexically_normal();
+    if (ec || rel == ".") rel = "";
+  }
+  app.rootDir = base.string();
   app.metadataPath =
-      (fs::path(projectDir) / "build" / "metadata.json").string();
+      (base / "_build" / rel / "metadata.json").lexically_normal().string();
 
   bool done = false;
   int frames = 0;

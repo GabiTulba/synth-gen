@@ -41,7 +41,7 @@ struct MetadataLoadResult {
   ProjectMeta meta;
 };
 
-// Reads and parses a build/metadata.json file.
+// Reads and parses a build metadata.json file (under the root's _build/).
 MetadataLoadResult loadProjectMetadata(const std::string& path);
 
 // Change detection for live refresh (§9): the v1 mechanism is watching the

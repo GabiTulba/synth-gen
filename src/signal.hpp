@@ -158,7 +158,8 @@ struct SigNode : std::enable_shared_from_this<SigNode> {
 enum class OscKind { Sine, Saw, Square };
 enum class FilterKind { Lowpass, Highpass };
 enum class ClipKind { Hard, Soft };
-enum class SigBinOp { Add, Sub, Mul, Div };
+enum class SigBinOp { Add, Sub, Mul, Div, Pow };
+enum class SigUnaryOp { Exp, Sqrt, Log };
 
 SigPtr makeOsc(OscKind kind, double freq);
 // Deterministic pseudo-noise: two cascaded FM stages with golden-ratio
@@ -183,11 +184,15 @@ SigPtr makeExpDecay(double rate);
 SigPtr makeAdsr(double attack, double decay, double sustain, double release,
                 double hold);
 SigPtr makeConst(double value);  // broadcast scalar
+SigPtr makeTime();               // t in seconds (broadcast ramp)
 SigPtr makeFilter(FilterKind kind, double cutoff, SigPtr input);
 // Distortion: hard clamps flat at +/-threshold; soft saturates smoothly as
 // threshold*tanh(x/threshold). threshold must be positive.
 SigPtr makeClip(ClipKind kind, double threshold, SigPtr input);
 SigPtr makeBinOp(SigBinOp op, SigPtr l, SigPtr r);
+// Elementwise transcendental (IEEE domain semantics: log of a
+// non-positive input or sqrt of a negative one yield -inf/NaN samples).
+SigPtr makeUnaryOp(SigUnaryOp op, SigPtr x);
 SigPtr makeMix(std::vector<SigPtr> items);
 SigPtr makeChannels(std::vector<SigPtr> monoItems);
 // A placed sample: silence outside [at, at + (to-from)), the source

@@ -1,0 +1,29 @@
+(* Parametric drum voices shared by the example kits: an FM kick whose
+   pitch falls fast under a decaying envelope plus a noise click, a
+   noise-rattle snare over a short tonal body, and a highpassed noise
+   hat. Output gain, clipping, and sample windows stay at the call
+   site - that's where the kits genuinely differ. *)
+
+open Core
+
+let kick ~carrier:Scalar ~drop_rate:Scalar ~drop_depth:Scalar
+         ~body_decay:Scalar ~click_freq:Scalar ~click_decay:Scalar
+         ~click_amp:Scalar : Scalar Signal =
+  let drop : Scalar Signal = exp_decay drop_rate * drop_depth in
+  let body : Scalar Signal = fm ~carrier:carrier ~modulator:drop in
+  let click : Scalar Signal =
+    noise click_freq * exp_decay click_decay * click_amp in
+  body * exp_decay body_decay + click
+;;
+
+let snare ~tone:Scalar ~tone_decay:Scalar ~tone_amp:Scalar
+          ~noise_freq:Scalar ~noise_decay:Scalar : Scalar Signal =
+  let body : Scalar Signal = sine tone * exp_decay tone_decay * tone_amp in
+  let rattle : Scalar Signal = noise noise_freq * exp_decay noise_decay in
+  rattle + body
+;;
+
+let hat ~noise_freq:Scalar ~cutoff:Scalar ~decay:Scalar ~amp:Scalar
+    : Scalar Signal =
+  (noise noise_freq |> highpass ~cutoff:cutoff) * exp_decay decay * amp
+;;

@@ -1,24 +1,27 @@
 (* Darksynth drum kit: a harder FM kick, a clipped noisy snare, and a
-   tight hat, each as a placeable Sample. *)
+   tight hat, each as a placeable Sample. Harder presets of the shared
+   Voices cores - the clipping and windows are what set this kit apart. *)
 
 open Core
 
+import Voices
+module D = Voices.Drums
+
 let kick_hit : Scalar Sample =
-  let drop : Scalar Signal = exp_decay 30.0 * 140.0 in
-  let body : Scalar Signal = fm ~carrier:45.0 ~modulator:drop in
-  let click : Scalar Signal = noise 5000.0 * exp_decay 110.0 * 0.35 in
-  body * exp_decay 6.5 + click |> soft_clip ~threshold:0.75
+  D.kick ~carrier:45.0 ~drop_rate:30.0 ~drop_depth:140.0 ~body_decay:6.5
+         ~click_freq:5000.0 ~click_decay:110.0 ~click_amp:0.35
+    |> soft_clip ~threshold:0.75
     |> sample ~from:0s ~to:350ms
 ;;
 
 let snare_hit : Scalar Sample =
-  let rattle : Scalar Signal = noise 1500.0 * exp_decay 25.0 in
-  let body : Scalar Signal = sine 190.0 * exp_decay 20.0 * 0.4 in
-  rattle + body |> hard_clip ~threshold:0.6
+  D.snare ~tone:190.0 ~tone_decay:20.0 ~tone_amp:0.4
+          ~noise_freq:1500.0 ~noise_decay:25.0
+    |> hard_clip ~threshold:0.6
     |> sample ~from:0s ~to:280ms
 ;;
 
 let hat_hit : Scalar Sample =
-  (noise 7000.0 |> highpass ~cutoff:6000.0) * exp_decay 70.0 * 0.6
+  D.hat ~noise_freq:7000.0 ~cutoff:6000.0 ~decay:70.0 ~amp:0.6
     |> sample ~from:0s ~to:100ms
 ;;

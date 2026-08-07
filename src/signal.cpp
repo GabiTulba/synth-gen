@@ -488,6 +488,19 @@ struct ConstNode final : SigNode {
   }
 };
 
+// The time ramp: sample f holds its own timestamp in seconds. Broadcast
+// like ConstNode so it combines with signals of any channel count.
+struct TimeNode final : SigNode {
+  TimeNode() { contentHash = hashTag(17); }
+  int channels() const override { return -1; }
+  bool computeBlock(RenderCtx& ctx, NodeState&, int64_t start, int frames,
+                    double* out) const override {
+    for (int f = 0; f < frames; f++)
+      out[f] = (double)(start + f) / ctx.rate;
+    return false;
+  }
+};
+
 // --- Filters ---------------------------------------------------------------
 
 struct FilterState final : NodeState {
@@ -611,11 +624,18 @@ struct FusedState final : NodeState {
 
 struct FusedNode final : SigNode {
   struct Op {
-    enum class K : uint8_t { Input, Const, Add, Sub, Mul, Div };
+    enum class K : uint8_t {
+      Input, Const,             // operands
+      Add, Sub, Mul, Div, Pow,  // binary
+      Exp, Sqrt, Log            // unary
+    };
     K k = K::Const;
     int input = 0;     // K::Input: index into `inputs`
     double value = 0;  // K::Const
   };
+  static bool isUnary(Op::K k) {
+    return k == Op::K::Exp || k == Op::K::Sqrt || k == Op::K::Log;
+  }
   std::vector<SigPtr> inputs;
   std::vector<Op> program;  // postfix, ends with an operator
   int ch = -1;
@@ -651,9 +671,17 @@ struct FusedNode final : SigNode {
           zs[zp - 1] = zs[zp - 1] || zs[zp];
           break;
         case Op::K::Div:
+        case Op::K::Pow:
           zp--;
           zs[zp - 1] = 0;
           break;
+        case Op::K::Exp:
+        case Op::K::Log:
+          // exp(0) == 1, log(0) == -inf: never silent.
+          zs[zp - 1] = 0;
+          break;
+        case Op::K::Sqrt:
+          break;  // sqrt(0) == 0: silence is preserved
       }
     }
     if (zs[0]) return true;
@@ -698,6 +726,49 @@ struct FusedNode final : SigNode {
           stack[sp++] = s;
           break;
         }
+        case Op::K::Exp:
+        case Op::K::Sqrt:
+        case Op::K::Log: {
+          Slot a = stack[sp - 1];
+          Slot res;
+          auto f1 = [&](double v) {
+            return op.k == Op::K::Exp    ? std::exp(v)
+                   : op.k == Op::K::Sqrt ? std::sqrt(v)
+                                         : std::log(v);
+          };
+          if (a.isScalar) {
+            res.isScalar = true;
+            res.scalar = f1(a.scalar);
+          } else {
+            double* dst = last ? out : st.scratch.data() + (sp - 1) * slab;
+            if (a.perFrame && !last) {
+              // Stay compact: one value per frame under a wider node.
+              for (int f = 0; f < frames; f++) dst[f] = f1(a.p[f]);
+              res.perFrame = true;
+            } else if (a.perFrame) {
+              // Final op: widen into the caller's interleaved block.
+              for (int f = 0; f < frames; f++) {
+                double v = f1(a.p[f]);
+                for (int i = 0; i < cc; i++) dst[f * cc + i] = v;
+              }
+            } else {
+              switch (op.k) {
+                case Op::K::Exp:
+                  for (size_t n = 0; n < slab; n++) dst[n] = std::exp(a.p[n]);
+                  break;
+                case Op::K::Sqrt:
+                  for (size_t n = 0; n < slab; n++) dst[n] = std::sqrt(a.p[n]);
+                  break;
+                default:
+                  for (size_t n = 0; n < slab; n++) dst[n] = std::log(a.p[n]);
+                  break;
+              }
+            }
+            res.p = dst;
+          }
+          stack[sp - 1] = res;
+          break;
+        }
         default: {
           Slot b = stack[--sp];
           Slot a = stack[sp - 1];
@@ -708,6 +779,9 @@ struct FusedNode final : SigNode {
               case Op::K::Add: res.scalar = a.scalar + b.scalar; break;
               case Op::K::Sub: res.scalar = a.scalar - b.scalar; break;
               case Op::K::Mul: res.scalar = a.scalar * b.scalar; break;
+              case Op::K::Pow:
+                res.scalar = std::pow(a.scalar, b.scalar);
+                break;
               default: res.scalar = a.scalar / b.scalar; break;
             }
           } else {
@@ -727,6 +801,9 @@ struct FusedNode final : SigNode {
                     case Op::K::Add: dst[f * cc + i] = x + y; break;
                     case Op::K::Sub: dst[f * cc + i] = x - y; break;
                     case Op::K::Mul: dst[f * cc + i] = x * y; break;
+                    case Op::K::Pow:
+                      dst[f * cc + i] = std::pow(x, y);
+                      break;
                     default: dst[f * cc + i] = x / y; break;
                   }
                 }
@@ -742,6 +819,9 @@ struct FusedNode final : SigNode {
                   break;
                 case Op::K::Mul:
                   for (size_t n = 0; n < slab; n++) dst[n] = x * y[n];
+                  break;
+                case Op::K::Pow:
+                  for (size_t n = 0; n < slab; n++) dst[n] = std::pow(x, y[n]);
                   break;
                 default:
                   for (size_t n = 0; n < slab; n++) dst[n] = x / y[n];
@@ -760,6 +840,9 @@ struct FusedNode final : SigNode {
                 case Op::K::Mul:
                   for (size_t n = 0; n < slab; n++) dst[n] = x[n] * y;
                   break;
+                case Op::K::Pow:
+                  for (size_t n = 0; n < slab; n++) dst[n] = std::pow(x[n], y);
+                  break;
                 default:
                   for (size_t n = 0; n < slab; n++) dst[n] = x[n] / y;
                   break;
@@ -776,6 +859,10 @@ struct FusedNode final : SigNode {
                   break;
                 case Op::K::Mul:
                   for (size_t n = 0; n < slab; n++) dst[n] = x[n] * y[n];
+                  break;
+                case Op::K::Pow:
+                  for (size_t n = 0; n < slab; n++)
+                    dst[n] = std::pow(x[n], y[n]);
                   break;
                 default:
                   for (size_t n = 0; n < slab; n++) dst[n] = x[n] / y[n];
@@ -1237,12 +1324,38 @@ SigPtr makeAdsr(double a, double d, double s, double r, double hold) {
   return std::make_shared<AdsrNode>(a, d, s, r, hold);
 }
 SigPtr makeConst(double v) { return std::make_shared<ConstNode>(v); }
+SigPtr makeTime() { return std::make_shared<TimeNode>(); }
 SigPtr makeFilter(FilterKind kind, double cutoff, SigPtr input) {
   return std::make_shared<FilterNode>(kind, cutoff, std::move(input));
 }
 SigPtr makeClip(ClipKind kind, double threshold, SigPtr input) {
   return std::make_shared<ClipNode>(kind, threshold, std::move(input));
 }
+namespace {
+// Shared tail of the fused-node factories: stack depth (operands push,
+// binary operators pop one net, unary operators are depth-neutral) and
+// the program content hash.
+void finalizeFused(FusedNode& node) {
+  int depth = 0;
+  for (const auto& o : node.program) {
+    if (o.k == FusedNode::Op::K::Input || o.k == FusedNode::Op::K::Const)
+      depth++;
+    else if (!FusedNode::isUnary(o.k))
+      depth--;
+    node.depthNeed = std::max(node.depthNeed, depth);
+  }
+  node.contentHash = hashTag(12);
+  for (const auto& o : node.program) {
+    node.contentHash = hashMix(node.contentHash, (uint64_t)o.k);
+    if (o.k == FusedNode::Op::K::Input)
+      node.contentHash =
+          hashMix(node.contentHash, node.inputs[(size_t)o.input]->contentHash);
+    else if (o.k == FusedNode::Op::K::Const)
+      node.contentHash = hashDouble(node.contentHash, o.value);
+  }
+}
+}  // namespace
+
 SigPtr makeBinOp(SigBinOp op, SigPtr l, SigPtr r) {
   FusedNode::Op::K k = FusedNode::Op::K::Add;
   switch (op) {
@@ -1250,6 +1363,7 @@ SigPtr makeBinOp(SigBinOp op, SigPtr l, SigPtr r) {
     case SigBinOp::Sub: k = FusedNode::Op::K::Sub; break;
     case SigBinOp::Mul: k = FusedNode::Op::K::Mul; break;
     case SigBinOp::Div: k = FusedNode::Op::K::Div; break;
+    case SigBinOp::Pow: k = FusedNode::Op::K::Pow; break;
   }
   auto node = std::make_shared<FusedNode>();
   node->ch = mergeChannels(l->channels(), r->channels(), "signal arithmetic");
@@ -1265,23 +1379,24 @@ SigPtr makeBinOp(SigBinOp op, SigPtr l, SigPtr r) {
     fusedAppendInput(r, node->inputs, node->program);
     node->program.push_back({k, 0, 0});
   }
-  int depth = 0;
-  for (const auto& o : node->program) {
-    if (o.k == FusedNode::Op::K::Input || o.k == FusedNode::Op::K::Const)
-      depth++;
-    else
-      depth--;
-    node->depthNeed = std::max(node->depthNeed, depth);
+  finalizeFused(*node);
+  return node;
+}
+SigPtr makeUnaryOp(SigUnaryOp op, SigPtr x) {
+  FusedNode::Op::K k = op == SigUnaryOp::Exp    ? FusedNode::Op::K::Exp
+                       : op == SigUnaryOp::Sqrt ? FusedNode::Op::K::Sqrt
+                                                : FusedNode::Op::K::Log;
+  auto node = std::make_shared<FusedNode>();
+  node->ch = x->channels();
+  fusedAppendOperand(x, node->inputs, node->program);
+  node->program.push_back({k, 0, 0});
+  if (node->program.size() > kMaxFusedOps) {
+    node->inputs.clear();
+    node->program.clear();
+    fusedAppendInput(x, node->inputs, node->program);
+    node->program.push_back({k, 0, 0});
   }
-  node->contentHash = hashTag(12);
-  for (const auto& o : node->program) {
-    node->contentHash = hashMix(node->contentHash, (uint64_t)o.k);
-    if (o.k == FusedNode::Op::K::Input)
-      node->contentHash = hashMix(
-          node->contentHash, node->inputs[(size_t)o.input]->contentHash);
-    else if (o.k == FusedNode::Op::K::Const)
-      node->contentHash = hashDouble(node->contentHash, o.value);
-  }
+  finalizeFused(*node);
   return node;
 }
 SigPtr makeMix(std::vector<SigPtr> items) {

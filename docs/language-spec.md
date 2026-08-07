@@ -110,7 +110,11 @@ Rules:
   type is written; the checker verifies and never guesses.
 - **Monomorphic user code.** Type variables occur only in built-in
   primitive signatures and are instantiated (by unification) at each call
-  site. Users cannot write polymorphic definitions.
+  site. Users cannot write polymorphic definitions. The math primitives
+  (`exp`, `sqrt`, `log`, `pow`) use an unconstrained `'a`, so the checker
+  admits any argument type; passing anything but a Scalar, Vector, or
+  Scalar Signal is reported as a build (evaluation) error. `time` is the
+  one nullary primitive: it is a `Scalar Signal` value, not a function.
 - **Definition before use, no recursion.** A definition may reference
   only parameters, *earlier* definitions of its module, imported modules'
   definitions (qualified), names brought in by an *earlier* `open`, and
@@ -212,30 +216,36 @@ channels in v1.
 - **`module K = Path`** binds (or overrides) a module name: the target
   may be a file module by any spelling in scope, an earlier alias, or a
   whole library (`module B = Basic` then `B.Keys.def`).
-- **Library**: a directory whose `.build` declares `library <Name>` plus
-  its files — `expose <file>` for the public surface (at least one),
-  `source <file>` for internal modules, and `dep <Name>` for library
-  dependencies. Internal files are importable within the library only.
-  Libraries may declare render targets; building the library renders
-  them into its own `build/` directory, and consumers' builds do NOT
-  re-render a dependency's targets.
-- **Project**: a directory with a `.build` manifest — line-based,
-  `project <name>` once plus one `source <file>` per source file (plus
-  optional `dep <Name>` lines); `#` starts a comment.
-- **Root**: a `.build` with `project <name>` and one `build <path>` rule
-  per buildable unit (a project/library directory or a single `.synth`
-  file). Libraries are discovered dynamically by recursively scanning
-  the tree under the root (skipping `build/` output and hidden
-  directories); `dep` names resolve against that discovered set,
-  wherever the library lives in the tree. Duplicate library names,
-  unknown deps and library dependency cycles are build errors. Building
-  a `dep`-carrying directory on its own finds its enclosing root
-  automatically; `synthc build`/`watch` at the root builds/watches every
-  rule, each with its own `build/` output directory.
+- **Library**: a directory whose `build.json` declares
+  `"library": "<Name>"` plus its files — `"expose"` for the public
+  surface (at least one), `"sources"` for internal modules, and
+  `"dependencies"` for library dependencies. Internal files are
+  importable within the library only. Libraries may declare render
+  targets; building the library renders them into its own directory
+  under the root's `_build/`, and consumers' builds do NOT re-render a
+  dependency's targets.
+- **Project**: a directory with a `build.json` manifest — one JSON
+  object with `"project": "<name>"` plus a `"sources"` array (and an
+  optional `"dependencies"` array); an optional `"description"` string
+  carries free-form prose (JSON has no comments).
+- **Root**: a `build.json` with `"project": "<name>"` and a `"build"`
+  array naming one rule per buildable unit (a project/library directory
+  or a single `.synth` file). Libraries are discovered dynamically by
+  recursively scanning the tree under the root (skipping `_build/`
+  output, legacy `build/`, and hidden directories); dependency names
+  resolve against that discovered set, wherever the library lives in
+  the tree. Duplicate library names, unknown dependencies and library
+  dependency cycles are build errors. Building a dependency-carrying
+  directory on its own finds its enclosing root automatically; `synthc
+  build`/`watch` at the root builds/watches every rule.
 - **Render targets**: every `render` call evaluated at build time
-  declares one. Names must be unique per build unit. Artifacts land in
-  `build/artifacts/<name>.wav`; the machine-readable index in
-  `build/metadata.json`.
+  declares one. Names must be unique per build unit. All outputs land
+  in a single `_build/` tree at the root, mirroring the source layout:
+  rule `song` writes artifacts to `<root>/_build/song/artifacts/
+  <name>.wav` and the machine-readable index to
+  `<root>/_build/song/metadata.json`; a file rule `tunes/t.synth`
+  writes under `_build/tunes/t/`. A unit built outside any root uses
+  its own directory as the root.
 
 ## 5. Evaluation semantics
 
@@ -313,6 +323,23 @@ val render_vis_stems : name:String -> rate:Scalar
 (* file import *)
 val load_mono : path:String -> Scalar Signal
 val load_multi: path:String -> Vector Signal
+
+(* signal constructors *)
+val constant  : value:Scalar -> Scalar Signal
+val constant_multi : levels:Scalar list -> Vector Signal  (* one level per channel *)
+val time      : Scalar Signal          (* nullary: the ramp t, in seconds *)
+val signal    : f:(Scalar -> Scalar) -> Scalar Signal
+  (* samples f over time; the body is limited to arithmetic and the math
+     primitives - nothing else maps a Scalar to a Scalar *)
+val signal_multi : fs:(Scalar -> Scalar) list -> Vector Signal
+
+(* math: polymorphic over Scalars and (elementwise) Signals; anything
+   else is a build-time error. Domain follows IEEE: log of a
+   non-positive value or sqrt of a negative one yield -inf/NaN samples. *)
+val exp       : x:'a -> 'a
+val sqrt      : x:'a -> 'a
+val log       : x:'a -> 'a             (* natural *)
+val pow       : x:'a -> y:Scalar -> 'a
 
 (* Core.List: list combinators & builders *)
 val List.map    : f:('a -> 'b) -> xs:'a list -> 'b list

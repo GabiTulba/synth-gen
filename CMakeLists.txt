@@ -25,6 +25,7 @@ add_library(synthgraph_core
   src/wav.cpp
   src/library.cpp
   src/build.cpp
+  src/json.cpp
 )
 target_include_directories(synthgraph_core PUBLIC src)
 
@@ -52,7 +53,6 @@ if(SYNTHGRAPH_BUILD_DEVAPP)
     target_link_libraries(imgui PUBLIC SDL2::SDL2)
 
     add_library(synthdev_core
-      src/devapp/json.cpp
       src/devapp/metadata.cpp
       src/devapp/player.cpp
     )

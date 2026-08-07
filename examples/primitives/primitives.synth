@@ -117,3 +117,57 @@ let _ =
   place_multi tick (time_steps ~start:0s ~step:250ms ~count:6.0)
     |> sample ~from:0s ~to:1600ms
     |> render ~name:"time_steps" ~rate:48000.0 ;;
+
+(* Signal constructors: `constant` holds a level forever (here a gain on
+   a tone - a bare constant is inaudible DC); `time` is the ramp whose
+   sample at t seconds is t; `signal` samples a Scalar -> Scalar
+   function of time. constant_multi/signal_multi are the per-channel
+   forms. *)
+let _ =
+  sine 440.0 * constant 0.4
+    |> sample ~from:0s ~to:800ms
+    |> render ~name:"constant" ~rate:48000.0 ;;
+
+let _ =
+  sine 330.0 * sqrt time * 0.5
+    |> sample ~from:0s ~to:1200ms
+    |> render ~name:"time" ~rate:48000.0 ;;
+
+let _ =
+  sine 440.0 * signal ~f:(fun t:Scalar -> exp (0.0 - 4.0 * t)) * 0.6
+    |> sample ~from:0s ~to:1200ms
+    |> render ~name:"signal_fn" ~rate:48000.0 ;;
+
+let _ =
+  channels [sine 440.0; sine 554.37] * constant_multi [0.6; 0.2]
+    |> sample ~from:0s ~to:800ms
+    |> render ~name:"constant_multi" ~rate:48000.0 ;;
+
+let _ =
+  channels [sine 440.0; sine 440.0]
+    * signal_multi ~fs:[(fun t:Scalar -> 1.0 - t); (fun t:Scalar -> t)]
+    |> sample ~from:0s ~to:1s
+    |> render ~name:"signal_multi" ~rate:48000.0 ;;
+
+(* Math: pow as a waveshaper (cubing keeps the sign, squashes the body,
+   adding odd harmonics); exp/log/sqrt are the same curves audible as
+   tremolo shapes. *)
+let _ =
+  pow (sine 220.0) 3.0
+    |> sample ~from:0s ~to:800ms
+    |> render ~name:"pow" ~rate:48000.0 ;;
+
+let _ =
+  sine 440.0 * exp (0.0 - 6.0 * time) * 0.6
+    |> sample ~from:0s ~to:1200ms
+    |> render ~name:"exp" ~rate:48000.0 ;;
+
+let _ =
+  sine 440.0 * (log (1.0 + time * 20.0) / log 21.0) * 0.5
+    |> sample ~from:0s ~to:1200ms
+    |> render ~name:"log" ~rate:48000.0 ;;
+
+let _ =
+  sine 440.0 * sqrt (time * 0.8) * 0.6
+    |> sample ~from:0s ~to:1200ms
+    |> render ~name:"sqrt" ~rate:48000.0 ;;

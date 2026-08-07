@@ -125,6 +125,13 @@ class Interp {
     throw EvalError("internal error: unknown expression kind");
   }
 
+  // Primitives are first-class values; a nullary primitive (time) IS its
+  // value rather than a function.
+  Value primValue(const PrimSig& p, const CheckedModule& mod) {
+    if (p.paramTypes.empty()) return applyPrim(p, {}, mod);
+    return Value{PrimClosureV{(int)p.id, nullptr}};
+  }
+
   Value lookup(const Expr& ident, Env& env, const CheckedModule& mod) {
     if (ident.moduleName.empty()) {
       auto it = env.find(ident.name);
@@ -133,18 +140,18 @@ class Interp {
       auto gt = g.find(ident.name);
       if (gt != g.end()) return gt->second;
       if (const PrimSig* p = findPrimitive(ident.name))
-        return Value{PrimClosureV{(int)p->id, nullptr}};
+        return primValue(*p, mod);
       throw EvalError("unbound name '" + ident.name + "' at build time");
     }
     // The built-in Core namespace: primitives as first-class values.
     if (ident.moduleName == "Core") {
       if (const PrimSig* p = findCorePrim(ident.name))
-        return Value{PrimClosureV{(int)p->id, nullptr}};
+        return primValue(*p, mod);
       throw EvalError("'Core' has no primitive named '" + ident.name + "'");
     }
     if (ident.moduleName == "Core.List") {
       if (const PrimSig* p = findCoreListPrim(ident.name))
-        return Value{PrimClosureV{(int)p->id, nullptr}};
+        return primValue(*p, mod);
       throw EvalError("'Core.List' has no function named '" + ident.name +
                       "'");
     }
@@ -474,8 +481,89 @@ class Interp {
         }
         return Value{std::move(out)};
       }
+      case PrimId::Constant:
+        return Value{makeConst(scalarArg(args[0]))};
+      case PrimId::ConstantMulti: {
+        std::vector<SigPtr> chans;
+        for (auto& x : std::get<ListV>(args[0].v).items)
+          chans.push_back(makeConst(scalarArg(x)));
+        if (chans.empty())
+          throw EvalError("constant_multi: needs at least one level");
+        return Value{makeChannels(std::move(chans))};
+      }
+      case PrimId::Time:
+        return Value{makeTime()};
+      case PrimId::SignalFn:
+        return Value{fnOfTime(args[0], mod, "signal")};
+      case PrimId::SignalFnMulti: {
+        std::vector<SigPtr> chans;
+        for (auto& f : std::get<ListV>(args[0].v).items)
+          chans.push_back(fnOfTime(f, mod, "signal_multi"));
+        if (chans.empty())
+          throw EvalError("signal_multi: needs at least one function");
+        return Value{makeChannels(std::move(chans))};
+      }
+      case PrimId::Exp:
+        return math1(args[0], SigUnaryOp::Exp, "exp");
+      case PrimId::Sqrt:
+        return math1(args[0], SigUnaryOp::Sqrt, "sqrt");
+      case PrimId::Log:
+        return math1(args[0], SigUnaryOp::Log, "log");
+      case PrimId::Pow: {
+        // y is Scalar-typed, but under `signal ~f` symbolic substitution
+        // the time signal can flow into either side.
+        const Value& x = args[0];
+        const Value& y = args[1];
+        bool xSig = std::holds_alternative<SigPtr>(x.v);
+        bool ySig = std::holds_alternative<SigPtr>(y.v);
+        if (xSig || ySig)
+          return Value{makeBinOp(SigBinOp::Pow, asSignal(x), asSignal(y))};
+        if (auto* vec = std::get_if<VectorV>(&x.v)) {
+          VectorV out = *vec;
+          for (auto& c : out.v) c = std::pow(c, scalarArg(y));
+          return Value{std::move(out)};
+        }
+        if (std::holds_alternative<ScalarV>(x.v))
+          return Value{ScalarV{std::pow(scalarArg(x), scalarArg(y))}};
+        throw EvalError("pow: expected a Scalar, Vector, or Signal");
+      }
     }
     throw EvalError("internal error: unimplemented primitive");
+  }
+
+  // Elementwise math over the numeric kinds ('a in the signatures is
+  // checked here: anything non-numeric is a build-time error).
+  static Value math1(const Value& v, SigUnaryOp op, const char* prim) {
+    auto f = [op](double x) {
+      return op == SigUnaryOp::Exp    ? std::exp(x)
+             : op == SigUnaryOp::Sqrt ? std::sqrt(x)
+                                      : std::log(x);
+    };
+    if (auto* sc = std::get_if<ScalarV>(&v.v)) return Value{ScalarV{f(sc->v)}};
+    if (auto* vec = std::get_if<VectorV>(&v.v)) {
+      VectorV out = *vec;
+      for (auto& c : out.v) c = f(c);
+      return Value{std::move(out)};
+    }
+    if (auto* s = std::get_if<SigPtr>(&v.v))
+      return Value{makeUnaryOp(op, *s)};
+    throw EvalError(std::string(prim) +
+                    ": expected a Scalar, Vector, or Signal");
+  }
+
+  // `signal ~f`: apply the Scalar -> Scalar function symbolically to the
+  // time ramp. Arithmetic and the math primitives lift pointwise, so the
+  // whole body becomes one signal graph; a constant-valued function
+  // degenerates to a constant signal via asSignal.
+  SigPtr fnOfTime(const Value& f, const CheckedModule& mod,
+                  const char* prim) {
+    Value r = apply(f, {Value{makeTime()}}, mod);
+    if (std::holds_alternative<SigPtr>(r.v) ||
+        std::holds_alternative<ScalarV>(r.v))
+      return asSignal(r);
+    throw EvalError(std::string(prim) +
+                    ": the function must produce a Scalar from the time "
+                    "argument");
   }
 
   // Audio file paths resolve relative to the source file that mentions them;

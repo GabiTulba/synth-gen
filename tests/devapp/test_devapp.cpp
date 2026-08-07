@@ -4,6 +4,7 @@
 #include <fstream>
 
 #include "build.hpp"
+#include "manifest_helpers.hpp"
 #include "json.hpp"
 #include "metadata.hpp"
 #include "player.hpp"
@@ -77,7 +78,7 @@ TEST(metadata_loads_real_build_output) {
 open Core
 let _ = render "beep" 8000.0 (sample ((sine 440.0) * 0.5) 0s 250ms) ;;
 )");
-  tp.write(".build", "project devapp-demo\nsource song.synth\n");
+  tp.write("build.json", projectManifest("devapp-demo", {"song.synth"}));
   BuildResult r = buildProject(tp.dir.string());
   CHECK(r.ok);
 
@@ -99,7 +100,7 @@ let _ = render "beep" 8000.0 (sample ((sine 440.0) * 0.5) 0s 250ms) ;;
 TEST(metadata_surfaces_failed_builds) {
   TempDir tp;
   tp.write("bad.synth", "open Core\nlet x : Scalar = sine 440.0 ;;");
-  tp.write(".build", "project broken\nsource bad.synth\n");
+  tp.write("build.json", projectManifest("broken", {"bad.synth"}));
   BuildResult r = buildProject(tp.dir.string());
   CHECK(!r.ok);
 

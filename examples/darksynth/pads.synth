@@ -1,12 +1,11 @@
-(* Dark pad: wide detuned saws per chord tone plus a quiet upper octave,
-   lowpassed under a slow envelope. Detune is a parameter so each stereo
-   side runs a different width. *)
+(* Dark pad: wide detuned saws per chord tone (the shared Voices.Pads
+   tone) plus a quiet upper octave, lowpassed under a slow envelope.
+   Detune is a parameter so each stereo side runs a different width. *)
 
 open Core
 
-let wide ~freq:Scalar ~detune:Scalar : Scalar Signal =
-  (saw (freq - detune) + saw (freq + detune)) * 0.5
-;;
+import Voices
+module P = Voices.Pads
 
 let dark_chord ~root:Scalar ~third:Scalar ~fifth:Scalar ~detune:Scalar
     : Scalar Signal =
@@ -14,10 +13,10 @@ let dark_chord ~root:Scalar ~third:Scalar ~fifth:Scalar ~detune:Scalar
     adsr ~attack:600ms ~decay:400ms ~sustain:0.8 ~release:900ms
          ~hold:3100ms in
   let stack : Scalar Signal =
-    (wide ~freq:root ~detune:detune
-     + wide ~freq:third ~detune:detune
-     + wide ~freq:fifth ~detune:detune
-     + wide ~freq:(root * 2.0) ~detune:(detune * 2.0) * 0.4) * 0.27 in
+    (P.detuned ~freq:root ~detune:detune
+     + P.detuned ~freq:third ~detune:detune
+     + P.detuned ~freq:fifth ~detune:detune
+     + P.detuned ~freq:(root * 2.0) ~detune:(detune * 2.0) * 0.4) * 0.27 in
   (stack |> lowpass ~cutoff:850.0) * env
 ;;
 
@@ -36,6 +35,5 @@ let cycle detune:Scalar : Scalar Signal =
   let e : Scalar Sample =
     dark_chord ~root:82.41 ~third:103.83 ~fifth:123.47 ~detune:detune
       |> sample ~from:0s ~to:4s in
-  mix_all [am |> place ~at:0s; f |> place ~at:4s;
-           dm |> place ~at:8s; e |> place ~at:12s]
+  P.place4 am f dm e
 ;;

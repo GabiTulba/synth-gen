@@ -1,0 +1,5 @@
+{
+  "project": "pluck-demo",
+  "description": "The design doc's example as a buildable project.",
+  "sources": ["pluck.synth"]
+}

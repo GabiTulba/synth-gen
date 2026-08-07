@@ -1,11 +1,13 @@
-(* Snare drum: a bright noise rattle over a short tonal body. *)
+(* Snare drum: a bright noise rattle over a short tonal body. A preset
+   over the shared Voices core. *)
 
 open Core
 
+import Voices
+
 let snare : Scalar Signal =
-  let body : Scalar Signal = sine 185.0 * exp_decay 18.0 * 0.5 in
-  let rattle : Scalar Signal = noise 1800.0 * exp_decay 22.0 in
-  (rattle + body) * 0.6
+  (Voices.Drums.snare ~tone:185.0 ~tone_decay:18.0 ~tone_amp:0.5
+                      ~noise_freq:1800.0 ~noise_decay:22.0) * 0.6
 ;;
 
 let _ =

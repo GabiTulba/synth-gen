@@ -8,6 +8,7 @@
 #include <thread>
 
 #include "build.hpp"
+#include "manifest_helpers.hpp"
 #include "checker.hpp"
 #include "incremental.hpp"
 #include "library.hpp"
@@ -92,8 +93,10 @@ TEST(build_manifest_parsing) {
   Manifest m;
   DiagnosticBag diags;
   bool ok = parseManifest(
-      "# a comment\nproject demo\nsource a.synth\nsource b.synth\n",
-      ".build", m, diags);
+      R"({ "project": "demo",
+           "description": "free text is tolerated",
+           "sources": ["a.synth", "b.synth"] })",
+      "build.json", m, diags);
   CHECK(ok);
   CHECK(m.projectName == "demo");
   CHECK(m.sources.size() == 2);
@@ -101,21 +104,51 @@ TEST(build_manifest_parsing) {
 }
 
 TEST(build_manifest_errors) {
+  // Missing project name.
   Manifest m;
   DiagnosticBag diags;
-  CHECK(!parseManifest("source a.synth\n", ".build", m, diags));
+  CHECK(!parseManifest(R"({ "sources": ["a.synth"] })", "build.json", m,
+                       diags));
+  // Unknown key.
   Manifest m2;
   DiagnosticBag diags2;
-  CHECK(!parseManifest("project x\nfrobnicate y\n", ".build", m2, diags2));
+  CHECK(!parseManifest(R"({ "project": "x", "frobnicate": ["y"] })",
+                       "build.json", m2, diags2));
+  // Invalid JSON.
+  Manifest m3;
+  DiagnosticBag diags3;
+  CHECK(!parseManifest("project x\nsource a.synth\n", "build.json", m3,
+                       diags3));
+  // Top level must be an object.
+  Manifest m4;
+  DiagnosticBag diags4;
+  CHECK(!parseManifest(R"(["project", "x"])", "build.json", m4, diags4));
+  // Wrong-typed fields.
+  Manifest m5;
+  DiagnosticBag diags5;
+  CHECK(!parseManifest(R"({ "project": "x", "sources": "a.synth" })",
+                       "build.json", m5, diags5));
+  Manifest m6;
+  DiagnosticBag diags6;
+  CHECK(!parseManifest(R"({ "project": ["x"], "sources": ["a.synth"] })",
+                       "build.json", m6, diags6));
+  // Duplicate key.
+  Manifest m7;
+  DiagnosticBag diags7;
+  CHECK(!parseManifest(
+      R"({ "project": "x", "project": "y", "sources": ["a.synth"] })",
+      "build.json", m7, diags7));
 }
 
 TEST(build_manifest_library_directives) {
   Manifest m;
   DiagnosticBag diags;
   bool ok = parseManifest(
-      "library Basic\nexpose keys.synth\nexpose pads.synth\n"
-      "source internal.synth\ndep Fx\n",
-      ".build", m, diags);
+      R"({ "library": "Basic",
+           "expose": ["keys.synth", "pads.synth"],
+           "sources": ["internal.synth"],
+           "dependencies": ["Fx"] })",
+      "build.json", m, diags);
   CHECK(ok);
   CHECK(m.isLibrary());
   CHECK(m.libraryName == "Basic");
@@ -128,53 +161,64 @@ TEST(build_manifest_library_directives) {
 TEST(build_manifest_rejects_project_and_library) {
   Manifest m;
   DiagnosticBag diags;
-  CHECK(!parseManifest("project x\nlibrary Y\nexpose a.synth\n", ".build", m,
-                       diags));
+  CHECK(!parseManifest(
+      R"({ "project": "x", "library": "Y", "expose": ["a.synth"] })",
+      "build.json", m, diags));
 }
 
 TEST(build_manifest_expose_rules) {
   // expose outside a library.
   Manifest m1;
   DiagnosticBag d1;
-  CHECK(!parseManifest("project x\nexpose a.synth\n", ".build", m1, d1));
-  // Same file as both source and expose.
+  CHECK(!parseManifest(R"({ "project": "x", "expose": ["a.synth"] })",
+                       "build.json", m1, d1));
+  // Same file as both source and expose (order-independent in JSON).
   Manifest m2;
   DiagnosticBag d2;
-  CHECK(!parseManifest("library L\nsource a.synth\nexpose a.synth\n",
-                       ".build", m2, d2));
+  CHECK(!parseManifest(
+      R"({ "library": "L", "sources": ["a.synth"], "expose": ["a.synth"] })",
+      "build.json", m2, d2));
   // A library with no exposed files.
   Manifest m3;
   DiagnosticBag d3;
-  CHECK(!parseManifest("library L\nsource a.synth\n", ".build", m3, d3));
+  CHECK(!parseManifest(R"({ "library": "L", "sources": ["a.synth"] })",
+                       "build.json", m3, d3));
   // Lowercase library name.
   Manifest m4;
   DiagnosticBag d4;
-  CHECK(!parseManifest("library basic\nexpose a.synth\n", ".build", m4, d4));
+  CHECK(!parseManifest(R"({ "library": "basic", "expose": ["a.synth"] })",
+                       "build.json", m4, d4));
+  // Duplicate expose entry.
+  Manifest m5;
+  DiagnosticBag d5;
+  CHECK(!parseManifest(
+      R"({ "library": "L", "expose": ["a.synth", "a.synth"] })",
+      "build.json", m5, d5));
 }
 
 TEST(build_manifest_root_build_rules) {
   Manifest m;
   DiagnosticBag diags;
   bool ok = parseManifest(
-      "project demo\nbuild lib/basic\nbuild tunes/song.synth\n", ".build", m,
-      diags);
+      R"({ "project": "demo", "build": ["lib/basic", "tunes/song.synth"] })",
+      "build.json", m, diags);
   CHECK(ok);
   CHECK(m.isRoot());
   CHECK(m.buildRules.size() == 2);
   // Roots cannot also list sources.
   Manifest m2;
   DiagnosticBag d2;
-  CHECK(!parseManifest("project demo\nbuild a\nsource b.synth\n", ".build",
-                       m2, d2));
+  CHECK(!parseManifest(
+      R"({ "project": "demo", "build": ["a"], "sources": ["b.synth"] })",
+      "build.json", m2, d2));
 }
 
 TEST(library_discovery_finds_nested_builds) {
   TempTree tp;
-  tp.write(".build", "project root\nbuild tunes\n");
-  tp.write("lib/basic/.build", "library Basic\nexpose keys.synth\n");
+  tp.write("build.json", rootManifest("root", {"tunes"}));
+  tp.write("lib/basic/build.json", libraryManifest("Basic", {"keys.synth"}));
   tp.write("lib/basic/keys.synth", "open Core\nlet k : Scalar = 1.0 ;;");
-  tp.write("deep/nested/fx/.build",
-           "library Fx\nexpose fx.synth\ndep Basic\n");
+  tp.write("deep/nested/fx/build.json", libraryManifest("Fx", {"fx.synth"}, {}, {"Basic"}));
   tp.write("deep/nested/fx/fx.synth", "open Core\nlet f : Scalar = 2.0 ;;");
   DiagnosticBag diags;
   LibraryRegistry reg = discoverLibraries(tp.dir.string(), diags);
@@ -193,21 +237,24 @@ TEST(library_discovery_finds_nested_builds) {
 
 TEST(library_discovery_skips_build_output_dirs) {
   TempTree tp;
-  tp.write("lib/.build", "library L\nexpose a.synth\n");
+  tp.write("lib/build.json", libraryManifest("L", {"a.synth"}));
   tp.write("lib/a.synth", "open Core\nlet a : Scalar = 1.0 ;;");
-  // A stray manifest inside an output dir must not register.
-  tp.write("lib/build/.build", "library Ghost\nexpose g.synth\n");
+  // A stray manifest inside an output dir must not register ("_build"
+  // outputs and legacy/cmake "build" dirs alike).
+  tp.write("lib/build/build.json", libraryManifest("Ghost", {"g.synth"}));
+  tp.write("_build/lib/build.json", libraryManifest("Shadow", {"s.synth"}));
   DiagnosticBag diags;
   LibraryRegistry reg = discoverLibraries(tp.dir.string(), diags);
   CHECK(!diags.hasErrors());
   CHECK(reg.byName.size() == 1);
   CHECK(reg.find("Ghost") == nullptr);
+  CHECK(reg.find("Shadow") == nullptr);
 }
 
 TEST(library_discovery_duplicate_names_error) {
   TempTree tp;
-  tp.write("a/.build", "library Same\nexpose x.synth\n");
-  tp.write("b/.build", "library Same\nexpose y.synth\n");
+  tp.write("a/build.json", libraryManifest("Same", {"x.synth"}));
+  tp.write("b/build.json", libraryManifest("Same", {"y.synth"}));
   DiagnosticBag diags;
   discoverLibraries(tp.dir.string(), diags);
   CHECK(diags.hasErrors());
@@ -215,7 +262,7 @@ TEST(library_discovery_duplicate_names_error) {
 
 TEST(library_registry_unknown_dep_error) {
   TempTree tp;
-  tp.write("a/.build", "library A\nexpose x.synth\ndep Nope\n");
+  tp.write("a/build.json", libraryManifest("A", {"x.synth"}, {}, {"Nope"}));
   DiagnosticBag diags;
   discoverLibraries(tp.dir.string(), diags);
   CHECK(diags.hasErrors());
@@ -223,8 +270,8 @@ TEST(library_registry_unknown_dep_error) {
 
 TEST(library_registry_dep_cycle_error) {
   TempTree tp;
-  tp.write("a/.build", "library A\nexpose x.synth\ndep B\n");
-  tp.write("b/.build", "library B\nexpose y.synth\ndep A\n");
+  tp.write("a/build.json", libraryManifest("A", {"x.synth"}, {}, {"B"}));
+  tp.write("b/build.json", libraryManifest("B", {"y.synth"}, {}, {"A"}));
   DiagnosticBag diags;
   discoverLibraries(tp.dir.string(), diags);
   CHECK(diags.hasErrors());
@@ -232,13 +279,13 @@ TEST(library_registry_dep_cycle_error) {
 
 TEST(library_find_enclosing_root) {
   TempTree tp;
-  tp.write(".build", "project root\nbuild tunes\n");
-  tp.write("tunes/.build", "project tunes\nsource t.synth\n");
+  tp.write("build.json", rootManifest("root", {"tunes"}));
+  tp.write("tunes/build.json", projectManifest("tunes", {"t.synth"}));
   tp.write("tunes/t.synth", "open Core\nlet x : Scalar = 1.0 ;;");
   CHECK(fs::path(findEnclosingRoot((tp.dir / "tunes").string())) == tp.dir);
   // No root above a bare temp dir tree.
   TempTree lone;
-  lone.write("p/.build", "project p\nsource a.synth\n");
+  lone.write("p/build.json", projectManifest("p", {"a.synth"}));
   CHECK(findEnclosingRoot((lone.dir / "p").string()).empty());
 }
 
@@ -246,7 +293,7 @@ TEST(build_end_to_end_pluck) {
   // The full §3.4 example: two seconds of audio, four 440 Hz plucks.
   TempDir tp;
   tp.write("pluck.synth", kPluckSource);
-  tp.write(".build", "project pluck-demo\nsource pluck.synth\n");
+  tp.write("build.json", projectManifest("pluck-demo", {"pluck.synth"}));
 
   BuildResult r = buildProject(tp.dir.string());
   for (auto& d : r.diags.items) std::cerr << d.message << "\n";
@@ -258,7 +305,7 @@ TEST(build_end_to_end_pluck) {
   CHECK(r.targets[0].frames == 96000);  // 2s at 48 kHz
   CHECK_NEAR(r.targets[0].durationSeconds, 2.0, 1e-9);
 
-  fs::path artifact = tp.dir / "build" / "artifacts" / "demo.wav";
+  fs::path artifact = tp.dir / "_build" / "artifacts" / "demo.wav";
   CHECK(fs::exists(artifact));
   WavData w = readWav(artifact.string());
   CHECK(w.frames() == 96000);
@@ -278,7 +325,7 @@ TEST(build_end_to_end_pluck) {
   CHECK(peakAround(0.45) < 0.3);  // decayed before the next pluck
 
   // Build metadata exists and mentions the target.
-  std::string meta = slurp(tp.dir / "build" / "metadata.json");
+  std::string meta = slurp(tp.dir / "_build" / "metadata.json");
   CHECK(meta.find("\"project\": \"pluck-demo\"") != std::string::npos);
   CHECK(meta.find("\"name\": \"demo\"") != std::string::npos);
   CHECK(meta.find("\"status\": \"ok\"") != std::string::npos);
@@ -291,7 +338,7 @@ open Core
 let _ = render "same" 48000.0 (sample (sine 440.0) 0s 100ms) ;;
 let _ = render "same" 48000.0 (sample (sine 220.0) 0s 100ms) ;;
 )");
-  tp.write(".build", "project dup\nsource a.synth\n");
+  tp.write("build.json", projectManifest("dup", {"a.synth"}));
   BuildResult r = buildProject(tp.dir.string());
   CHECK(!r.ok);
   CHECK(r.diags.hasErrors());
@@ -300,10 +347,10 @@ let _ = render "same" 48000.0 (sample (sine 220.0) 0s 100ms) ;;
 TEST(build_type_error_fails_and_emits_metadata) {
   TempDir tp;
   tp.write("a.synth", "open Core\nlet x : Scalar = sine 440.0 ;;");
-  tp.write(".build", "project broken\nsource a.synth\n");
+  tp.write("build.json", projectManifest("broken", {"a.synth"}));
   BuildResult r = buildProject(tp.dir.string());
   CHECK(!r.ok);
-  std::string meta = slurp(tp.dir / "build" / "metadata.json");
+  std::string meta = slurp(tp.dir / "_build" / "metadata.json");
   CHECK(meta.find("\"status\": \"error\"") != std::string::npos);
 }
 
@@ -318,12 +365,12 @@ open Core
 import Instr
 let _ = render "song" 44100.0 (sample (Instr.tone 330.0) 0s 500ms) ;;
 )");
-  tp.write(".build", "project imports\nsource song.synth\n");
+  tp.write("build.json", projectManifest("imports", {"song.synth"}));
   BuildResult r = buildProject(tp.dir.string());
   for (auto& d : r.diags.items) std::cerr << d.message << "\n";
   CHECK(r.ok);
   CHECK(r.targets.size() == 1);
-  CHECK(fs::exists(tp.dir / "build" / "artifacts" / "song.wav"));
+  CHECK(fs::exists(tp.dir / "_build" / "artifacts" / "song.wav"));
 }
 
 TEST(build_load_mono_channel_validation) {
@@ -338,7 +385,7 @@ TEST(build_load_mono_channel_validation) {
   tp.write("a.synth",
            "open Core\nlet _ = render \"x\" 44100.0 "
            "(sample (load_mono \"stereo.wav\") 0s 10ms) ;;");
-  tp.write(".build", "project loads\nsource a.synth\n");
+  tp.write("build.json", projectManifest("loads", {"a.synth"}));
   BuildResult r = buildProject(tp.dir.string());
   CHECK(!r.ok);
   CHECK(r.diags.hasErrors());
@@ -349,11 +396,11 @@ TEST(build_load_mono_channel_validation) {
   tp2.write("a.synth",
             "open Core\nlet _ = render \"x\" 44100.0 "
             "(sample (load_multi \"stereo.wav\") 0s 10ms) ;;");
-  tp2.write(".build", "project loads2\nsource a.synth\n");
+  tp2.write("build.json", projectManifest("loads2", {"a.synth"}));
   BuildResult r2 = buildProject(tp2.dir.string());
   for (auto& d : r2.diags.items) std::cerr << d.message << "\n";
   CHECK(r2.ok);
-  WavData out = readWav((tp2.dir / "build" / "artifacts" / "x.wav").string());
+  WavData out = readWav((tp2.dir / "_build" / "artifacts" / "x.wav").string());
   CHECK(out.channels.size() == 2);
 }
 
@@ -378,7 +425,7 @@ open Core
 import Instr
 let _ = render "song" 44100.0 (sample (Instr.tone 330.0) 0s 100ms) ;;
 )");
-  tp.write(".build", "project inputs\nsource song.synth\n");
+  tp.write("build.json", projectManifest("inputs", {"song.synth"}));
   BuildResult r = buildProject(tp.dir.string());
   CHECK(r.ok);
   auto has = [&](const std::string& suffix) {
@@ -388,7 +435,7 @@ let _ = render "song" 44100.0 (sample (Instr.tone 330.0) 0s 100ms) ;;
         return true;
     return false;
   };
-  CHECK(has(".build"));
+  CHECK(has("build.json"));
   CHECK(has("song.synth"));
   CHECK(has("instr.synth"));  // discovered via import
 }
@@ -397,7 +444,7 @@ TEST(build_watch_rebuilds_on_change) {
   TempDir tp;
   tp.write("a.synth",
            "open Core\nlet _ = render \"t\" 8000.0 (sample (sine 440.0) 0s 10ms) ;;");
-  tp.write(".build", "project watch\nsource a.synth\n");
+  tp.write("build.json", projectManifest("watch", {"a.synth"}));
 
   int builds = 0;
   bool changed = false;
@@ -435,11 +482,11 @@ let tremolo : Scalar Signal = am vibrato (sine 4.0) 0.5 ;;
 let bell : Scalar Signal = pm 220.0 ((sine 110.0) * 2.0) ;;
 let _ = render "voice" 48000.0 (sample (tremolo * 0.5 + bell * 0.3) 0s 250ms) ;;
 )");
-  tp.write(".build", "project modulation\nsource modul.synth\n");
+  tp.write("build.json", projectManifest("modulation", {"modul.synth"}));
   BuildResult r = buildProject(tp.dir.string());
   for (auto& d : r.diags.items) std::cerr << d.message << "\n";
   CHECK(r.ok);
-  WavData w = readWav((tp.dir / "build" / "artifacts" / "voice.wav").string());
+  WavData w = readWav((tp.dir / "_build" / "artifacts" / "voice.wav").string());
   CHECK(w.frames() == 12000);
   double peak = 0;
   for (double v : w.channels[0]) peak = std::max(peak, std::fabs(v));
@@ -456,11 +503,11 @@ let echoed : Scalar Signal =
   mix_all [hit; (delay 200ms hit) * 0.5; (delay 400ms hit) * 0.25] ;;
 let _ = render "echo" 8000.0 (sample echoed 0s 600ms) ;;
 )");
-  tp.write(".build", "project echo\nsource echo.synth\n");
+  tp.write("build.json", projectManifest("echo", {"echo.synth"}));
   BuildResult r = buildProject(tp.dir.string());
   for (auto& d : r.diags.items) std::cerr << d.message << "\n";
   CHECK(r.ok);
-  WavData w = readWav((tp.dir / "build" / "artifacts" / "echo.wav").string());
+  WavData w = readWav((tp.dir / "_build" / "artifacts" / "echo.wav").string());
   auto peakAround = [&](double t) {
     int64_t c = (int64_t)(t * 8000.0);
     double peak = 0;
@@ -486,11 +533,11 @@ let hit : Scalar Signal =
 let roomy : Scalar Signal = reverb 500ms 0.3 0.6 hit ;;
 let _ = render "roomy" 8000.0 (sample roomy 0s 1s) ;;
 )");
-  tp.write(".build", "project verb\nsource verb.synth\n");
+  tp.write("build.json", projectManifest("verb", {"verb.synth"}));
   BuildResult r = buildProject(tp.dir.string());
   for (auto& d : r.diags.items) std::cerr << d.message << "\n";
   CHECK(r.ok);
-  WavData w = readWav((tp.dir / "build" / "artifacts" / "roomy.wav").string());
+  WavData w = readWav((tp.dir / "_build" / "artifacts" / "roomy.wav").string());
   auto peakAround = [&](double t0, double t1) {
     double peak = 0;
     for (int64_t i = (int64_t)(t0 * 8000.0);
@@ -512,11 +559,11 @@ open Core
 let snare : Scalar Signal = (noise 1800.0) * (exp_decay 25.0) ;;
 let _ = render "snare" 16000.0 (sample snare 0s 400ms) ;;
 )");
-  tp.write(".build", "project snare\nsource snare.synth\n");
+  tp.write("build.json", projectManifest("snare", {"snare.synth"}));
   BuildResult r = buildProject(tp.dir.string());
   for (auto& d : r.diags.items) std::cerr << d.message << "\n";
   CHECK(r.ok);
-  WavData w = readWav((tp.dir / "build" / "artifacts" / "snare.wav").string());
+  WavData w = readWav((tp.dir / "_build" / "artifacts" / "snare.wav").string());
   CHECK(w.frames() == 6400);
   auto rmsIn = [&](double t0, double t1) {
     double acc = 0;
@@ -540,7 +587,7 @@ import Instr
 let _ = render "uses_instr" 8000.0 (sample (Instr.tone 440.0) 0s 100ms) ;;
 let _ = render "standalone" 8000.0 (sample ((saw 220.0) * 0.5) 0s 100ms) ;;
 )");
-  tp.write(".build", "project cachetest\nsource song.synth\n");
+  tp.write("build.json", projectManifest("cachetest", {"song.synth"}));
 
   BuildCache cache;
   BuildResult first = buildProject(tp.dir.string(), &cache);
@@ -572,7 +619,7 @@ TEST(build_cache_invalidates_on_audio_input_change) {
   tp.write("a.synth",
            "open Core\nlet _ = render \"fromfile\" 8000.0 "
            "(sample (load_mono \"in.wav\") 0s 40ms) ;;");
-  tp.write(".build", "project audiocache\nsource a.synth\n");
+  tp.write("build.json", projectManifest("audiocache", {"a.synth"}));
 
   BuildCache cache;
   BuildResult first = buildProject(tp.dir.string(), &cache);
@@ -588,7 +635,7 @@ TEST(build_cache_invalidates_on_audio_input_change) {
   CHECK(!third.targets[0].cached);
   // And the artifact really reflects the new file.
   WavData w =
-      readWav((tp.dir / "build" / "artifacts" / "fromfile.wav").string());
+      readWav((tp.dir / "_build" / "artifacts" / "fromfile.wav").string());
   CHECK(std::fabs(w.channels[0][10] - 0.5) < 0.01);
 }
 
@@ -603,7 +650,7 @@ let _ = render "t4" 8000.0 (sample ((noise 1000.0) * 0.5) 0s 200ms) ;;
 let _ = render "t5" 8000.0 (sample ((fm 110.0 ((sine 55.0) * 50.0)) * 0.5) 0s 200ms) ;;
 let _ = render "t6" 8000.0 (sample ((reverb 200ms 0.4 0.5 ((sine 330.0) * (exp_decay 10.0)))) 0s 200ms) ;;
 )");
-  tp.write(".build", "project many\nsource many.synth\n");
+  tp.write("build.json", projectManifest("many", {"many.synth"}));
   BuildResult r = buildProject(tp.dir.string());
   for (auto& d : r.diags.items) std::cerr << d.message << "\n";
   CHECK(r.ok);
@@ -629,7 +676,7 @@ let voice : Scalar Signal = fm 220.0 ((sine 3.0) * 12.0) ;;
 let _ = render "a" 8000.0 (sample ((lowpass 900.0 voice) * 0.6) 0s 300ms) ;;
 let _ = render "b" 8000.0 (sample ((delay 50ms voice) * 0.4) 0s 300ms) ;;
 )");
-    tp.write(".build", "project det\nsource p.synth\n");
+    tp.write("build.json", projectManifest("det", {"p.synth"}));
   };
   TempDir one, two;
   makeProject(one);
@@ -637,8 +684,8 @@ let _ = render "b" 8000.0 (sample ((delay 50ms voice) * 0.4) 0s 300ms) ;;
   CHECK(buildProject(one.dir.string()).ok);
   CHECK(buildProject(two.dir.string()).ok);
   for (const char* name : {"a.wav", "b.wav"}) {
-    std::string x = slurp(one.dir / "build" / "artifacts" / name);
-    std::string y = slurp(two.dir / "build" / "artifacts" / name);
+    std::string x = slurp(one.dir / "_build" / "artifacts" / name);
+    std::string y = slurp(two.dir / "_build" / "artifacts" / name);
     CHECK(!x.empty());
     CHECK(x == y);
   }
@@ -651,7 +698,7 @@ open Core
 let _ = render "one" 8000.0 (sample ((sine 440.0) * 0.5) 0s 50ms) ;;
 let _ = render "two" 8000.0 (sample ((saw 110.0) * 0.5) 0s 50ms) ;;
 )");
-  tp.write(".build", "project watchcache\nsource w.synth\n");
+  tp.write("build.json", projectManifest("watchcache", {"w.synth"}));
 
   int builds = 0;
   bool touched = false;
@@ -671,9 +718,8 @@ let _ = render "two" 8000.0 (sample ((saw 110.0) * 0.5) 0s 50ms) ;;
           // Touch the manifest (a comment): sources unchanged, so both
           // targets should come from the cache on the rebuild.
           std::this_thread::sleep_for(std::chrono::milliseconds(20));
-          tp.write(".build",
-                   "# touched\nproject watchcache\nsource w.synth\n");
-          fs::last_write_time(tp.dir / ".build",
+          tp.write("build.json", projectManifest("watchcache", {"w.synth"}));
+          fs::last_write_time(tp.dir / "build.json",
                               fs::file_time_type::clock::now() +
                                   std::chrono::seconds(2));
           touched = true;
@@ -693,7 +739,7 @@ let tone : Scalar Signal = (sine 440.0) * (exp_decay 6.0) ;;
 let _ = render "tone" 8000.0 (sample tone 0s 500ms) ;;
 let _ = render_vis "tone-wave" 8000.0 (sample tone 0s 500ms) ;;
 )");
-  tp.write(".build", "project vis\nsource v.synth\n");
+  tp.write("build.json", projectManifest("vis", {"v.synth"}));
   BuildResult r = buildProject(tp.dir.string());
   for (auto& d : r.diags.items) std::cerr << d.message << "\n";
   CHECK(r.ok);
@@ -707,7 +753,7 @@ let _ = render_vis "tone-wave" 8000.0 (sample tone 0s 500ms) ;;
   }
   CHECK(wav && wav->kind == "audio");
   CHECK(svg && svg->kind == "visual");
-  CHECK(svg->artifact == "build/artifacts/tone-wave.svg");
+  CHECK(svg->artifact == "_build/artifacts/tone-wave.svg");
   CHECK(svg->frames == 4000);
 
   std::string content = slurp(tp.dir / svg->artifact);
@@ -717,7 +763,7 @@ let _ = render_vis "tone-wave" 8000.0 (sample tone 0s 500ms) ;;
   CHECK(content.find("0.500s @ 8000 Hz, 1 channel") != std::string::npos);
 
   // Metadata carries the kind so the dev app can tell them apart.
-  std::string meta = slurp(tp.dir / "build" / "metadata.json");
+  std::string meta = slurp(tp.dir / "_build" / "metadata.json");
   CHECK(meta.find("\"kind\": \"visual\"") != std::string::npos);
   CHECK(meta.find("\"kind\": \"audio\"") != std::string::npos);
 }
@@ -729,7 +775,7 @@ open Core
 let _ = render_vis "stereo-wave" 4000.0
   (sample (channels [sine 220.0; sine 224.0]) 0s 1s) ;;
 )");
-  tp.write(".build", "project visst\nsource st.synth\n");
+  tp.write("build.json", projectManifest("visst", {"st.synth"}));
   BuildResult r = buildProject(tp.dir.string());
   CHECK(r.ok);
   std::string content = slurp(tp.dir / r.targets[0].artifact);
@@ -747,7 +793,7 @@ open Core
 let _ = render "same" 8000.0 (sample (sine 440.0) 0s 100ms) ;;
 let _ = render_vis "same" 8000.0 (sample (sine 440.0) 0s 100ms) ;;
 )");
-  tp.write(".build", "project visdup\nsource dup.synth\n");
+  tp.write("build.json", projectManifest("visdup", {"dup.synth"}));
   BuildResult r = buildProject(tp.dir.string());
   CHECK(!r.ok);
   CHECK(r.diags.hasErrors());
@@ -761,12 +807,12 @@ let hot : Scalar Signal = (sine 220.0) * 3.0 ;;
 let _ = render "hard" 8000.0 (sample (hard_clip 0.5 hot) 0s 250ms) ;;
 let _ = render "soft" 8000.0 (sample (soft_clip 0.5 hot) 0s 250ms) ;;
 )");
-  tp.write(".build", "project dist\nsource dist.synth\n");
+  tp.write("build.json", projectManifest("dist", {"dist.synth"}));
   BuildResult r = buildProject(tp.dir.string());
   for (auto& d : r.diags.items) std::cerr << d.message << "\n";
   CHECK(r.ok);
-  WavData hard = readWav((tp.dir / "build" / "artifacts" / "hard.wav").string());
-  WavData soft = readWav((tp.dir / "build" / "artifacts" / "soft.wav").string());
+  WavData hard = readWav((tp.dir / "_build" / "artifacts" / "hard.wav").string());
+  WavData soft = readWav((tp.dir / "_build" / "artifacts" / "soft.wav").string());
   double hardPeak = 0, softPeak = 0;
   int flatHard = 0;
   for (int64_t i = 0; i < hard.frames(); i++) {
@@ -787,7 +833,7 @@ TEST(build_place_multi_matches_mixed_places) {
   // byte-identical artifacts.
   auto write = [](TempDir& tp, const char* body) {
     tp.write("p.synth", body);
-    tp.write(".build", "project pm\nsource p.synth\n");
+    tp.write("build.json", projectManifest("pm", {"p.synth"}));
   };
   TempDir multi, manual;
   write(multi, R"(
@@ -805,8 +851,8 @@ let _ = render "out" 8000.0
 )");
   CHECK(buildProject(multi.dir.string()).ok);
   CHECK(buildProject(manual.dir.string()).ok);
-  std::string a = slurp(multi.dir / "build" / "artifacts" / "out.wav");
-  std::string b = slurp(manual.dir / "build" / "artifacts" / "out.wav");
+  std::string a = slurp(multi.dir / "_build" / "artifacts" / "out.wav");
+  std::string b = slurp(manual.dir / "_build" / "artifacts" / "out.wav");
   CHECK(!a.empty());
   CHECK(a == b);
 }
@@ -821,11 +867,11 @@ let level : Scalar Sample = sample (exp_decay 0.0) 0s 200ms ;;
 let _ = render "out" 8000.0
   (sample ((place_multi level [0s; 100ms]) * 0.4) 0s 400ms) ;;
 )");
-  tp.write(".build", "project overlap\nsource o.synth\n");
+  tp.write("build.json", projectManifest("overlap", {"o.synth"}));
   BuildResult r = buildProject(tp.dir.string());
   for (auto& d : r.diags.items) std::cerr << d.message << "\n";
   CHECK(r.ok);
-  WavData w = readWav((tp.dir / "build" / "artifacts" / "out.wav").string());
+  WavData w = readWav((tp.dir / "_build" / "artifacts" / "out.wav").string());
   auto at = [&](double t) { return w.channels[0][(size_t)(t * 8000.0)]; };
   CHECK_NEAR(at(0.05), 0.4, 0.01);   // one placement
   CHECK_NEAR(at(0.15), 0.8, 0.01);   // overlap: both sum
@@ -838,7 +884,7 @@ TEST(build_computed_callee_matches_direct_call) {
   // same artifact as the direct call.
   auto write = [](TempDir& tp, const char* body) {
     tp.write("c.synth", body);
-    tp.write(".build", "project cc\nsource c.synth\n");
+    tp.write("build.json", projectManifest("cc", {"c.synth"}));
   };
   TempDir computed, direct;
   write(computed, R"(
@@ -855,8 +901,8 @@ let _ = render "out" 8000.0
   for (auto& d : rc.diags.items) std::cerr << d.message << "\n";
   CHECK(rc.ok);
   CHECK(buildProject(direct.dir.string()).ok);
-  std::string a = slurp(computed.dir / "build" / "artifacts" / "out.wav");
-  std::string b = slurp(direct.dir / "build" / "artifacts" / "out.wav");
+  std::string a = slurp(computed.dir / "_build" / "artifacts" / "out.wav");
+  std::string b = slurp(direct.dir / "_build" / "artifacts" / "out.wav");
   CHECK(!a.empty());
   CHECK(a == b);
 }
@@ -871,11 +917,11 @@ let wet : Scalar Sample =
   sample (reverb 100ms 0.3 0.5 ((sine 440.0) * (exp_decay 30.0))) 0s 150ms ;;
 let _ = render "out" 8000.0 (sample (place_multi wet [0s; 300ms]) 0s 600ms) ;;
 )");
-  tp.write(".build", "project statepm\nsource s.synth\n");
+  tp.write("build.json", projectManifest("statepm", {"s.synth"}));
   BuildResult r = buildProject(tp.dir.string());
   for (auto& d : r.diags.items) std::cerr << d.message << "\n";
   CHECK(r.ok);
-  WavData w = readWav((tp.dir / "build" / "artifacts" / "out.wav").string());
+  WavData w = readWav((tp.dir / "_build" / "artifacts" / "out.wav").string());
   int64_t shift = 2400;  // 300ms
   int64_t len = 1200;    // 150ms
   for (int64_t i = 0; i < len; i++)
@@ -893,22 +939,22 @@ let voice : Scalar Signal =
   soft_clip 0.8 (lowpass 900.0 ((saw 220.0) * 2.0)) ;;
 let _ = render "out" 8000.0 (sample voice 0s 300ms) ;;
 )");
-  classic.write(".build", "project c\nsource p.synth\n");
+  classic.write("build.json", projectManifest("c", {"p.synth"}));
   piped.write("p.synth", R"(
 open Core
 let voice : Scalar Signal =
   saw 220.0 * 2.0 |> lowpass ~cutoff:900.0 |> soft_clip ~threshold:0.8 ;;
 let _ = sample voice ~from:0s ~to:300ms |> render ~name:"out" ~rate:8000.0 ;;
 )");
-  piped.write(".build", "project p\nsource p.synth\n");
+  piped.write("build.json", projectManifest("p", {"p.synth"}));
   BuildResult rc = buildProject(classic.dir.string());
   BuildResult rp = buildProject(piped.dir.string());
   for (auto& d : rc.diags.items) std::cerr << d.message << "\n";
   for (auto& d : rp.diags.items) std::cerr << d.message << "\n";
   CHECK(rc.ok);
   CHECK(rp.ok);
-  std::string a = slurp(classic.dir / "build" / "artifacts" / "out.wav");
-  std::string b = slurp(piped.dir / "build" / "artifacts" / "out.wav");
+  std::string a = slurp(classic.dir / "_build" / "artifacts" / "out.wav");
+  std::string b = slurp(piped.dir / "_build" / "artifacts" / "out.wav");
   CHECK(!a.empty());
   CHECK(a == b);
 }
@@ -925,11 +971,11 @@ let tones : Scalar Signal list = List.map sine [220.0; 330.0] ;;
 let sum : Scalar Signal = (mix_all tones) * 0.2 + quiet 440.0 ;;
 let _ = render "out" 8000.0 (sample sum 0s 200ms) ;;
 )");
-  tp.write(".build", "project partial\nsource p.synth\n");
+  tp.write("build.json", projectManifest("partial", {"p.synth"}));
   BuildResult r = buildProject(tp.dir.string());
   for (auto& d : r.diags.items) std::cerr << d.message << "\n";
   CHECK(r.ok);
-  WavData w = readWav((tp.dir / "build" / "artifacts" / "out.wav").string());
+  WavData w = readWav((tp.dir / "_build" / "artifacts" / "out.wav").string());
   double peak = 0;
   for (double v : w.channels[0]) peak = std::max(peak, std::fabs(v));
   CHECK(peak > 0.3);  // all three tones present
@@ -945,11 +991,11 @@ let harmonic i:Scalar : Scalar Signal =
 let stack : Scalar Signal = mix_all (List.init 5.0 harmonic) * 0.3 ;;
 let _ = stack |> sample ~from:0s ~to:200ms |> render ~name:"out" ~rate:8000.0 ;;
 )");
-  tp.write(".build", "project li\nsource p.synth\n");
+  tp.write("build.json", projectManifest("li", {"p.synth"}));
   BuildResult r = buildProject(tp.dir.string());
   for (auto& d : r.diags.items) std::cerr << d.message << "\n";
   CHECK(r.ok);
-  WavData w = readWav((tp.dir / "build" / "artifacts" / "out.wav").string());
+  WavData w = readWav((tp.dir / "_build" / "artifacts" / "out.wav").string());
   // Goertzel power at each expected harmonic: all five present.
   auto power = [&](double freq) {
     double wc = 2.0 * M_PI * freq / 8000.0, c = 2.0 * std::cos(wc);
@@ -975,18 +1021,18 @@ let hit : Scalar Sample = sine 660.0 * exp_decay 20.0 |> sample ~from:0s ~to:100
 let _ = place_multi hit (time_steps ~start:0s ~step:150ms ~count:4.0)
         |> sample ~from:0s ~to:600ms |> render ~name:"out" ~rate:8000.0 ;;
 )");
-  stepped.write(".build", "project ts\nsource p.synth\n");
+  stepped.write("build.json", projectManifest("ts", {"p.synth"}));
   manual.write("p.synth", R"(
 open Core
 let hit : Scalar Sample = sine 660.0 * exp_decay 20.0 |> sample ~from:0s ~to:100ms ;;
 let _ = place_multi hit [0s; 150ms; 300ms; 450ms]
         |> sample ~from:0s ~to:600ms |> render ~name:"out" ~rate:8000.0 ;;
 )");
-  manual.write(".build", "project tm\nsource p.synth\n");
+  manual.write("build.json", projectManifest("tm", {"p.synth"}));
   CHECK(buildProject(stepped.dir.string()).ok);
   CHECK(buildProject(manual.dir.string()).ok);
-  std::string a = slurp(stepped.dir / "build" / "artifacts" / "out.wav");
-  std::string b = slurp(manual.dir / "build" / "artifacts" / "out.wav");
+  std::string a = slurp(stepped.dir / "_build" / "artifacts" / "out.wav");
+  std::string b = slurp(manual.dir / "_build" / "artifacts" / "out.wav");
   CHECK(!a.empty());
   CHECK(a == b);
 }
@@ -998,11 +1044,11 @@ open Core
 let layers : Scalar Signal = mix_all (List.repeat 3.0 (sine 220.0)) * 0.2 ;;
 let _ = layers |> sample ~from:0s ~to:100ms |> render ~name:"out" ~rate:8000.0 ;;
 )");
-  tp.write(".build", "project rep\nsource p.synth\n");
+  tp.write("build.json", projectManifest("rep", {"p.synth"}));
   BuildResult r = buildProject(tp.dir.string());
   CHECK(r.ok);
   // Three identical layers at 0.2 gain -> amplitude 0.6.
-  WavData w = readWav((tp.dir / "build" / "artifacts" / "out.wav").string());
+  WavData w = readWav((tp.dir / "_build" / "artifacts" / "out.wav").string());
   double peak = 0;
   for (double v : w.channels[0]) peak = std::max(peak, std::fabs(v));
   CHECK_NEAR(peak, 0.6, 0.01);
@@ -1015,7 +1061,7 @@ let xs : Scalar list = List.repeat 2.5 1.0 ;;
 let _ = mix_all (List.repeat 1.0 (sine 1.0)) |> sample ~from:0s ~to:10ms
         |> render ~name:"x" ~rate:8000.0 ;;
 )");
-  bad.write(".build", "project badrep\nsource p.synth\n");
+  bad.write("build.json", projectManifest("badrep", {"p.synth"}));
   BuildResult rb = buildProject(bad.dir.string());
   CHECK(!rb.ok);
   CHECK(rb.diags.hasErrors());
@@ -1035,7 +1081,7 @@ let song : Scalar Signal =
 ;;
 let _ = song |> sample ~from:0s ~to:1s |> render ~name:"out" ~rate:8000.0 ;;
 )");
-  nested.write(".build", "project n\nsource p.synth\n");
+  nested.write("build.json", projectManifest("n", {"p.synth"}));
   flat.write("p.synth", R"(
 open Core
 let hit : Scalar Sample = sine 440.0 * exp_decay 12.0
@@ -1044,14 +1090,14 @@ let beats : Timestamp list = time_steps ~start:0s ~step:200ms ~count:5.0 ;;
 let song : Scalar Signal = place_multi hit beats ;;
 let _ = song |> sample ~from:0s ~to:1s |> render ~name:"out" ~rate:8000.0 ;;
 )");
-  flat.write(".build", "project f\nsource p.synth\n");
+  flat.write("build.json", projectManifest("f", {"p.synth"}));
   BuildResult rn = buildProject(nested.dir.string());
   BuildResult rf = buildProject(flat.dir.string());
   for (auto& d : rn.diags.items) std::cerr << d.message << "\n";
   CHECK(rn.ok);
   CHECK(rf.ok);
-  std::string a = slurp(nested.dir / "build" / "artifacts" / "out.wav");
-  std::string b = slurp(flat.dir / "build" / "artifacts" / "out.wav");
+  std::string a = slurp(nested.dir / "_build" / "artifacts" / "out.wav");
+  std::string b = slurp(flat.dir / "_build" / "artifacts" / "out.wav");
   CHECK(!a.empty());
   CHECK(a == b);
 }
@@ -1070,7 +1116,7 @@ let voice : Scalar Signal =
 ;;
 let _ = voice |> sample ~from:0s ~to:50ms |> render ~name:"out" ~rate:8000.0 ;;
 )");
-  tp.write(".build", "project shadow\nsource p.synth\n");
+  tp.write("build.json", projectManifest("shadow", {"p.synth"}));
   BuildCache cache;
   CHECK(buildProject(tp.dir.string(), &cache).ok);
   tp.write("p.synth", R"(
@@ -1098,7 +1144,7 @@ let song : Scalar Signal = )" + std::string(song) + R"( ;;
 let _ = render "out" 8000.0 (sample song 0s 900ms) ;;
 )";
     tp.write("p.synth", src);
-    tp.write(".build", "project eq\nsource p.synth\n");
+    tp.write("build.json", projectManifest("eq", {"p.synth"}));
   };
   TempDir multi, lambda, curried;
   write(multi, "place_multi hit [0s; 300ms; 600ms]");
@@ -1113,9 +1159,9 @@ let _ = render "out" 8000.0 (sample song 0s 900ms) ;;
   CHECK(rm.ok);
   CHECK(rl.ok);
   CHECK(rc.ok);
-  std::string a = slurp(multi.dir / "build" / "artifacts" / "out.wav");
-  std::string b = slurp(lambda.dir / "build" / "artifacts" / "out.wav");
-  std::string c = slurp(curried.dir / "build" / "artifacts" / "out.wav");
+  std::string a = slurp(multi.dir / "_build" / "artifacts" / "out.wav");
+  std::string b = slurp(lambda.dir / "_build" / "artifacts" / "out.wav");
+  std::string c = slurp(curried.dir / "_build" / "artifacts" / "out.wav");
   CHECK(!a.empty());
   CHECK(a == b);
   CHECK(a == c);
@@ -1133,7 +1179,7 @@ let stack detune:Scalar : Scalar Signal =
 let _ = stack 3.0 |> sample ~from:0s ~to:200ms
         |> render ~name:"out" ~rate:8000.0 ;;
 )");
-  captured.write(".build", "project cap\nsource p.synth\n");
+  captured.write("build.json", projectManifest("cap", {"p.synth"}));
   inlined.write("p.synth", R"(
 open Core
 let stack : Scalar Signal =
@@ -1141,13 +1187,13 @@ let stack : Scalar Signal =
 let _ = stack |> sample ~from:0s ~to:200ms
         |> render ~name:"out" ~rate:8000.0 ;;
 )");
-  inlined.write(".build", "project inl\nsource p.synth\n");
+  inlined.write("build.json", projectManifest("inl", {"p.synth"}));
   BuildResult rc = buildProject(captured.dir.string());
   for (auto& d : rc.diags.items) std::cerr << d.message << "\n";
   CHECK(rc.ok);
   CHECK(buildProject(inlined.dir.string()).ok);
-  std::string a = slurp(captured.dir / "build" / "artifacts" / "out.wav");
-  std::string b = slurp(inlined.dir / "build" / "artifacts" / "out.wav");
+  std::string a = slurp(captured.dir / "_build" / "artifacts" / "out.wav");
+  std::string b = slurp(inlined.dir / "_build" / "artifacts" / "out.wav");
   CHECK(!a.empty());
   CHECK(a == b);
 }
@@ -1171,7 +1217,7 @@ let _ = voice |> sample ~from:0s ~to:50ms |> render ~name:"out" ~rate:8000.0 ;;
   };
   TempDir tp;
   tp.write("p.synth", src("0.9", "0.5"));
-  tp.write(".build", "project lshadow\nsource p.synth\n");
+  tp.write("build.json", projectManifest("lshadow", {"p.synth"}));
   BuildCache cache;
   CHECK(buildProject(tp.dir.string(), &cache).ok);
   // Edit only the shadowed, unused top-level `gain`: still cached.
@@ -1198,19 +1244,19 @@ TEST(build_open_matches_qualified_output) {
                "open Core\nopen Instr\n"
                "let _ = tone 440.0 |> sample ~from:0s ~to:300ms\n"
                "        |> render ~name:\"out\" ~rate:8000.0 ;;\n");
-  opened.write(".build", "project o\nsource song.synth\n");
+  opened.write("build.json", projectManifest("o", {"song.synth"}));
   qualified.write("instr.synth", instr);
   qualified.write("song.synth",
                   "open Core\nimport Instr\n"
                   "let _ = Instr.tone 440.0 |> sample ~from:0s ~to:300ms\n"
                   "        |> render ~name:\"out\" ~rate:8000.0 ;;\n");
-  qualified.write(".build", "project q\nsource song.synth\n");
+  qualified.write("build.json", projectManifest("q", {"song.synth"}));
   BuildResult ro = buildProject(opened.dir.string());
   for (auto& d : ro.diags.items) std::cerr << d.message << "\n";
   CHECK(ro.ok);
   CHECK(buildProject(qualified.dir.string()).ok);
-  std::string a = slurp(opened.dir / "build" / "artifacts" / "out.wav");
-  std::string b = slurp(qualified.dir / "build" / "artifacts" / "out.wav");
+  std::string a = slurp(opened.dir / "_build" / "artifacts" / "out.wav");
+  std::string b = slurp(qualified.dir / "_build" / "artifacts" / "out.wav");
   CHECK(!a.empty());
   CHECK(a == b);
 }
@@ -1229,10 +1275,10 @@ TEST(build_open_stale_cache_invalidation) {
            "open Core\nopen Instr\n"
            "let _ = tone |> sample ~from:0s ~to:200ms\n"
            "        |> render ~name:\"out\" ~rate:8000.0 ;;\n");
-  tp.write(".build", "project oc\nsource song.synth\n");
+  tp.write("build.json", projectManifest("oc", {"song.synth"}));
   BuildCache cache;
   CHECK(buildProject(tp.dir.string(), &cache).ok);
-  std::string before = slurp(tp.dir / "build" / "artifacts" / "out.wav");
+  std::string before = slurp(tp.dir / "_build" / "artifacts" / "out.wav");
   // Unchanged rebuild: cached.
   BuildResult r1 = buildProject(tp.dir.string(), &cache);
   CHECK(r1.ok);
@@ -1242,7 +1288,7 @@ TEST(build_open_stale_cache_invalidation) {
   BuildResult r2 = buildProject(tp.dir.string(), &cache);
   CHECK(r2.ok);
   CHECK(!r2.targets[0].cached);
-  std::string after = slurp(tp.dir / "build" / "artifacts" / "out.wav");
+  std::string after = slurp(tp.dir / "_build" / "artifacts" / "out.wav");
   CHECK(before != after);
 }
 
@@ -1259,7 +1305,7 @@ TEST(build_module_alias_stale_cache_invalidation) {
            "module I = Instr\n"
            "let _ = I.tone |> sample ~from:0s ~to:200ms\n"
            "        |> render ~name:\"out\" ~rate:8000.0 ;;\n");
-  tp.write(".build", "project ac\nsource song.synth\n");
+  tp.write("build.json", projectManifest("ac", {"song.synth"}));
   BuildCache cache;
   CHECK(buildProject(tp.dir.string(), &cache).ok);
   BuildResult r1 = buildProject(tp.dir.string(), &cache);
@@ -1276,9 +1322,8 @@ namespace {
 // A root tree: a `Basic` library (with its own render target and an
 // internal module) and a `tunes` project consuming it via `dep Basic`.
 void writeRootTree(TempTree& tp) {
-  tp.write(".build", "project demo\nbuild lib/basic\nbuild tunes\n");
-  tp.write("lib/basic/.build",
-           "library Basic\nexpose keys.synth\nsource internal.synth\n");
+  tp.write("build.json", rootManifest("demo", {"lib/basic", "tunes"}));
+  tp.write("lib/basic/build.json", libraryManifest("Basic", {"keys.synth"}, {"internal.synth"}));
   tp.write("lib/basic/keys.synth",
            "open Core\nimport Internal\n"
            "let strike freq:Scalar : Scalar Signal =\n"
@@ -1286,7 +1331,7 @@ void writeRootTree(TempTree& tp) {
            "let _ = strike 660.0 |> sample ~from:0s ~to:100ms\n"
            "        |> render ~name:\"keys-demo\" ~rate:8000.0 ;;\n");
   tp.write("lib/basic/internal.synth", "open Core\nlet base : Scalar = 0.5 ;;\n");
-  tp.write("tunes/.build", "project tunes\ndep Basic\nsource song.synth\n");
+  tp.write("tunes/build.json", projectManifest("tunes", {"song.synth"}, {"Basic"}));
   tp.write("tunes/song.synth",
            "open Core\nimport Basic\n"
            "let _ = Basic.Keys.strike 440.0 |> sample ~from:0s ~to:200ms\n"
@@ -1304,10 +1349,10 @@ TEST(build_root_builds_all_rules) {
     for (auto& d : br.diags.items) std::cerr << rule << ": " << d.message << "\n";
   CHECK(rr.ok);
   CHECK(rr.rules.size() == 2);
-  // Each rule renders into its own build/ dir.
-  CHECK(fs::exists(tp.dir / "lib" / "basic" / "build" / "artifacts" /
+  // Each rule renders into its own directory under the root's _build/.
+  CHECK(fs::exists(tp.dir / "_build" / "lib" / "basic" / "artifacts" /
                    "keys-demo.wav"));
-  CHECK(fs::exists(tp.dir / "tunes" / "build" / "artifacts" / "song.wav"));
+  CHECK(fs::exists(tp.dir / "_build" / "tunes" / "artifacts" / "song.wav"));
   CHECK(rr.registry.find("Basic") != nullptr);
 }
 
@@ -1317,20 +1362,20 @@ TEST(build_dep_library_renders_suppressed) {
   RootBuildResult rr = buildRoot(tp.dir.string(), BuildOptions{});
   CHECK(rr.ok);
   // The consumer's build renders only its own target - the library's
-  // `keys-demo` must not leak into tunes/build.
+  // `keys-demo` must not leak into _build/tunes.
   const BuildResult* tunes = nullptr;
   for (auto& [rule, br] : rr.rules)
     if (rule == "tunes") tunes = &br;
   CHECK(tunes != nullptr);
   CHECK(tunes->targets.size() == 1);
   CHECK(tunes->targets[0].name == "song");
-  CHECK(!fs::exists(tp.dir / "tunes" / "build" / "artifacts" /
+  CHECK(!fs::exists(tp.dir / "_build" / "tunes" / "artifacts" /
                     "keys-demo.wav"));
 }
 
 TEST(build_root_file_rule) {
   TempTree tp;
-  tp.write(".build", "project demo\nbuild tone.synth\n");
+  tp.write("build.json", rootManifest("demo", {"tone.synth"}));
   tp.write("tone.synth",
            "open Core\nlet _ = sine 440.0 |> sample ~from:0s ~to:100ms\n"
            "        |> render ~name:\"tone\" ~rate:8000.0 ;;\n");
@@ -1338,10 +1383,11 @@ TEST(build_root_file_rule) {
   for (auto& [rule, br] : rr.rules)
     for (auto& d : br.diags.items) std::cerr << d.message << "\n";
   CHECK(rr.ok);
-  CHECK(fs::exists(tp.dir / "build" / "artifacts" / "tone.wav"));
+  // A file rule's outputs mirror the rule path minus its extension.
+  CHECK(fs::exists(tp.dir / "_build" / "tone" / "artifacts" / "tone.wav"));
   // An unknown rule fails.
   TempTree bad;
-  bad.write(".build", "project demo\nbuild nope\n");
+  bad.write("build.json", rootManifest("demo", {"nope"}));
   RootBuildResult rb = buildRoot(bad.dir.string(), BuildOptions{});
   CHECK(!rb.ok);
 }
@@ -1354,7 +1400,9 @@ TEST(build_library_standalone) {
   for (auto& d : r.diags.items) std::cerr << d.message << "\n";
   CHECK(r.ok);
   CHECK(r.manifest.projectName == "Basic");
-  CHECK(fs::exists(tp.dir / "lib" / "basic" / "build" / "artifacts" /
+  // Built directly, the unit still lands under the enclosing root's
+  // _build/ - same place a root build would put it.
+  CHECK(fs::exists(tp.dir / "_build" / "lib" / "basic" / "artifacts" /
                    "keys-demo.wav"));
 }
 
@@ -1366,10 +1414,10 @@ TEST(build_subdir_build_resolves_deps_via_root) {
   BuildResult r = buildProject((tp.dir / "tunes").string());
   for (auto& d : r.diags.items) std::cerr << d.message << "\n";
   CHECK(r.ok);
-  CHECK(fs::exists(tp.dir / "tunes" / "build" / "artifacts" / "song.wav"));
+  CHECK(fs::exists(tp.dir / "_build" / "tunes" / "artifacts" / "song.wav"));
   // Without an enclosing root, deps are an error.
   TempTree lone;
-  lone.write("tunes/.build", "project tunes\ndep Basic\nsource s.synth\n");
+  lone.write("tunes/build.json", projectManifest("tunes", {"s.synth"}, {"Basic"}));
   lone.write("tunes/s.synth", "open Core\nlet x : Scalar = 1.0 ;;\n");
   BuildResult r2 = buildProject((lone.dir / "tunes").string());
   CHECK(!r2.ok);
@@ -1389,21 +1437,21 @@ TEST(build_cross_library_byte_identity) {
             "  sine freq * exp_decay 8.0 * base ;;\n"
             "let _ = strike 440.0 |> sample ~from:0s ~to:200ms\n"
             "        |> render ~name:\"song\" ~rate:8000.0 ;;\n");
-  inl.write(".build", "project inline\nsource song.synth\n");
+  inl.write("build.json", projectManifest("inline", {"song.synth"}));
   CHECK(buildProject(inl.dir.string()).ok);
   std::string a =
-      slurp(tp.dir / "tunes" / "build" / "artifacts" / "song.wav");
-  std::string b = slurp(inl.dir / "build" / "artifacts" / "song.wav");
+      slurp(tp.dir / "_build" / "tunes" / "artifacts" / "song.wav");
+  std::string b = slurp(inl.dir / "_build" / "artifacts" / "song.wav");
   CHECK(!a.empty());
   CHECK(a == b);
 }
 
 TEST(build_root_duplicate_library_names_fail) {
   TempTree tp;
-  tp.write(".build", "project demo\nbuild a\n");
-  tp.write("a/.build", "library Same\nexpose x.synth\n");
+  tp.write("build.json", rootManifest("demo", {"a"}));
+  tp.write("a/build.json", libraryManifest("Same", {"x.synth"}));
   tp.write("a/x.synth", "open Core\nlet x : Scalar = 1.0 ;;\n");
-  tp.write("b/.build", "library Same\nexpose y.synth\n");
+  tp.write("b/build.json", libraryManifest("Same", {"y.synth"}));
   tp.write("b/y.synth", "open Core\nlet y : Scalar = 1.0 ;;\n");
   RootBuildResult rr = buildRoot(tp.dir.string(), BuildOptions{});
   CHECK(!rr.ok);
@@ -1460,20 +1508,20 @@ TEST(build_core_qualified_end_to_end) {
                   "  (Core.sample (Core.mix_all (Core.List.init ~n:3.0\n"
                   "     ~f:(fun i:Scalar -> Core.sine (110.0 * (i + 1.0)))))\n"
                   "   0s 300ms) ;;\n");
-  qualified.write(".build", "project cq\nsource q.synth\n");
+  qualified.write("build.json", projectManifest("cq", {"q.synth"}));
   opened.write("o.synth",
                "open Core\n"
                "let _ = render \"out\" 8000.0\n"
                "  (sample (mix_all (List.init ~n:3.0\n"
                "     ~f:(fun i:Scalar -> sine (110.0 * (i + 1.0)))))\n"
                "   0s 300ms) ;;\n");
-  opened.write(".build", "project co\nsource o.synth\n");
+  opened.write("build.json", projectManifest("co", {"o.synth"}));
   BuildResult rq = buildProject(qualified.dir.string());
   for (auto& d : rq.diags.items) std::cerr << d.message << "\n";
   CHECK(rq.ok);
   CHECK(buildProject(opened.dir.string()).ok);
-  std::string a = slurp(qualified.dir / "build" / "artifacts" / "out.wav");
-  std::string b = slurp(opened.dir / "build" / "artifacts" / "out.wav");
+  std::string a = slurp(qualified.dir / "_build" / "artifacts" / "out.wav");
+  std::string b = slurp(opened.dir / "_build" / "artifacts" / "out.wav");
   CHECK(!a.empty());
   CHECK(a == b);
 }
@@ -1488,7 +1536,7 @@ let bass : Scalar Sample = sine 110.0 * 0.5 |> sample ~from:0s ~to:200ms ;;
 let _ = render_stems ~name:"mix" ~rate:8000.0
                      ~stems:[("lead", lead); ("bass", bass)] ;;
 )");
-  stems.write(".build", "project st\nsource p.synth\n");
+  stems.write("build.json", projectManifest("st", {"p.synth"}));
   solo.write("p.synth", R"(
 open Core
 let lead : Scalar Sample = sine 440.0 * 0.5 |> sample ~from:0s ~to:200ms ;;
@@ -1496,7 +1544,7 @@ let bass : Scalar Sample = sine 110.0 * 0.5 |> sample ~from:0s ~to:200ms ;;
 let _ = lead |> render ~name:"mix-lead" ~rate:8000.0 ;;
 let _ = bass |> render ~name:"mix-bass" ~rate:8000.0 ;;
 )");
-  solo.write(".build", "project so\nsource p.synth\n");
+  solo.write("build.json", projectManifest("so", {"p.synth"}));
   BuildResult rs = buildProject(stems.dir.string());
   BuildResult ro = buildProject(solo.dir.string());
   for (auto& d : rs.diags.items) std::cerr << d.message << "\n";
@@ -1504,13 +1552,13 @@ let _ = bass |> render ~name:"mix-bass" ~rate:8000.0 ;;
   CHECK(ro.ok);
   CHECK(rs.targets.size() == 2);
   for (const char* nm : {"mix-lead.wav", "mix-bass.wav"}) {
-    std::string a = slurp(stems.dir / "build" / "artifacts" / nm);
-    std::string b = slurp(solo.dir / "build" / "artifacts" / nm);
+    std::string a = slurp(stems.dir / "_build" / "artifacts" / nm);
+    std::string b = slurp(solo.dir / "_build" / "artifacts" / nm);
     CHECK(!a.empty());
     CHECK(a == b);
   }
   // Both stems appear in metadata as ordinary audio targets.
-  std::string meta = slurp(stems.dir / "build" / "metadata.json");
+  std::string meta = slurp(stems.dir / "_build" / "metadata.json");
   CHECK(meta.find("\"name\": \"mix-lead\"") != std::string::npos);
   CHECK(meta.find("\"name\": \"mix-bass\"") != std::string::npos);
 }
@@ -1523,7 +1571,7 @@ let s : Scalar Sample = sine 440.0 |> sample ~from:0s ~to:50ms ;;
 let _ = render_stems ~name:"mix" ~rate:8000.0
                      ~stems:[("x", s); ("x", s)] ;;
 )");
-  tp.write(".build", "project dup\nsource p.synth\n");
+  tp.write("build.json", projectManifest("dup", {"p.synth"}));
   BuildResult r = buildProject(tp.dir.string());
   CHECK(!r.ok);
   CHECK(r.diags.hasErrors());
@@ -1540,13 +1588,13 @@ let mix : Scalar Sample = sine 440.0 * 0.25 + saw 110.0 * 0.25
 let _ = render_vis_stems ~name:"stack" ~rate:8000.0
                          ~stems:[("mix", mix); ("lead", a); ("bass", b)] ;;
 )");
-  tp.write(".build", "project vs\nsource p.synth\n");
+  tp.write("build.json", projectManifest("vs", {"p.synth"}));
   BuildResult r = buildProject(tp.dir.string());
   for (auto& d : r.diags.items) std::cerr << d.message << "\n";
   CHECK(r.ok);
   CHECK(r.targets.size() == 1);  // ONE artifact, not one per lane
   CHECK(r.targets[0].kind == "visual");
-  CHECK(r.targets[0].artifact == "build/artifacts/stack.svg");
+  CHECK(r.targets[0].artifact == "_build/artifacts/stack.svg");
   CHECK(r.targets[0].frames == 1600);  // the longest lane (200ms @ 8k)
 
   std::string svg = slurp(tp.dir / r.targets[0].artifact);
@@ -1571,7 +1619,7 @@ let half : Scalar Signal = base * 0.5 ;;
 let _ = half |> sample ~from:0s ~to:50ms |> render ~name:"one" ~rate:8000.0 ;;
 let _ = base |> sample ~from:0s ~to:50ms |> render ~name:"two" ~rate:8000.0 ;;
 )");
-  tp.write(".build", "project logs\nsource p.synth\n");
+  tp.write("build.json", projectManifest("logs", {"p.synth"}));
 
   std::vector<std::string> log;
   std::mutex mu;
@@ -1616,7 +1664,7 @@ TEST(build_verbose_log_reports_cache_hits) {
 open Core
 let _ = sine 440.0 |> sample ~from:0s ~to:20ms |> render ~name:"t" ~rate:8000.0 ;;
 )");
-  tp.write(".build", "project chlog\nsource p.synth\n");
+  tp.write("build.json", projectManifest("chlog", {"p.synth"}));
 
   BuildCache cache;
   CHECK(buildProject(tp.dir.string(), &cache).ok);
@@ -1646,7 +1694,7 @@ let a : Scalar Signal = base * 0.5 ;;
 let b : Scalar Signal = base + a ;;
 let _ = b |> sample ~from:0s ~to:10ms |> render ~name:"t" ~rate:8000.0 ;;
 )");
-  tp.write(".build", "project stats\nsource p.synth\n");
+  tp.write("build.json", projectManifest("stats", {"p.synth"}));
   DiagnosticBag diags;
   Program prog = checkProject({(tp.dir / "p.synth").string()}, diags);
   CHECK(!diags.hasErrors());
@@ -1672,11 +1720,11 @@ TEST(build_metadata_includes_render_ms) {
 open Core
 let _ = sine 440.0 |> sample ~from:0s ~to:50ms |> render ~name:"t" ~rate:8000.0 ;;
 )");
-  tp.write(".build", "project ms\nsource p.synth\n");
+  tp.write("build.json", projectManifest("ms", {"p.synth"}));
   BuildResult r = buildProject(tp.dir.string());
   CHECK(r.ok);
   CHECK(r.targets[0].renderMillis > 0);
-  std::string meta = slurp(tp.dir / "build" / "metadata.json");
+  std::string meta = slurp(tp.dir / "_build" / "metadata.json");
   CHECK(meta.find("\"render_ms\": ") != std::string::npos);
 }
 
@@ -1695,9 +1743,9 @@ let _ = place_multi hit beats |> sample ~from:0s ~to:1200ms
 )";
   TempDir a, b, c, d;
   a.write("p.synth", jittered);
-  a.write(".build", "project ja\nsource p.synth\n");
+  a.write("build.json", projectManifest("ja", {"p.synth"}));
   b.write("p.synth", jittered);
-  b.write(".build", "project jb\nsource p.synth\n");
+  b.write("build.json", projectManifest("jb", {"p.synth"}));
   c.write("p.synth", R"(
 open Core
 let hit : Scalar Sample = sine 660.0 * exp_decay 20.0 |> sample ~from:0s ~to:100ms ;;
@@ -1706,7 +1754,7 @@ let beats : Timestamp list =
 let _ = place_multi hit beats |> sample ~from:0s ~to:1200ms
         |> render ~name:"out" ~rate:8000.0 ;;
 )");
-  c.write(".build", "project jc\nsource p.synth\n");
+  c.write("build.json", projectManifest("jc", {"p.synth"}));
   d.write("p.synth", R"(
 open Core
 let hit : Scalar Sample = sine 660.0 * exp_decay 20.0 |> sample ~from:0s ~to:100ms ;;
@@ -1714,15 +1762,15 @@ let beats : Timestamp list = time_steps ~start:100ms ~step:200ms ~count:5.0 ;;
 let _ = place_multi hit beats |> sample ~from:0s ~to:1200ms
         |> render ~name:"out" ~rate:8000.0 ;;
 )");
-  d.write(".build", "project jd\nsource p.synth\n");
+  d.write("build.json", projectManifest("jd", {"p.synth"}));
   CHECK(buildProject(a.dir.string()).ok);
   CHECK(buildProject(b.dir.string()).ok);
   CHECK(buildProject(c.dir.string()).ok);
   CHECK(buildProject(d.dir.string()).ok);
-  std::string wa = slurp(a.dir / "build" / "artifacts" / "out.wav");
-  std::string wb = slurp(b.dir / "build" / "artifacts" / "out.wav");
-  std::string wc = slurp(c.dir / "build" / "artifacts" / "out.wav");
-  std::string wd = slurp(d.dir / "build" / "artifacts" / "out.wav");
+  std::string wa = slurp(a.dir / "_build" / "artifacts" / "out.wav");
+  std::string wb = slurp(b.dir / "_build" / "artifacts" / "out.wav");
+  std::string wc = slurp(c.dir / "_build" / "artifacts" / "out.wav");
+  std::string wd = slurp(d.dir / "_build" / "artifacts" / "out.wav");
   CHECK(!wa.empty());
   CHECK(wa == wb);  // same seed: reproducible
   CHECK(wa != wc);  // different seed: different feel
@@ -1736,9 +1784,93 @@ open Core
 let beats : Timestamp list = [0s] |> jitter ~seed:1.0 ~spread:0ms - 5ms ;;
 let _ = sine 220.0 |> sample ~from:0s ~to:10ms |> render ~name:"x" ~rate:8000.0 ;;
 )");
-  tp.write(".build", "project jn\nsource p.synth\n");
+  tp.write("build.json", projectManifest("jn", {"p.synth"}));
   // Negative spread must be rejected; whether it parses as a checker or
   // eval error, the build fails with diagnostics.
   BuildResult r = buildProject(tp.dir.string());
   CHECK(!r.ok);
+}
+
+TEST(build_signal_fn_matches_exp_decay) {
+  // A hand-built exponential envelope via `signal ~f` must render
+  // byte-identically to the exp_decay primitive.
+  TempDir a;
+  a.write("build.json", projectManifest("a", {"song.synth"}));
+  a.write("song.synth",
+          "open Core\n"
+          "let _ = exp_decay 3.0 |> sample ~from:0s ~to:200ms\n"
+          "        |> render ~name:\"out\" ~rate:8000.0 ;;\n");
+  BuildResult ra = buildProject(a.dir.string());
+  for (auto& d : ra.diags.items) std::cerr << d.message << "\n";
+  CHECK(ra.ok);
+
+  TempDir b;
+  b.write("build.json", projectManifest("b", {"song.synth"}));
+  b.write("song.synth",
+          "open Core\n"
+          "let _ = signal ~f:(fun t:Scalar -> exp (0.0 - 3.0 * t))\n"
+          "        |> sample ~from:0s ~to:200ms\n"
+          "        |> render ~name:\"out\" ~rate:8000.0 ;;\n");
+  BuildResult rb = buildProject(b.dir.string());
+  for (auto& d : rb.diags.items) std::cerr << d.message << "\n";
+  CHECK(rb.ok);
+
+  std::string wa = slurp(a.dir / "_build" / "artifacts" / "out.wav");
+  std::string wb = slurp(b.dir / "_build" / "artifacts" / "out.wav");
+  CHECK(!wa.empty());
+  CHECK(wa == wb);
+}
+
+TEST(build_constant_multi_stereo) {
+  TempDir tp;
+  tp.write("build.json", projectManifest("levels", {"a.synth"}));
+  tp.write("a.synth",
+           "open Core\n"
+           "let _ = constant_multi [0.25; 0.5] |> sample ~from:0s ~to:100ms\n"
+           "        |> render ~name:\"lv\" ~rate:8000.0 ;;\n");
+  BuildResult r = buildProject(tp.dir.string());
+  for (auto& d : r.diags.items) std::cerr << d.message << "\n";
+  CHECK(r.ok);
+  WavData out = readWav((tp.dir / "_build" / "artifacts" / "lv.wav").string());
+  CHECK(out.channels.size() == 2);
+  CHECK(out.frames() == 800);
+  CHECK_NEAR(out.channels[0][10], 0.25, 1e-3);
+  CHECK_NEAR(out.channels[1][10], 0.5, 1e-3);
+}
+
+TEST(build_time_and_pow_end_to_end) {
+  // sqrt time as a fade-in gain, pow as a waveshaper: spot-check values.
+  TempDir tp;
+  tp.write("build.json", projectManifest("mathy", {"a.synth"}));
+  tp.write("a.synth",
+           "open Core\n"
+           "let _ = sqrt time |> sample ~from:0s ~to:1s\n"
+           "        |> render ~name:\"fade\" ~rate:100.0 ;;\n"
+           "let _ = pow (sine 1.0) 3.0 |> sample ~from:0s ~to:1s\n"
+           "        |> render ~name:\"shaped\" ~rate:8.0 ;;\n");
+  BuildResult r = buildProject(tp.dir.string());
+  for (auto& d : r.diags.items) std::cerr << d.message << "\n";
+  CHECK(r.ok);
+  WavData fade =
+      readWav((tp.dir / "_build" / "artifacts" / "fade.wav").string());
+  CHECK_NEAR(fade.channels[0][25], std::sqrt(0.25), 1e-3);
+  CHECK_NEAR(fade.channels[0][81], std::sqrt(0.81), 1e-3);
+  WavData shaped =
+      readWav((tp.dir / "_build" / "artifacts" / "shaped.wav").string());
+  // sine(2*pi*t) at t=1/8 is sqrt(0.5); cubed ~ 0.35355.
+  CHECK_NEAR(shaped.channels[0][1], 0.35355, 2e-3);
+}
+
+TEST(build_math_domain_error_is_diagnostic) {
+  // 'a in the math signatures admits any type at check time; the eval
+  // guard must surface as a build diagnostic, not a crash.
+  TempDir tp;
+  tp.write("build.json", projectManifest("bad", {"a.synth"}));
+  tp.write("a.synth", "open Core\nlet x : String = exp \"nope\" ;;");
+  BuildResult r = buildProject(tp.dir.string());
+  CHECK(!r.ok);
+  bool found = false;
+  for (auto& d : r.diags.items)
+    if (d.message.find("exp: expected") != std::string::npos) found = true;
+  CHECK(found);
 }

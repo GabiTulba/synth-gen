@@ -1,0 +1,13 @@
+{
+  "project": "darksynth",
+  "description": "Darksynth: ~91 s, two drops, five instrument modules + arrangement.",
+  "dependencies": ["Voices", "Effects"],
+  "sources": [
+    "song.synth",
+    "drums.synth",
+    "bass.synth",
+    "pads.synth",
+    "guitar.synth",
+    "fx.synth"
+  ]
+}

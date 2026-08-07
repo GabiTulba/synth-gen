@@ -1,8 +1,11 @@
 (* Guitar for the song: a bright pluck sample and an eighth-note
-   arpeggio pattern (root . fifth . octave . fifth) built entirely from
-   place_multi + time_steps. *)
+   arpeggio pattern (root . fifth . octave . fifth) built on the shared
+   Voices.Seq grid helper. *)
 
 open Core
+
+import Voices
+module Seq = Voices.Seq
 
 let pluck freq:Scalar : Scalar Sample =
   let body : Scalar Signal =
@@ -17,12 +20,9 @@ let pluck freq:Scalar : Scalar Sample =
 let arp ~root:Scalar ~fifth:Scalar ~oct:Scalar
         ~root_t:Timestamp ~fifth_t:Timestamp ~oct_t:Timestamp
     : Scalar Signal =
-  mix_all [place_multi (pluck root)
-                       (time_steps ~start:root_t ~step:1s ~count:4.0);
-           place_multi (pluck fifth)
-                       (time_steps ~start:fifth_t ~step:500ms ~count:8.0);
-           place_multi (pluck oct)
-                       (time_steps ~start:oct_t ~step:1s ~count:4.0)]
+  mix_all [Seq.pattern (pluck root) ~start:root_t ~step:1s ~count:4.0;
+           Seq.pattern (pluck fifth) ~start:fifth_t ~step:500ms ~count:8.0;
+           Seq.pattern (pluck oct) ~start:oct_t ~step:1s ~count:4.0]
 ;;
 
 (* Enters with the C chord (8s): C arpeggio, then G arpeggio. *)

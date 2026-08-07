@@ -737,3 +737,86 @@ TEST(engine_sample_cache_survives_rebuild) {
   SampleCacheStats s4 = sampleCacheStats(*cache);
   CHECK(s4.entries == 1);  // only the changed voice's window survives
 }
+
+TEST(engine_time_ramp) {
+  Rendered r = renderWindow(makeTime(), 0.0, 1.0, 8.0);
+  CHECK(r.channels == 1);
+  CHECK(r.frames == 8);
+  for (int f = 0; f < 8; f++)
+    CHECK_NEAR(r.interleaved[(size_t)f], f / 8.0, 1e-12);
+  // The ramp reads the absolute timeline, not the window offset.
+  Rendered w = renderWindow(makeTime(), 2.0, 3.0, 4.0);
+  CHECK_NEAR(w.interleaved[0], 2.0, 1e-12);
+  CHECK_NEAR(w.interleaved[3], 2.75, 1e-12);
+}
+
+TEST(engine_unary_math_values) {
+  SigPtr t = makeTime();
+  SigPtr negRate = makeBinOp(SigBinOp::Mul, t, makeConst(-3.0));
+  Rendered ex = renderWindow(makeUnaryOp(SigUnaryOp::Exp, negRate),
+                             0.0, 1.0, 4.0);
+  for (int f = 0; f < 4; f++)
+    CHECK_NEAR(ex.interleaved[(size_t)f], std::exp(-3.0 * f / 4.0), 1e-12);
+
+  Rendered sq = renderWindow(makeUnaryOp(SigUnaryOp::Sqrt, t), 0.0, 1.0, 4.0);
+  for (int f = 0; f < 4; f++)
+    CHECK_NEAR(sq.interleaved[(size_t)f], std::sqrt(f / 4.0), 1e-12);
+
+  SigPtr onePlus = makeBinOp(SigBinOp::Add, t, makeConst(1.0));
+  Rendered lg = renderWindow(makeUnaryOp(SigUnaryOp::Log, onePlus),
+                             0.0, 1.0, 4.0);
+  for (int f = 0; f < 4; f++)
+    CHECK_NEAR(lg.interleaved[(size_t)f], std::log(1.0 + f / 4.0), 1e-12);
+}
+
+TEST(engine_pow_values) {
+  // Signal base, scalar exponent: sine squared at t=1/8 is 0.5.
+  SigPtr s2 = makeBinOp(SigBinOp::Pow, makeOsc(OscKind::Sine, 1.0),
+                        makeConst(2.0));
+  Rendered r = renderWindow(s2, 0.0, 1.0, 8.0);
+  CHECK_NEAR(r.interleaved[1], 0.5, 1e-9);
+  CHECK_NEAR(r.interleaved[2], 1.0, 1e-9);
+
+  // Scalar base, signal exponent: 2^t.
+  Rendered g = renderWindow(
+      makeBinOp(SigBinOp::Pow, makeConst(2.0), makeTime()), 0.0, 1.5, 2.0);
+  CHECK_NEAR(g.interleaved[0], 1.0, 1e-12);
+  CHECK_NEAR(g.interleaved[1], std::sqrt(2.0), 1e-12);
+  CHECK_NEAR(g.interleaved[2], 2.0, 1e-12);
+
+  // Signal base and exponent: (1+t)^t.
+  SigPtr onePlus = makeBinOp(SigBinOp::Add, makeTime(), makeConst(1.0));
+  Rendered b = renderWindow(makeBinOp(SigBinOp::Pow, onePlus, makeTime()),
+                            0.0, 1.0, 2.0);
+  CHECK_NEAR(b.interleaved[1], std::pow(1.5, 0.5), 1e-12);
+}
+
+TEST(engine_unary_silence_soundness) {
+  // exp_decay(0) placed at 2s is silent over [0s,1s).
+  SigPtr silent = makePlace(makeExpDecay(0.0), 0.0, 1.0, 2.0);
+  // exp of a silent block is 1.0 everywhere - the silence lattice must
+  // not claim the result silent.
+  Rendered e = renderWindow(makeUnaryOp(SigUnaryOp::Exp, silent),
+                            0.0, 1.0, 4.0);
+  for (int f = 0; f < 4; f++)
+    CHECK_NEAR(e.interleaved[(size_t)f], 1.0, 1e-12);
+  // sqrt preserves silence exactly.
+  Rendered s = renderWindow(makeUnaryOp(SigUnaryOp::Sqrt, silent),
+                            0.0, 1.0, 4.0);
+  for (int f = 0; f < 4; f++)
+    CHECK_NEAR(s.interleaved[(size_t)f], 0.0, 1e-12);
+}
+
+TEST(engine_math_content_hashes_distinct) {
+  SigPtr x = makeOsc(OscKind::Sine, 440.0);
+  CHECK(makeUnaryOp(SigUnaryOp::Exp, x)->contentHash !=
+        makeUnaryOp(SigUnaryOp::Sqrt, x)->contentHash);
+  CHECK(makeUnaryOp(SigUnaryOp::Log, x)->contentHash !=
+        makeUnaryOp(SigUnaryOp::Sqrt, x)->contentHash);
+  CHECK(makeBinOp(SigBinOp::Pow, x, makeConst(2.0))->contentHash !=
+        makeBinOp(SigBinOp::Mul, x, makeConst(2.0))->contentHash);
+  CHECK(makeTime()->contentHash != makeConst(0.0)->contentHash);
+  CHECK(makeTime()->contentHash == makeTime()->contentHash);
+  CHECK(makeUnaryOp(SigUnaryOp::Exp, x)->contentHash ==
+        makeUnaryOp(SigUnaryOp::Exp, x)->contentHash);
+}

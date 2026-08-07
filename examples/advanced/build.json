@@ -1,0 +1,6 @@
+{
+  "project": "advanced",
+  "description": "Advanced effect demos.",
+  "dependencies": ["Effects"],
+  "sources": ["doppler.synth"]
+}

@@ -23,6 +23,7 @@
 #include "checker.hpp"
 #include "eval.hpp"
 #include "incremental.hpp"
+#include "json.hpp"
 #include "library.hpp"
 #include "vis.hpp"
 #include "wav.hpp"
@@ -96,13 +97,6 @@ Stamp stampOf(const fs::path& p) {
   auto t = fs::last_write_time(p, ec);
   if (!ec) s.mtime = t.time_since_epoch().count();
   return s;
-}
-
-std::string trim(const std::string& s) {
-  size_t a = s.find_first_not_of(" \t\r");
-  if (a == std::string::npos) return {};
-  size_t b = s.find_last_not_of(" \t\r");
-  return s.substr(a, b - a + 1);
 }
 
 std::string jsonEscape(const std::string& s) {
@@ -181,93 +175,120 @@ void writeMetadata(const std::string& path, const BuildResult& r,
 
 bool parseManifest(const std::string& text, const std::string& file,
                    Manifest& out, DiagnosticBag& diags) {
-  std::istringstream in(text);
-  std::string line;
-  uint32_t offset = 0;
   bool ok = true;
   auto isCapitalized = [](const std::string& s) {
     return !s.empty() && std::isupper((unsigned char)s[0]);
   };
-  while (std::getline(in, line)) {
-    uint32_t lineLo = offset;
-    offset += (uint32_t)line.size() + 1;
-    std::string t = trim(line);
-    if (t.empty() || t[0] == '#') continue;
-    Span span{lineLo, lineLo + (uint32_t)line.size()};
-    size_t sp = t.find_first_of(" \t");
-    std::string key = sp == std::string::npos ? t : t.substr(0, sp);
-    std::string rest = sp == std::string::npos ? "" : trim(t.substr(sp));
+  // json::Value carries no source offsets; point diagnostics at the first
+  // occurrence of the quoted key in the manifest text.
+  auto keySpan = [&text](const std::string& key) {
+    size_t at = text.find('"' + key + '"');
+    if (at == std::string::npos) return Span{0, 0};
+    return Span{(uint32_t)at, (uint32_t)(at + key.size() + 2)};
+  };
+
+  json::Value root;
+  std::string jsonError;
+  if (!json::parse(text, root, jsonError)) {
+    diags.error(file, Span{0, 0}, "manifest: invalid JSON: " + jsonError);
+    return false;
+  }
+  if (root.kind != json::Value::Kind::Object) {
+    diags.error(file, Span{0, 0}, "manifest: top level must be a JSON object");
+    return false;
+  }
+
+  auto stringField = [&](const json::Value& v, const std::string& key,
+                         std::string& dest) {
+    if (v.kind != json::Value::Kind::String || v.string.empty()) {
+      diags.error(file, keySpan(key), "manifest: '" + key + "' needs a name");
+      ok = false;
+    } else {
+      dest = v.string;
+    }
+  };
+  auto stringArray = [&](const json::Value& v, const std::string& key,
+                         std::vector<std::string>& dest) {
+    if (v.kind != json::Value::Kind::Array) {
+      diags.error(file, keySpan(key),
+                  "manifest: '" + key + "' must be an array of strings");
+      ok = false;
+      return;
+    }
+    for (auto& item : v.array) {
+      if (item.kind != json::Value::Kind::String || item.string.empty()) {
+        diags.error(file, keySpan(key),
+                    "manifest: '" + key +
+                        "' entries must be non-empty strings");
+        ok = false;
+      } else {
+        dest.push_back(item.string);
+      }
+    }
+  };
+
+  std::vector<std::string> seenKeys;
+  for (auto& [key, value] : root.object) {
+    if (std::find(seenKeys.begin(), seenKeys.end(), key) != seenKeys.end()) {
+      diags.error(file, keySpan(key),
+                  "manifest: duplicate '" + key + "' key");
+      ok = false;
+      continue;
+    }
+    seenKeys.push_back(key);
     if (key == "project") {
-      if (rest.empty()) {
-        diags.error(file, span, "manifest: 'project' needs a name");
-        ok = false;
-      } else if (!out.projectName.empty()) {
-        diags.error(file, span, "manifest: duplicate 'project' line");
-        ok = false;
-      } else {
-        out.projectName = rest;
-      }
+      stringField(value, key, out.projectName);
     } else if (key == "library") {
-      if (rest.empty()) {
-        diags.error(file, span, "manifest: 'library' needs a name");
+      stringField(value, key, out.libraryName);
+      if (!out.libraryName.empty() && !isCapitalized(out.libraryName)) {
+        diags.error(file, keySpan(key),
+                    "manifest: library names are capitalized ('" +
+                        out.libraryName + "' is not)");
         ok = false;
-      } else if (!isCapitalized(rest)) {
-        diags.error(file, span,
-                    "manifest: library names are capitalized ('" + rest +
-                        "' is not)");
-        ok = false;
-      } else if (!out.libraryName.empty()) {
-        diags.error(file, span, "manifest: duplicate 'library' line");
-        ok = false;
-      } else {
-        out.libraryName = rest;
       }
-    } else if (key == "source") {
-      if (rest.empty()) {
-        diags.error(file, span, "manifest: 'source' needs a file path");
-        ok = false;
-      } else {
-        out.sources.push_back(rest);
-      }
+    } else if (key == "sources") {
+      stringArray(value, key, out.sources);
     } else if (key == "expose") {
-      if (rest.empty()) {
-        diags.error(file, span, "manifest: 'expose' needs a file path");
-        ok = false;
-      } else if (std::find(out.sources.begin(), out.sources.end(), rest) !=
-                 out.sources.end()) {
-        diags.error(file, span, "manifest: '" + rest +
-                                    "' is listed as both 'source' and "
-                                    "'expose' ('expose' implies 'source')");
-        ok = false;
-      } else if (std::find(out.exposed.begin(), out.exposed.end(), rest) !=
-                 out.exposed.end()) {
-        diags.error(file, span,
-                    "manifest: duplicate 'expose' for '" + rest + "'");
-        ok = false;
-      } else {
-        out.exposed.push_back(rest);
+      std::vector<std::string> items;
+      stringArray(value, key, items);
+      for (auto& e : items) {
+        if (std::find(out.exposed.begin(), out.exposed.end(), e) !=
+            out.exposed.end()) {
+          diags.error(file, keySpan(key),
+                      "manifest: duplicate 'expose' for '" + e + "'");
+          ok = false;
+        } else {
+          out.exposed.push_back(e);
+        }
       }
-    } else if (key == "dep") {
-      if (rest.empty()) {
-        diags.error(file, span, "manifest: 'dep' needs a library name");
-        ok = false;
-      } else if (!isCapitalized(rest)) {
-        diags.error(file, span,
-                    "manifest: library names are capitalized ('" + rest +
-                        "' is not)");
-        ok = false;
-      } else {
-        out.deps.push_back(rest);
+    } else if (key == "dependencies") {
+      size_t before = out.deps.size();
+      stringArray(value, key, out.deps);
+      for (size_t i = before; i < out.deps.size(); ++i) {
+        if (!isCapitalized(out.deps[i])) {
+          diags.error(file, keySpan(key),
+                      "manifest: library names are capitalized ('" +
+                          out.deps[i] + "' is not)");
+          ok = false;
+        }
       }
     } else if (key == "build") {
-      if (rest.empty()) {
-        diags.error(file, span, "manifest: 'build' needs a rule path");
-        ok = false;
-      } else {
-        out.buildRules.push_back(rest);
-      }
+      stringArray(value, key, out.buildRules);
+    } else if (key == "description") {
+      // Free-text field for humans; JSON has no comments.
     } else {
-      diags.error(file, span, "manifest: unknown directive '" + key + "'");
+      diags.error(file, keySpan(key), "manifest: unknown key '" + key + "'");
+      ok = false;
+    }
+  }
+  // A file may be public or internal, not both (order-independent in JSON).
+  for (auto& e : out.exposed) {
+    if (std::find(out.sources.begin(), out.sources.end(), e) !=
+        out.sources.end()) {
+      diags.error(file, keySpan("expose"),
+                  "manifest: '" + e +
+                      "' is listed as both 'sources' and 'expose' "
+                      "('expose' implies 'source')");
       ok = false;
     }
   }
@@ -294,7 +315,7 @@ bool parseManifest(const std::string& text, const std::string& file,
     }
   } else {
     if (out.projectName.empty()) {
-      diags.projectError("manifest: missing 'project <name>'");
+      diags.projectError("manifest: missing 'project' name");
       ok = false;
     }
     if (!out.exposed.empty()) {
@@ -306,11 +327,11 @@ bool parseManifest(const std::string& text, const std::string& file,
       if (anySourceLine) {
         diags.projectError(
             "manifest: a root manifest ('build' rules) cannot also list "
-            "'source' files");
+            "'sources' files");
         ok = false;
       }
     } else if (out.sources.empty()) {
-      diags.projectError("manifest: no 'source' entries");
+      diags.projectError("manifest: no 'sources' entries");
       ok = false;
     }
   }
@@ -323,20 +344,42 @@ BuildResult buildProject(const std::string& projectDir, BuildCache* cache) {
   return buildProject(projectDir, options);
 }
 
+// Where a unit's outputs land: everything under <rootDir>/_build/,
+// mirroring the source tree. `ruleRel` is the unit's path relative to the
+// root ("" for a project that is its own root).
+struct OutputLayout {
+  fs::path rootDir;
+  std::string ruleRel;
+  fs::path outDir() const {
+    fs::path d = rootDir / "_build";
+    if (!ruleRel.empty()) d /= ruleRel;
+    return d;
+  }
+  // Artifact path as recorded in metadata: relative to rootDir.
+  std::string artifactRel(const std::string& fileName) const {
+    fs::path p("_build");
+    if (!ruleRel.empty()) p /= ruleRel;
+    return (p / "artifacts" / fileName).generic_string();
+  }
+};
+
 // The single-unit pipeline: a standalone project, a library, or a rule of
-// a root build (which passes the discovered registry; single-file rules
-// pass a synthesized manifest).
+// a root build (which passes the discovered registry and the rule's
+// output layout; single-file rules pass a synthesized manifest). Without
+// `layoutOverride` the unit resolves its own layout: under its enclosing
+// root's _build/ when one exists, else under its own _build/.
 static BuildResult buildUnitImpl(const std::string& projectDir,
                                  const BuildOptions& options,
                                  const LibraryRegistry* preRegistry,
-                                 const Manifest* overrideManifest) {
+                                 const Manifest* overrideManifest,
+                                 const OutputLayout* layoutOverride) {
   BuildCache* cache = options.cache;
   BuildLog log(options.log);
   auto buildStart = std::chrono::steady_clock::now();
 
   BuildResult r;
   fs::path dir(projectDir);
-  fs::path manifestPath = dir / ".build";
+  fs::path manifestPath = dir / kManifestFileName;
 
   std::map<std::string, std::string> sourcesByPath;  // for diag rendering
 
@@ -346,8 +389,14 @@ static BuildResult buildUnitImpl(const std::string& projectDir,
   } else {
     std::ifstream mf(manifestPath);
     if (!mf) {
-      r.diags.projectError("no .build manifest found in '" + dir.string() +
-                           "'");
+      std::error_code ec;
+      if (fs::exists(dir / ".build", ec))
+        r.diags.projectError(
+            "found legacy '.build' manifest in '" + dir.string() +
+            "'; manifests are now JSON ('build.json') — see README");
+      else
+        r.diags.projectError("no build.json manifest found in '" +
+                             dir.string() + "'");
       return r;
     }
     std::ostringstream mss;
@@ -370,15 +419,34 @@ static BuildResult buildUnitImpl(const std::string& projectDir,
   log.line("manifest: project '" + r.manifest.projectName + "', " +
            std::to_string(r.manifest.sources.size()) + " source(s)");
 
+  // The enclosing root (when there is one) resolves both library
+  // dependencies and the output location: every unit's outputs land under
+  // the root's _build/, mirroring the source tree.
+  std::string enclosingRoot =
+      layoutOverride ? std::string() : findEnclosingRoot(dir.string());
+  OutputLayout layout;
+  if (layoutOverride) {
+    layout = *layoutOverride;
+  } else if (enclosingRoot.empty()) {
+    std::error_code lec;
+    fs::path abs = fs::absolute(dir, lec);
+    layout.rootDir = lec ? dir : abs;
+  } else {
+    std::error_code lec;
+    layout.rootDir = enclosingRoot;
+    fs::path rel = fs::relative(fs::absolute(dir), enclosingRoot, lec)
+                       .lexically_normal();
+    if (!lec && rel != "." && rel != "") layout.ruleRel = rel.generic_string();
+  }
+
   // Library context. The registry comes from the caller (a root build) or
   // from the enclosing root; a dependency-free library also builds
   // standalone against a registry of itself.
   LibraryRegistry localReg;
   const LibraryRegistry* registry = preRegistry;
   if (!registry && (r.manifest.isLibrary() || !r.manifest.deps.empty())) {
-    std::string rootDir = findEnclosingRoot(dir.string());
-    if (!rootDir.empty()) {
-      localReg = discoverLibraries(rootDir, r.diags);
+    if (!enclosingRoot.empty()) {
+      localReg = discoverLibraries(enclosingRoot, r.diags);
       registry = &localReg;
     } else if (r.manifest.isLibrary() && r.manifest.deps.empty()) {
       LibraryInfo self;
@@ -392,7 +460,7 @@ static BuildResult buildUnitImpl(const std::string& projectDir,
     } else {
       r.diags.projectError(
           "library dependencies require an enclosing project root (a "
-          ".build with 'build' rules) to resolve them");
+          "build.json with 'build' rules) to resolve them");
       return r;
     }
   }
@@ -417,21 +485,21 @@ static BuildResult buildUnitImpl(const std::string& projectDir,
     for (auto& d : m.parsed.defs)
       if (d.kind == TopDef::Kind::Let) defCount++;
   }
-  // Watch the .build of every library that contributed modules: its
-  // expose/dep lines shape this build.
+  // Watch the build.json of every library that contributed modules: its
+  // expose/dependencies entries shape this build.
   if (registry) {
     std::set<std::string> libsSeen;
     for (auto& m : prog.modules)
       if (!m.libName.empty() && libsSeen.insert(m.libName).second)
         if (const LibraryInfo* li = registry->find(m.libName))
-          r.inputs.push_back((fs::path(li->dir) / ".build").string());
+          r.inputs.push_back((fs::path(li->dir) / kManifestFileName).string());
   }
   log.line("front-end: " + std::to_string(prog.modules.size()) +
            " module(s), " + std::to_string(defCount) +
            " definition(s) parsed + checked in " +
            fmtSecs(BuildLog::secondsSince(frontEndStart)));
 
-  fs::path buildDir = dir / "build";
+  fs::path buildDir = layout.outDir();
   fs::path artifactDir = buildDir / "artifacts";
   std::error_code ec;
   fs::create_directories(artifactDir, ec);
@@ -734,8 +802,7 @@ static BuildResult buildUnitImpl(const std::string& projectDir,
             info.frames = rendered->frames;
             forConsumers = std::move(rendered);
           }
-          info.artifact =
-              (fs::path("build") / "artifacts" / fileName).generic_string();
+          info.artifact = layout.artifactRel(fileName);
           info.durationSeconds =
               t.rate > 0 ? (double)info.frames / t.rate : 0;
           info.renderMillis =
@@ -836,7 +903,7 @@ static BuildResult buildUnitImpl(const std::string& projectDir,
 
 BuildResult buildProject(const std::string& projectDir,
                          const BuildOptions& options) {
-  return buildUnitImpl(projectDir, options, nullptr, nullptr);
+  return buildUnitImpl(projectDir, options, nullptr, nullptr, nullptr);
 }
 
 RootBuildResult buildRoot(const std::string& rootDir,
@@ -844,11 +911,17 @@ RootBuildResult buildRoot(const std::string& rootDir,
                           std::map<std::string, BuildCache>* ruleCaches) {
   RootBuildResult rr;
   fs::path dir(rootDir);
-  fs::path manifestPath = dir / ".build";
+  fs::path manifestPath = dir / kManifestFileName;
   std::ifstream mf(manifestPath);
   if (!mf) {
-    rr.diags.projectError("no .build manifest found in '" + dir.string() +
-                          "'");
+    std::error_code ec;
+    if (fs::exists(dir / ".build", ec))
+      rr.diags.projectError(
+          "found legacy '.build' manifest in '" + dir.string() +
+          "'; manifests are now JSON ('build.json') — see README");
+    else
+      rr.diags.projectError("no build.json manifest found in '" +
+                            dir.string() + "'");
     return rr;
   }
   std::ostringstream mss;
@@ -861,7 +934,7 @@ RootBuildResult buildRoot(const std::string& rootDir,
                           "' is not a root manifest (no 'build' rules)");
     return rr;
   }
-  // Libraries are discovered dynamically: every .build under the root
+  // Libraries are discovered dynamically: every build.json under the root
   // that declares one, wherever it lives in the tree.
   rr.registry = discoverLibraries(rootDir, rr.diags);
   if (rr.diags.hasErrors()) return rr;
@@ -874,18 +947,29 @@ RootBuildResult buildRoot(const std::string& rootDir,
     o.cache = ruleCaches ? &(*ruleCaches)[rule] : nullptr;
     BuildResult br;
     std::error_code ec;
+    OutputLayout layout;
+    layout.rootDir = dir;
     if (fs::is_directory(rulePath, ec)) {
-      br = buildUnitImpl(rulePath.string(), o, &rr.registry, nullptr);
+      layout.ruleRel = fs::path(rule).lexically_normal().generic_string();
+      br = buildUnitImpl(rulePath.string(), o, &rr.registry, nullptr,
+                         &layout);
     } else if (rulePath.extension() == ".synth" && fs::exists(rulePath, ec)) {
       Manifest m;
       m.projectName = rulePath.stem().string();
       m.sources = {rulePath.filename().string()};
+      // A file rule's outputs mirror the rule path minus its extension
+      // (build "tunes/t.synth" -> _build/tunes/t/), so two file rules in
+      // the same directory never collide.
+      fs::path rp(rule);
+      layout.ruleRel = (rp.parent_path() / rp.stem())
+                           .lexically_normal()
+                           .generic_string();
       br = buildUnitImpl(rulePath.parent_path().string(), o, &rr.registry,
-                         &m);
+                         &m, &layout);
     } else {
       br.diags.projectError("build rule '" + rule +
-                            "' is neither a directory with a .build nor a "
-                            ".synth file");
+                            "' is neither a directory with a build.json "
+                            "nor a .synth file");
     }
     rr.ok = rr.ok && br.ok;
     rr.rules.emplace_back(rule, std::move(br));
@@ -944,20 +1028,22 @@ std::map<std::string, Stamp> snapshot(const std::string& projectDir,
   return snap;
 }
 
-// Stamp every directory and .build file under `root` (skipping output and
-// hidden dirs): directory stamps catch created/removed files, and .build
-// stamps catch manifest edits - including manifests of libraries that no
+// Stamp every directory and build.json file under `root` (skipping output
+// and hidden dirs): directory stamps catch created/removed files, and
+// manifest stamps catch edits - including manifests of libraries that no
 // rule has loaded yet, so a new library appearing re-runs discovery.
 void stampTree(const fs::path& root, std::map<std::string, Stamp>& snap) {
   std::error_code ec;
   snap[root.string()] = stampOf(root);
-  fs::path manifest = root / ".build";
+  fs::path manifest = root / kManifestFileName;
   if (fs::exists(manifest, ec)) snap[manifest.string()] = stampOf(manifest);
   for (auto& entry : fs::directory_iterator(
            root, fs::directory_options::skip_permission_denied, ec)) {
     if (!entry.is_directory(ec)) continue;
     std::string name = entry.path().filename().string();
-    if (name == "build" || (!name.empty() && name[0] == '.')) continue;
+    if (name == "_build" || name == "build" ||
+        (!name.empty() && name[0] == '.'))
+      continue;
     stampTree(entry.path(), snap);
   }
 }

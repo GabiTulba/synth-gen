@@ -126,6 +126,28 @@ const std::vector<PrimSig>& primitives() {
     add(PrimId::Jitter, "jitter", {"seed", "spread", "steps"},
         {tScalar(), tTimestamp(), tList(tTimestamp())},
         tList(tTimestamp()));
+    // Signal constructors. `constant` holds a value forever; `time` is
+    // the ramp whose sample at t seconds is t; `signal` samples a
+    // Scalar -> Scalar function of time (the function body is limited
+    // to arithmetic and the math primitives - anything else cannot
+    // produce a Scalar from a Scalar). The _multi forms take one
+    // level/function per channel (the language has no Vector literals).
+    add(PrimId::Constant, "constant", {"value"}, {tScalar()},
+        tSignal(tScalar()));
+    add(PrimId::ConstantMulti, "constant_multi", {"levels"},
+        {tList(tScalar())}, tSignal(tVector()));
+    add(PrimId::Time, "time", {}, {}, tSignal(tScalar()));
+    add(PrimId::SignalFn, "signal", {"f"}, {tFun({tScalar()}, tScalar())},
+        tSignal(tScalar()));
+    add(PrimId::SignalFnMulti, "signal_multi", {"fs"},
+        {tList(tFun({tScalar()}, tScalar()))}, tSignal(tVector()));
+    // Math. Polymorphic over Scalars and Signals (elementwise); the
+    // exponent of pow is always a Scalar. Domain follows IEEE: log of a
+    // non-positive value or sqrt of a negative one yield -inf/NaN.
+    add(PrimId::Exp, "exp", {"x"}, {a}, a);
+    add(PrimId::Sqrt, "sqrt", {"x"}, {a}, a);
+    add(PrimId::Log, "log", {"x"}, {a}, a);
+    add(PrimId::Pow, "pow", {"x", "y"}, {a, tScalar()}, a);
     return p;
   }();
   return prims;

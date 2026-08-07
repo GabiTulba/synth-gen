@@ -1,24 +1,21 @@
 (* Drum kit for the song: each hit is a finite Sample, ready for
-   place_multi patterns. *)
+   place_multi patterns. The kick and snare are the Basic library
+   voices; the hat is a bright preset of the shared Voices core. *)
 
 open Core
 
+import Basic
+import Voices
+
 let kick_hit : Scalar Sample =
-  let pitch_drop : Scalar Signal = exp_decay 25.0 * 120.0 in
-  let thump : Scalar Signal = fm ~carrier:50.0 ~modulator:pitch_drop in
-  let click : Scalar Signal = noise 4000.0 * exp_decay 90.0 * 0.3 in
-  (thump * exp_decay 7.0 + click) * 0.7
-    |> sample ~from:0s ~to:400ms
+  Basic.Kick.kick |> sample ~from:0s ~to:400ms
 ;;
 
 let snare_hit : Scalar Sample =
-  let body : Scalar Signal = sine 185.0 * exp_decay 18.0 * 0.5 in
-  let rattle : Scalar Signal = noise 1800.0 * exp_decay 22.0 in
-  (rattle + body) * 0.6
-    |> sample ~from:0s ~to:300ms
+  Basic.Snare.snare |> sample ~from:0s ~to:300ms
 ;;
 
 let hat_hit : Scalar Sample =
-  (noise 6000.0 |> highpass ~cutoff:5000.0) * exp_decay 60.0 * 0.5
+  Voices.Drums.hat ~noise_freq:6000.0 ~cutoff:5000.0 ~decay:60.0 ~amp:0.5
     |> sample ~from:0s ~to:120ms
 ;;

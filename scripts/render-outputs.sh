@@ -16,19 +16,20 @@ fi
 "$BUILD_DIR/synthc" build examples/darksynth
 "$BUILD_DIR/synthc" build examples/song
 
+# All outputs land under the examples root's _build/, mirroring the tree.
 mkdir -p outputs/primitives outputs/basic outputs/advanced outputs/song outputs/darksynth
-cp examples/primitives/build/artifacts/*.wav outputs/primitives/ 2>/dev/null || true
-cp examples/primitives/build/artifacts/*.svg outputs/primitives/ 2>/dev/null || true
-cp examples/basic/build/artifacts/*.wav outputs/basic/ 2>/dev/null || true
-cp examples/basic/build/artifacts/*.svg outputs/basic/ 2>/dev/null || true
-cp examples/advanced/build/artifacts/*.wav outputs/advanced/ 2>/dev/null || true
-cp examples/advanced/build/artifacts/*.svg outputs/advanced/ 2>/dev/null || true
+cp examples/_build/primitives/artifacts/*.wav outputs/primitives/ 2>/dev/null || true
+cp examples/_build/primitives/artifacts/*.svg outputs/primitives/ 2>/dev/null || true
+cp examples/_build/basic/artifacts/*.wav outputs/basic/ 2>/dev/null || true
+cp examples/_build/basic/artifacts/*.svg outputs/basic/ 2>/dev/null || true
+cp examples/_build/advanced/artifacts/*.wav outputs/advanced/ 2>/dev/null || true
+cp examples/_build/advanced/artifacts/*.svg outputs/advanced/ 2>/dev/null || true
 # Only the master + waveform are committed; the per-instrument stems
 # (song-drums/pad/piano/guitar.wav, ~3 MB each) build locally.
-cp examples/song/build/artifacts/song.wav outputs/song/ 2>/dev/null || true
-cp examples/song/build/artifacts/song-wave.svg outputs/song/ 2>/dev/null || true
-cp examples/song/build/artifacts/song-stems-wave.svg outputs/song/ 2>/dev/null || true
+cp examples/_build/song/artifacts/song.wav outputs/song/ 2>/dev/null || true
+cp examples/_build/song/artifacts/song-wave.svg outputs/song/ 2>/dev/null || true
+cp examples/_build/song/artifacts/song-stems-wave.svg outputs/song/ 2>/dev/null || true
 # darksynth: master + overview only; the five stems (~15 MB each) build locally
-cp examples/darksynth/build/artifacts/darksynth.wav outputs/darksynth/ 2>/dev/null || true
-cp examples/darksynth/build/artifacts/darksynth-stems-wave.svg outputs/darksynth/ 2>/dev/null || true
+cp examples/_build/darksynth/artifacts/darksynth.wav outputs/darksynth/ 2>/dev/null || true
+cp examples/_build/darksynth/artifacts/darksynth-stems-wave.svg outputs/darksynth/ 2>/dev/null || true
 echo "outputs/ refreshed"

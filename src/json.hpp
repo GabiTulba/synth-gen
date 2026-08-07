@@ -5,9 +5,9 @@
 
 namespace synth::json {
 
-// Minimal JSON value + recursive-descent parser: just enough for the dev
-// app to read build metadata (§9). The dev app consumes build outputs
-// only, so this lives under devapp/, not in the compiler core.
+// Minimal JSON value + recursive-descent parser, dependency-free. Used by
+// the compiler core to read build.json manifests and by the dev app to
+// read build metadata (§9).
 struct Value {
   enum class Kind { Null, Bool, Number, String, Array, Object };
   Kind kind = Kind::Null;

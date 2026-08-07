@@ -12,21 +12,24 @@ namespace synth {
 
 struct SampleCache;  // signal.hpp; opaque here
 
-// The `.build` manifest (design doc §8.1). Line-based:
+// The build.json manifest (design doc §8.1). A single JSON object:
 //
-//   # comment
-//   project <name>       # standalone project OR root (with 'build' rules)
-//   library <Name>       # declares a library (capitalized name)
-//   source <file.synth>  # member file; internal when in a library
-//   expose <file.synth>  # library member, public; implies source
-//   dep <Name>           # library dependency, by declared name
-//   build <path>         # root only: a rule (.synth file or a directory
-//                        # containing a .build)
+//   {
+//     "project": "<name>",          project OR root (with "build" rules)
+//     "library": "<Name>",          declares a library (capitalized name)
+//     "description": "free text",   optional, ignored by the build
+//     "sources": ["file.synth"],    member files; internal in a library
+//     "expose": ["file.synth"],     library members, public; implies source
+//     "dependencies": ["<Name>"],   library dependencies, by declared name
+//     "build": ["path"]             root only: rules (.synth file or a
+//                                   directory containing a build.json)
+//   }
 //
-// Exactly one of 'project'/'library' per manifest. A 'project' manifest
-// with 'build' rules is a root (an orchestrator: no 'source' lines); a
-// 'project' manifest with 'source' lines is a standalone project exactly
-// as before. A 'library' manifest must expose at least one file.
+// Exactly one of "project"/"library" per manifest. A "project" manifest
+// with "build" rules is a root (an orchestrator: no "sources"); a
+// "project" manifest with "sources" is a standalone project. A "library"
+// manifest must expose at least one file.
+inline constexpr const char* kManifestFileName = "build.json";
 struct Manifest {
   std::string projectName;
   std::string libraryName;
@@ -44,7 +47,7 @@ bool parseManifest(const std::string& text, const std::string& file,
 struct TargetInfo {
   std::string name;
   std::string kind = "audio";  // "audio" (.wav) or "visual" (.svg)
-  std::string artifact;  // path relative to project dir; empty on failure
+  std::string artifact;  // path relative to the root dir; empty on failure
   double rate = 0;
   int channelCount = 0;
   int64_t frames = 0;
@@ -98,8 +101,10 @@ struct BuildOptions {
 
 // One-shot build of the project in `projectDir` (§8.2): parse & check all
 // sources, validate project rules, evaluate render targets, write artifacts
-// to <projectDir>/build/artifacts/<name>.wav and metadata to
-// <projectDir>/build/metadata.json. Metadata is written even for failed
+// to <root>/_build/<unit>/artifacts/<name>.wav and metadata to
+// <root>/_build/<unit>/metadata.json, where <root> is the enclosing
+// project root (or the project dir itself when standalone) and <unit>
+// is the project's path relative to it. Metadata is written even for failed
 // builds (§6.3-style error surfacing). Independent targets render in
 // parallel across a thread pool (Epic 9). When a cache is given it is
 // consulted and updated (Epic 8).
@@ -108,9 +113,9 @@ BuildResult buildProject(const std::string& projectDir,
 BuildResult buildProject(const std::string& projectDir,
                          BuildCache* cache = nullptr);
 
-// A root build: the root manifest's `build` rules built in order, each in
-// its own build/ directory, against the dynamically discovered library
-// registry.
+// A root build: the root manifest's `build` rules built in order, each
+// into its own directory under the root's _build/, against the
+// dynamically discovered library registry.
 struct RootBuildResult {
   bool ok = false;  // every rule built (and the root itself was valid)
   Manifest manifest;       // the root manifest
@@ -121,8 +126,9 @@ struct RootBuildResult {
 
 // Build the root at `rootDir`: parse the root manifest, discover all
 // libraries under the root, then build every `build` rule (a directory
-// with a .build - project or library - or a single .synth file). Each
-// rule keeps its own build/ output directory. `ruleCaches`, when given,
+// with a build.json - project or library - or a single .synth file).
+// Each rule's outputs land under <rootDir>/_build/, mirroring the rule
+// path (file rules drop their extension). `ruleCaches`, when given,
 // holds one incremental cache per rule (the root daemon owns it);
 // otherwise rules build uncached.
 RootBuildResult buildRoot(const std::string& rootDir,
@@ -135,7 +141,8 @@ RootBuildResult buildRoot(const std::string& rootDir,
 DiagnosticBag lintFiles(const std::vector<std::string>& files);
 
 // The build daemon loop (§8.3): builds once, then watches the project's
-// inputs (sources, .build, imported audio files) and rebuilds on change.
+// inputs (sources, build.json, imported audio files) and rebuilds on
+// change.
 // `onBuild` is called after every build. Polling-based (portable, no
 // dependencies); a whole-project rebuild per change is the acceptable v1
 // (§12 Epic 6). Runs until `keepRunning` returns false.
@@ -147,7 +154,7 @@ void watchProject(const std::string& projectDir,
 
 // The root daemon: builds all of the root's rules, then watches the whole
 // tree - every rule's inputs, every directory (for created/removed files)
-// and every .build manifest (a change re-runs library discovery) - and
+// and every build.json manifest (a change re-runs library discovery) - and
 // rebuilds on change. Per-rule incremental caches and a shared sample
 // cache persist across rebuilds.
 void watchRoot(const std::string& rootDir,

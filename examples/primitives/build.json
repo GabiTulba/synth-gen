@@ -1,0 +1,5 @@
+{
+  "project": "primitives",
+  "description": "Primitive showcase: one short, audible render target per library primitive.",
+  "sources": ["primitives.synth"]
+}

@@ -1,0 +1,15 @@
+(* Sequencing helpers: a hit repeated on a regular grid, straight
+   (`pattern`) or with humanizing timing jitter (`humanized`). *)
+
+open Core
+
+let pattern hit:Scalar Sample ~start:Timestamp ~step:Timestamp ~count:Scalar
+    : Scalar Signal =
+  place_multi hit (time_steps ~start:start ~step:step ~count:count)
+;;
+
+let humanized hit:Scalar Sample ~start:Timestamp ~step:Timestamp
+              ~count:Scalar ~seed:Scalar ~spread:Timestamp : Scalar Signal =
+  place_multi hit (time_steps ~start:start ~step:step ~count:count
+                     |> jitter ~seed:seed ~spread:spread)
+;;

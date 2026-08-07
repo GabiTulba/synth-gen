@@ -264,11 +264,15 @@ class ModuleChecker {
       // unqualified only under `open Core` / `open Core.List`.
       if (coreOpen_) {
         if (const PrimSig* p = findCorePrim(e.name))
-          return tFun(p->paramTypes, p->paramNames, p->retType);
+          return p->paramTypes.empty()
+                     ? p->retType
+                     : tFun(p->paramTypes, p->paramNames, p->retType);
       }
       if (coreListOpen_) {
         if (const PrimSig* p = findCoreListPrim(e.name))
-          return tFun(p->paramTypes, p->paramNames, p->retType);
+          return p->paramTypes.empty()
+                     ? p->retType
+                     : tFun(p->paramTypes, p->paramNames, p->retType);
       }
       if (findCorePrim(e.name))
         fail(e.span, "unknown name '" + e.name +
@@ -290,13 +294,17 @@ class ModuleChecker {
       const PrimSig* p = findCorePrim(e.name);
       if (!p)
         fail(e.span, "'Core' has no primitive named '" + e.name + "'");
-      return tFun(p->paramTypes, p->paramNames, p->retType);
+      return p->paramTypes.empty()
+                     ? p->retType
+                     : tFun(p->paramTypes, p->paramNames, p->retType);
     }
     if (canonical == "Core.List") {
       const PrimSig* p = findCoreListPrim(e.name);
       if (!p)
         fail(e.span, "'Core.List' has no function named '" + e.name + "'");
-      return tFun(p->paramTypes, p->paramNames, p->retType);
+      return p->paramTypes.empty()
+                     ? p->retType
+                     : tFun(p->paramTypes, p->paramNames, p->retType);
     }
     const CheckedModule* m = prog_.find(canonical);
     if (!m) fail(e.span, "module '" + canonical + "' was not checked");

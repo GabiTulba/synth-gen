@@ -4,6 +4,7 @@
 #include <fstream>
 
 #include "checker.hpp"
+#include "manifest_helpers.hpp"
 #include "library.hpp"
 #include "test_framework.hpp"
 
@@ -213,8 +214,7 @@ struct LibFixture {
   LibraryRegistry reg;
   DiagnosticBag regDiags;
   LibFixture() {
-    tp.write("lib/basic/.build",
-             "library Basic\nexpose keys.synth\nsource internal.synth\n");
+    tp.write("lib/basic/build.json", libraryManifest("Basic", {"keys.synth"}, {"internal.synth"}));
     tp.write("lib/basic/keys.synth",
              "open Core\nimport Internal\n"
              "let gain : Scalar = Internal.base * 2.0 ;;\n"
@@ -332,9 +332,9 @@ TEST(checker_library_short_name_scoped_to_library) {
   // Two libraries with same-stem member files no longer alias: each gets
   // its own canonical id.
   TempProject tp;
-  tp.write("a/.build", "library A\nexpose util.synth\n");
+  tp.write("a/build.json", libraryManifest("A", {"util.synth"}));
   tp.write("a/util.synth", "open Core\nlet ua : Scalar = 1.0 ;;\n");
-  tp.write("b/.build", "library B\nexpose util.synth\n");
+  tp.write("b/build.json", libraryManifest("B", {"util.synth"}));
   tp.write("b/util.synth", "open Core\nlet ub : Scalar = 2.0 ;;\n");
   DiagnosticBag regDiags;
   LibraryRegistry reg = discoverLibraries(tp.dir.string(), regDiags);
@@ -1244,4 +1244,86 @@ let _ = render_vis_stems ~name:"w" ~rate:8000.0 ~stems:[("a", s); ("b", s)] ;;
   DiagnosticBag diags;
   checkProject({f}, diags);
   CHECK(!diags.hasErrors());
+}
+
+TEST(checker_signal_constructors) {
+  TempProject tp;
+  std::string f = tp.write("ok.synth", R"(
+open Core
+let dc : Scalar Signal = constant 0.5 ;;
+let pair : Vector Signal = constant_multi [0.3; 0.7] ;;
+let ramp : Scalar Signal = time ;;
+let fade : Scalar Signal = signal ~f:(fun t:Scalar -> exp (0.0 - 3.0 * t)) ;;
+let wide : Vector Signal =
+  signal_multi ~fs:[(fun t:Scalar -> t); (fun t:Scalar -> 1.0 - t)] ;;
+)");
+  DiagnosticBag diags;
+  Program prog = checkProject({f}, diags);
+  for (auto& d : diags.items)
+    std::cerr << renderDiagnostic(d, prog.modules.empty()
+                                         ? std::string{}
+                                         : prog.modules[0].parsed.source);
+  CHECK(!diags.hasErrors());
+  CHECK(typeEquals(prog.modules[0].defTypes.at("dc"), tSignal(tScalar())));
+  CHECK(typeEquals(prog.modules[0].defTypes.at("pair"), tSignal(tVector())));
+  CHECK(typeEquals(prog.modules[0].defTypes.at("ramp"), tSignal(tScalar())));
+  CHECK(typeEquals(prog.modules[0].defTypes.at("fade"), tSignal(tScalar())));
+  CHECK(typeEquals(prog.modules[0].defTypes.at("wide"), tSignal(tVector())));
+}
+
+TEST(checker_math_primitives) {
+  TempProject tp;
+  std::string f = tp.write("ok.synth", R"(
+open Core
+let e : Scalar = exp 1.0 ;;
+let r : Scalar = sqrt 2.0 ;;
+let l : Scalar = log 10.0 ;;
+let p : Scalar = pow 2.0 10.0 ;;
+let shaped : Scalar Signal = pow (sine 220.0) 3.0 ;;
+let curve : Scalar Signal = sqrt time ;;
+let fade : Scalar Signal = exp (0.0 - time) ;;
+)");
+  DiagnosticBag diags;
+  Program prog = checkProject({f}, diags);
+  for (auto& d : diags.items)
+    std::cerr << renderDiagnostic(d, prog.modules.empty()
+                                         ? std::string{}
+                                         : prog.modules[0].parsed.source);
+  CHECK(!diags.hasErrors());
+  CHECK(typeEquals(prog.modules[0].defTypes.at("e"), tScalar()));
+  CHECK(typeEquals(prog.modules[0].defTypes.at("shaped"),
+                   tSignal(tScalar())));
+  CHECK(typeEquals(prog.modules[0].defTypes.at("curve"), tSignal(tScalar())));
+}
+
+TEST(checker_signal_constructor_type_errors) {
+  // signal's function must produce a Scalar, not a Signal.
+  {
+    TempProject tp;
+    std::string f = tp.write("bad.synth",
+                             "open Core\nlet x : Scalar Signal = signal "
+                             "~f:(fun t:Scalar -> sine t) ;;");
+    DiagnosticBag diags;
+    checkProject({f}, diags);
+    CHECK(diags.hasErrors());
+  }
+  // time is a value, not a function.
+  {
+    TempProject tp;
+    std::string f = tp.write(
+        "bad.synth", "open Core\nlet y : Scalar Signal = time 1.0 ;;");
+    DiagnosticBag diags;
+    checkProject({f}, diags);
+    CHECK(diags.hasErrors());
+  }
+  // pow's exponent is a Scalar, never a Signal.
+  {
+    TempProject tp;
+    std::string f = tp.write("bad.synth",
+                             "open Core\nlet z : Scalar Signal = pow "
+                             "(sine 220.0) (sine 1.0) ;;");
+    DiagnosticBag diags;
+    checkProject({f}, diags);
+    CHECK(diags.hasErrors());
+  }
 }

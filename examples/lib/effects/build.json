@@ -1,0 +1,5 @@
+{
+  "library": "Effects",
+  "description": "Engine-style effect builders: the Doppler fly-by family (control shape, swept harmonic stack, proximity swell, stereo pan), parametrized by pass rate.",
+  "expose": ["doppler.synth"]
+}

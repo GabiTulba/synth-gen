@@ -29,12 +29,12 @@ builds.
 ## Usage
 
 ```sh
-# One-shot build of a project directory (contains a .build manifest):
+# One-shot build of a project directory (contains a build.json manifest):
 build/synthc build examples/pluck
-# -> examples/pluck/build/artifacts/demo.wav
-# -> examples/pluck/build/metadata.json
+# -> examples/_build/pluck/artifacts/demo.wav
+# -> examples/_build/pluck/metadata.json
 
-# Build daemon: watch sources, .build and imported audio files, rebuild
+# Build daemon: watch sources, build.json and imported audio files, rebuild
 # on change (save file -> rebuild -> dev app reflects new artifacts):
 build/synthc watch examples/pluck
 
@@ -51,43 +51,40 @@ build/synthc build examples/basic -v
 build/synth-dev examples/pluck
 ```
 
-### The `.build` manifest
+### The `build.json` manifest
 
-A standalone project (exactly as before):
+A single JSON object per directory. A standalone project:
 
-```
-# comment
-project pluck-demo
-source pluck.synth
-source other.synth
-```
-
-A **library** — a reusable, importable unit. `expose` marks the public
-files (internal `source` files are importable only within the library);
-`dep` names other libraries it uses:
-
-```
-library Basic
-expose keys.synth
-source internal.synth
-dep Fx
+```json
+{ "project": "pluck-demo",
+  "description": "optional free text (JSON has no comments)",
+  "sources": ["pluck.synth", "other.synth"] }
 ```
 
-A **project root** — the orchestrator. `build` rules name the units to
-build (directories with a `.build`, or single `.synth` files); libraries
-are discovered dynamically by scanning the tree under the root, so `dep`
-names resolve wherever the library lives:
+A **library** — a reusable, importable unit. `"expose"` marks the public
+files (internal `"sources"` files are importable only within the
+library); `"dependencies"` names other libraries it uses:
 
-```
-project my-album
-build lib/basic
-build tunes
-build sketches/idea.synth
+```json
+{ "library": "Basic",
+  "expose": ["keys.synth"],
+  "sources": ["internal.synth"],
+  "dependencies": ["Fx"] }
 ```
 
-`synthc build`/`synthc watch` at the root builds/watches every rule
-(each keeps its own `build/` output dir); in a subdirectory they build
-just that unit, resolving `dep`s through the enclosing root. In code,
+A **project root** — the orchestrator. `"build"` rules name the units to
+build (directories with a `build.json`, or single `.synth` files);
+libraries are discovered dynamically by scanning the tree under the
+root, so dependency names resolve wherever the library lives:
+
+```json
+{ "project": "my-album",
+  "build": ["lib/basic", "tunes", "sketches/idea.synth"] }
+```
+
+`synthc build`/`synthc watch` at the root builds/watches every rule; in
+a subdirectory they build just that unit, resolving dependencies through
+the enclosing root. In code,
 `import Basic` + `Basic.Keys.strike`, `open Basic.Keys` + bare
 `strike`, and `module K = Basic.Keys` + `K.strike` all reach a
 library's exposed modules. A dependency's own render targets are not
@@ -95,10 +92,17 @@ re-rendered into the consumer's build.
 
 ### Build outputs
 
-Artifacts are written to `<project>/build/artifacts/<name>.wav` (16-bit
-PCM). Build metadata — the machine-readable index the dev app consumes — is
-written to `<project>/build/metadata.json` and is emitted for failed builds
-too, with diagnostics included.
+All outputs land in a single `_build/` tree at the project root,
+mirroring the source layout: rule `song` writes
+`<root>/_build/song/artifacts/<name>.wav` (16-bit PCM) and
+`<root>/_build/song/metadata.json` — the machine-readable index the dev
+app consumes, emitted for failed builds too, with diagnostics included.
+A file rule `sketches/idea.synth` writes under `_build/sketches/idea/`.
+A project built outside any root uses its own directory as the root
+(`<project>/_build/...`); note that any ancestor directory holding a
+root manifest determines where a subdirectory build's outputs land.
+Stale per-project `build/` directories from older versions can be
+removed with `git clean -Xdf examples`.
 
 ## Language at a glance
 
@@ -176,6 +180,14 @@ locals, and must be parenthesized when used as an argument or pipe
 right-hand side. `x |> f a` desugars to `f a x` (the piped value becomes
 the final positional argument).
 
+Signals can also be built directly: `constant 0.5` holds a level
+forever, `time` is the ramp whose sample at t seconds is t, and
+`signal ~f:(fun t:Scalar -> exp (0.0 - 3.0 * t))` samples a function of
+time (`constant_multi` / `signal_multi` are the per-channel forms). The
+math primitives `exp`, `sqrt`, `log`, and `pow ~x ~y` work on plain
+Scalars and elementwise on Signals — `pow (sine 220.0) 3.0` is a
+waveshaper, `sqrt time` a fade-in curve.
+
 ## Repository layout
 
 | Path | Contents |
@@ -185,7 +197,7 @@ the final positional argument).
 | `src/signal.*` | Signal engine: lazy signal DAG, render-time discretization, sample/place windowing, filters, mixing |
 | `src/eval.*` | Evaluator: reduces definitions to values, collects render targets, `load_*` build-time validation |
 | `src/wav.*` | WAV read (PCM 16/24/32, float 32/64) and write (PCM 16) |
-| `src/build.*` | `.build` manifest (projects, libraries, roots), project validation, target enumeration, cached + parallel rendering, artifact + metadata emission, lint mode, watch loops (project + root daemon) |
+| `src/build.*` | `build.json` manifest (projects, libraries, roots), project validation, target enumeration, cached + parallel rendering, artifact + metadata emission, lint mode, watch loops (project + root daemon) |
 | `src/library.*` | Library registry: dynamic discovery of `library` manifests under a root, dep validation, enclosing-root search |
 | `src/incremental.*` | Dependency tracking: Merkle content hashes over definition closures for the build cache |
 | `src/main.cpp` | `synthc` CLI (`build`, `watch`, `lint`) |
@@ -193,10 +205,12 @@ the final positional argument).
 | `tests/` | Unit + end-to-end tests (assert-based, run via CTest) |
 | `examples/pluck/` | The design doc's §3.4 example as a buildable project |
 | `examples/primitives/` | One short, audible render target per library primitive |
-| `examples/basic/` | Basic instrument samples packaged as the `Basic` **library**: snare, kick, guitar pluck, piano note |
-| `examples/song/` | A full 16-bar stereo song across five modules — drums, synth pad, piano, guitar, and the arrangement that imports them (`outputs/song/song.wav`) — plus `preview.synth`, the library-system demo (`dep Basic`, `import`/`open`/`module`) |
-| `examples/.build` | The examples **root**: one `build` rule per example; `synthc build examples` builds them all |
-| `examples/advanced/` | Advanced effect demos: the rapid stereo Doppler fly-by built on FM modulation (`outputs/advanced/`) |
+| `examples/lib/voices/` | The `Voices` **library**: parametric drum cores, the additive keys stack, detuned-saw pad tones, and sequencing helpers shared by every kit below |
+| `examples/lib/effects/` | The `Effects` **library**: the Doppler fly-by family (control shape, swept stack, proximity, pan), parametrized by pass rate |
+| `examples/basic/` | Basic instrument samples packaged as the `Basic` **library**: snare, kick, guitar pluck, piano note — presets over the `Voices` cores |
+| `examples/song/` | A full 16-bar stereo song across five modules — drums, synth pad, piano, guitar, and the arrangement that imports them (`outputs/song/song.wav`) — plus `preview.synth`, the library-system demo (`"dependencies"`, `import`/`open`/`module`) |
+| `examples/build.json` | The examples **root**: one `build` rule per example; `synthc build examples` builds them all |
+| `examples/advanced/` | Advanced effect demos: the rapid stereo Doppler fly-by built on `Effects.Doppler` (`outputs/advanced/`) |
 | `examples/darksynth/` | A ~91 s darksynth track with two drops across six modules — drums, electric bass, dark pads, distorted guitar, riser/impact FX, and the arrangement (`outputs/darksynth/`) |
 | `outputs/` | Committed renders of the showcase projects (`outputs/primitives/`, `outputs/basic/`) — `.wav` to listen to and `render_vis` waveform `.svg`s to look at, without building anything; refresh with `scripts/render-outputs.sh` |
 
@@ -413,7 +427,7 @@ follows (all easy to revisit):
   sum (through the soft-clip master) back to the mix.
 - **`render_vis name:String rate:Scalar sample:'a Sample : unit`** — a
   second effect alongside `render`: declares a build target whose artifact
-  is a waveform *image* (`build/artifacts/<name>.svg`) of the discretized
+  is a waveform *image* (`<name>.svg` beside the audio artifacts) of the discretized
   window instead of audio. One lane per channel, min/max-per-column
   drawing, dependency-free SVG (viewable straight from a git host).
   Visual and audio targets share the project-wide name space, appear in

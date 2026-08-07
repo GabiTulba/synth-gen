@@ -49,11 +49,12 @@ void logToStderr(const std::string& line) { std::cerr << line << "\n"; }
 
 // Is the manifest in `dir` a root manifest (one with 'build' rules)?
 bool isRootDir(const std::string& dir) {
-  std::string text = readAll(dir + "/.build");
+  std::string text = readAll(dir + "/" + synth::kManifestFileName);
   if (text.empty()) return false;
   synth::Manifest m;
   synth::DiagnosticBag diags;
-  synth::parseManifest(text, dir + "/.build", m, diags);
+  synth::parseManifest(text, dir + "/" + synth::kManifestFileName,
+                       m, diags);
   return m.isRoot();
 }
 

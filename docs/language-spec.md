@@ -19,7 +19,9 @@ accepts and how it is typed and evaluated. The design document
   suffix: `ns` (1e-9 s), `us` (1e-6 s), `ms` (1e-3 s), `s` (1 s),
   `m` (60 s). All denote the same quantity (time since the epoch or a
   duration); e.g. `100ns`, `800ms`, `1.5s`, `1m`. An unknown suffix is a
-  lexical error.
+  lexical error. A suffix only attaches to a *literal*; to carry a
+  computed Scalar into the time domain use `to_sec`/`to_ms`/`to_min`
+  (§5.4).
 - **String literals**: `"..."` with escapes `\n`, `\t`, `\\`, `\"`.
 - **Punctuation**: `;;` `;` `:` `=` `(` `)` `[` `]` `,` `.` `->` `~`
   `|>` `+` `-` `*` `/`.
@@ -139,12 +141,16 @@ Rules:
   named Core is not reachable.
 - **Module references** (`import`/`open`/alias targets and qualified
   names) resolve their first segment as: module alias bound earlier in
-  the file (later aliases override) → a file module of the current
-  context (the library's listed files, or the same directory for
-  standalone files — a local file wins over a library of the same
-  name) → a discovered library (which must be `dep`-declared). From
-  outside a library only `expose`d files are reachable; inside it, all
-  listed files are.
+  the file (later aliases override) → a *sibling* file module — any
+  `.synth` file in the same directory, which inside a library is
+  exactly its member set (a sibling wins over a library of the same
+  name) → a discovered library (which must be `dep`-declared). A
+  library member therefore reaches every other member by short name,
+  with nothing listed anywhere; the library's own `lib.synth` is not a
+  sibling and naming it (or a `Lib.Member` path into one's own
+  library) is an error. From outside, only what `lib.synth` binds is
+  reachable: `Lib.X` resolves through the `module X = …` bindings
+  there, under the name the interface gives it.
 - **Local bindings** type-check like top-level ones: the bound expression
   must match the annotation (a var-carrying partial application of a
   polymorphic primitive resolves against it), and the name is visible
@@ -202,28 +208,48 @@ channels in v1.
   letter capitalized). All top-level definitions are visible to
   importers; access is qualified (`Foo.bar`). A library member's
   canonical module id is `Lib.Foo`.
-- **`import A`** resolves the module `A` in the current context: a
-  library's listed sibling file, or (standalone) `a.synth` in the same
-  directory, or a discovered library. `import Lib` makes all of `Lib`'s
-  exposed files reachable as `Lib.File.def`; `import Lib.File` imports
-  one exposed file. Unresolved imports and import cycles are build
-  errors.
+- **`import A`** resolves the module `A` in the current context:
+  `a.synth` next to the importing file (which inside a library means a
+  fellow member), or a discovered library. `import Lib` brings in the
+  library's interface module, making everything its `lib.synth`
+  publishes reachable as `Lib.def` and `Lib.X.def`; `import Lib.X`
+  imports one published module. Unresolved imports and import cycles
+  are build errors.
 - **`open`** brings names into scope, shadowing by position (see §3):
-  `open Lib` injects the library's exposed *file modules* (so
-  `File.def` works unqualified at the file level); `open File` /
-  `open Lib.File` injects that file's *definitions* directly. An `open`
-  implies the corresponding import.
+  `open Lib` injects the interface module's own definitions *and* the
+  module names it binds (so `def` and `X.def` work unqualified at the
+  file level); `open File` / `open Lib.X` injects that module's
+  definitions directly. An `open` implies the corresponding import.
 - **`module K = Path`** binds (or overrides) a module name: the target
   may be a file module by any spelling in scope, an earlier alias, or a
-  whole library (`module B = Basic` then `B.Keys.def`).
+  whole library (`module B = Basic` then `B.Keys.def`). At a library
+  interface's top level it also *publishes* `K` (see below).
 - **Library**: a directory whose `build.json` declares
-  `"library": "<Name>"` plus its files — `"expose"` for the public
-  surface (at least one), `"sources"` for internal modules, and
-  `"dependencies"` for library dependencies. Internal files are
-  importable within the library only. Libraries may declare render
-  targets; building the library renders them into its own directory
-  under the root's `_build/`, and consumers' builds do NOT re-render a
-  dependency's targets.
+  `"library": "<Name>"` and, optionally, `"dependencies"`. It lists no
+  files: every `.synth` file in the directory is a member, and members
+  import each other freely by short name. The directory must contain a
+  `lib.synth` **interface file**, which is the library itself — module
+  `Lib`, not `Lib.Lib` — and declares the entire public surface:
+
+  ```
+  open Core
+  import Doppler
+
+  module Doppler = Doppler ;;                (* publish a member module *)
+  module Echo    = Delay ;;                  (* ...possibly renamed *)
+
+  let fly_by ~rate:Scalar : Scalar Signal =  (* or a value of its own *)
+    Doppler.pan (Doppler.swept_saw ~rate:rate) rate
+  ;;
+  ```
+
+  A member not bound by `lib.synth` is internal: reachable from its
+  siblings, invisible outside. `lib.synth` is not itself a member, so
+  members cannot import it — nor may they refer to their own library by
+  name (`Own.Sibling` inside `Own` is an error; use `Sibling`).
+  Libraries may declare render targets; building the library renders
+  them into its own directory under the root's `_build/`, and
+  consumers' builds do NOT re-render a dependency's targets.
 - **Project**: a directory with a `build.json` manifest — one JSON
   object with `"project": "<name>"` plus a `"sources"` array (and an
   optional `"dependencies"` array); an optional `"description"` string
@@ -258,6 +284,17 @@ channels in v1.
   it back at `at`, silent elsewhere. Stateful primitives (filters,
   `fm`, `delay`, `reverb`) evaluate from the epoch of their own timeline;
   a placed sample's interior state warms up from t = 0 of its source.
+- `resample input ~f` remaps time the other way: instead of moving a
+  window, it changes how fast the source is read. `f` is a *rate
+  multiplier* evaluated on the output's timeline, so
+  `out(t) = input(phi(t))` where `phi` is the running integral of `f` -
+  `fun t -> 1.0` is the identity, `0.5` halves the speed (an octave down),
+  `2.0` doubles it. Like a placement, the source runs on its own timeline
+  from its own epoch. The read head only ever moves forward: `0.0` freezes
+  it on the current sample and a negative rate clamps to `0.0` rather than
+  playing backwards. Rates above 64 are rejected as runaways. Values
+  between source frames are linearly interpolated, so warping is not
+  lossless.
 - Audio files are build inputs: `load_mono`/`load_multi` read and
   validate them at build time (channel counts checked against the
   primitive; paths resolve relative to the source file). A loaded file
@@ -298,6 +335,7 @@ val am        : carrier:'a Signal -> modulator:Scalar Signal -> depth:Scalar -> 
 
 (* time effects *)
 val delay     : by:Timestamp -> signal:'a Signal -> 'a Signal
+val resample  : input:'a Signal -> f:(Scalar -> Scalar) -> 'a Signal  (* f is a playback-rate multiplier *)
 val reverb    : decay:Timestamp -> damping:Scalar -> mix:Scalar
              -> input:'a Signal -> 'a Signal
 
@@ -347,13 +385,23 @@ val List.fold   : f:('a -> 'b -> 'a) -> init:'a -> xs:'b list -> 'a
 val List.init   : n:Scalar -> f:(Scalar -> 'a) -> 'a list   (* [f 0.0; ...; f (n-1)] *)
 val List.repeat : n:Scalar -> x:'a -> 'a list
 
-(* timestamp-list utilities (Core proper) *)
+(* timestamp construction & list utilities (Core proper) *)
+val to_sec    : x:Scalar -> Timestamp
+val to_ms     : x:Scalar -> Timestamp
+val to_min    : x:Scalar -> Timestamp
 val time_steps: start:Timestamp -> step:Timestamp -> count:Scalar -> Timestamp list
 val jitter    : seed:Scalar -> spread:Timestamp -> steps:(Timestamp list) -> Timestamp list
 ```
 
 Counts and indices are Scalars (the language's single numeric type);
 counts must be whole and non-negative, validated at build time.
+
+`to_sec`/`to_ms`/`to_min` are the computed counterpart of the literal
+suffixes — `to_ms 250.0` is `250ms` — and are what a duration derived
+from a tempo, a loop index, or a parameter has to go through:
+`to_min (1.0 / bpm)` is one beat. There is deliberately no conversion
+back: a Timestamp that can decay into a bare number is how unit
+confusion gets in.
 
 `jitter` humanizes a rhythm: each timestamp moves by a delta in
 `[-spread, +spread]` (clamped at `0s`) derived by hashing
@@ -383,9 +431,11 @@ manage headroom deliberately.
 
 Booleans and control flow, pattern matching, user-defined types,
 recursion and feedback (IIR-style signal cycles), user polymorphism,
-`.mli`-style interface files (visibility control exists only at file
-granularity, via a library's `expose` list), cache tuning knobs, native
-extensions. See design doc §13. (Lambdas, general partial application,
-and cross-directory imports/packaging — via libraries, `open` and
-module aliases — were listed here originally and are now in the
-language; see §2, §3 and §4.)
+per-definition visibility control (a library's `lib.synth` publishes
+whole modules or re-exported values, but a published module exposes all
+of its definitions), reverse playback (`resample` reads its source only
+forward, so a negative rate clamps to zero rather than rewinding),
+cache tuning knobs, native extensions. See design
+doc §13. (Lambdas, general partial application, and cross-directory
+imports/packaging — via libraries, `open` and module aliases — were
+listed here originally and are now in the language; see §2, §3 and §4.)

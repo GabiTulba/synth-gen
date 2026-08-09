@@ -200,6 +200,18 @@ SigPtr makeChannels(std::vector<SigPtr> monoItems);
 // source in a private context, so repeated placements of one sample
 // replay identical content even for stateful sources.
 SigPtr makePlace(SigPtr source, double from, double to, double at);
+// Time-warping resampler: out(t) = input(phi(t)) where phi' = rate. The
+// rate signal must be mono; it is a multiplier on the source's playback
+// speed (1 = identity, 0.5 = an octave down, 2 = an octave up). Negative
+// rates clamp to zero - the source is only ever read forward, which is
+// what keeps the read window bounded and satisfies the engine's rule that
+// stateful nodes are never queried backwards. Like a placement, the
+// source runs in a private context.
+SigPtr makeResample(SigPtr input, SigPtr rate);
+// Ceiling on the rate multiplier; beyond it a render is almost certainly
+// a runaway rather than an intended effect (and the source pull per output
+// block would grow without bound).
+constexpr double kMaxResampleRate = 64.0;
 // An audio file as a signal: [0, duration) then silence;
 // linear-interpolation resampling from the file's native rate.
 SigPtr makeFileSignal(std::vector<std::vector<double>> channelData,

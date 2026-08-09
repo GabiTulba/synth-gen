@@ -1,0 +1,18 @@
+(* The `Effects` library interface: every module a consumer can reach is
+   bound here. Nothing else in this directory is visible from outside -
+   the members themselves import each other freely by short name.
+
+   A library may also re-export individual definitions as its own, so a
+   consumer that only wants the fly-by pan does not have to name the
+   module it lives in: `Effects.fly_by` works after `import Effects`. *)
+
+open Core
+import Doppler
+
+module Doppler = Doppler ;;
+
+let fly_by ~base:Scalar ~rate:Scalar ~depth:Scalar ~gain:Scalar
+    : Vector Signal =
+  Doppler.pan (Doppler.swept_saw ~base:base ~rate:rate ~depth:depth
+                 ~gain:gain * Doppler.proximity rate) rate
+;;

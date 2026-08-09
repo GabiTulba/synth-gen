@@ -24,15 +24,21 @@ inline std::string projectManifest(const std::string& name,
   return out + " }\n";
 }
 
+// A library manifest names the library and its dependencies; its members
+// are the .synth files in the directory and its public surface is
+// declared in lib.synth (see libraryInterface).
 inline std::string libraryManifest(const std::string& name,
-                                   const std::vector<std::string>& expose,
-                                   const std::vector<std::string>& sources = {},
                                    const std::vector<std::string>& deps = {}) {
   std::string out = "{ \"library\": \"" + name + "\"";
-  if (!expose.empty()) out += ",\n  \"expose\": " + jsonStringArray(expose);
-  if (!sources.empty()) out += ",\n  \"sources\": " + jsonStringArray(sources);
   if (!deps.empty()) out += ",\n  \"dependencies\": " + jsonStringArray(deps);
   return out + " }\n";
+}
+
+// A lib.synth exposing the named modules verbatim (`module X = X ;;`).
+inline std::string libraryInterface(const std::vector<std::string>& modules) {
+  std::string out;
+  for (auto& m : modules) out += "module " + m + " = " + m + " ;;\n";
+  return out;
 }
 
 inline std::string rootManifest(const std::string& name,

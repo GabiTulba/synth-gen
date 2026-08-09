@@ -61,16 +61,33 @@ A single JSON object per directory. A standalone project:
   "sources": ["pluck.synth", "other.synth"] }
 ```
 
-A **library** — a reusable, importable unit. `"expose"` marks the public
-files (internal `"sources"` files are importable only within the
-library); `"dependencies"` names other libraries it uses:
+A **library** — a reusable, importable unit. It lists no files: every
+`.synth` file in the directory is a member, and members import each
+other by short name. `"dependencies"` names other libraries it uses:
 
 ```json
 { "library": "Basic",
-  "expose": ["keys.synth"],
-  "sources": ["internal.synth"],
   "dependencies": ["Fx"] }
 ```
+
+What the library *publishes* is declared in code, in a `lib.synth`
+interface file alongside the members. That file **is** the library —
+module `Basic` — and only what it binds is visible from outside:
+
+```
+open Core
+import Keys
+
+module Keys = Keys ;;      (* publish a member module *)
+module Lead = Pads ;;      (* ...possibly under a different name *)
+
+let strike440 : Scalar Signal = Keys.strike 440.0 ;;   (* or a value *)
+```
+
+A member with no binding here (say `internal.synth`) stays internal:
+its siblings can import it, consumers cannot. Members must not name
+their own library — inside `Basic`, write `import Keys`, not
+`import Basic.Keys`.
 
 A **project root** — the orchestrator. `"build"` rules name the units to
 build (directories with a `build.json`, or single `.synth` files);
@@ -86,9 +103,10 @@ root, so dependency names resolve wherever the library lives:
 a subdirectory they build just that unit, resolving dependencies through
 the enclosing root. In code,
 `import Basic` + `Basic.Keys.strike`, `open Basic.Keys` + bare
-`strike`, and `module K = Basic.Keys` + `K.strike` all reach a
-library's exposed modules. A dependency's own render targets are not
-re-rendered into the consumer's build.
+`strike`, and `module K = Basic.Keys` + `K.strike` all reach what a
+library's `lib.synth` publishes; `import Basic` + `Basic.strike440`
+reaches the interface file's own definitions. A dependency's own render
+targets are not re-rendered into the consumer's build.
 
 ### Build outputs
 
@@ -138,11 +156,12 @@ makes them bare). `Core` aliases like any module (`module C = Core`).
 
 Fully annotated, no inference, no Booleans/branching/recursion in v1.
 `render` is the language's only effect. Files are modules (`import A`
-resolves `a.synth` in the same directory, or a sibling listed by the
-enclosing library); libraries add `import Lib` / `import Lib.File`
-(qualified `Lib.File.def` access), `open Lib` / `open Lib.File`
-(unqualified access, position-ordered shadowing), and module aliases
-(`module K = Basic.Keys`). See `examples/song/preview.synth`.
+resolves `a.synth` in the same directory — inside a library, that is a
+fellow member); libraries add `import Lib` / `import Lib.Mod`
+(qualified `Lib.def` / `Lib.Mod.def` access), `open Lib` /
+`open Lib.Mod` (unqualified access, position-ordered shadowing), and
+module aliases (`module K = Basic.Keys`). See
+`examples/song/preview.synth`.
 
 Ergonomic features on top of the doc's core: **labeled arguments**,
 **partial application**, **lambdas**, the **pipe operator**, and **local
@@ -198,7 +217,7 @@ waveshaper, `sqrt time` a fade-in curve.
 | `src/eval.*` | Evaluator: reduces definitions to values, collects render targets, `load_*` build-time validation |
 | `src/wav.*` | WAV read (PCM 16/24/32, float 32/64) and write (PCM 16) |
 | `src/build.*` | `build.json` manifest (projects, libraries, roots), project validation, target enumeration, cached + parallel rendering, artifact + metadata emission, lint mode, watch loops (project + root daemon) |
-| `src/library.*` | Library registry: dynamic discovery of `library` manifests under a root, dep validation, enclosing-root search |
+| `src/library.*` | Library registry: dynamic discovery of `library` manifests under a root, directory-scanned member sets, `lib.synth` interface detection, dep validation, enclosing-root search |
 | `src/incremental.*` | Dependency tracking: Merkle content hashes over definition closures for the build cache |
 | `src/main.cpp` | `synthc` CLI (`build`, `watch`, `lint`) |
 | `src/devapp/` | `synth-dev`: JSON/metadata reader, SDL audio player, ImGui shell with live refresh and `--self-test` |
@@ -232,8 +251,9 @@ waveshaper, `sqrt time` a fade-in curve.
   `channels`/`mix_all`/`map`/`fold`, `load_mono`/`load_multi` with
   build-time channel validation. Beyond the v1 roster: `fm`/`pm`/`am`
   modulation primitives, the feedforward `delay` the doc left under
-  consideration, a Schroeder `reverb`, a deterministic FM-based
-  `noise` generator, and `hard_clip`/`soft_clip` distortion.
+  consideration, a Schroeder `reverb`, `resample` for time warping, a
+  deterministic FM-based `noise` generator, and `hard_clip`/`soft_clip`
+  distortion.
 - [x] **Epic 5** — One-shot build system: manifest, project validation,
   target enumeration, metadata emission, `synthc build` + `synthc lint`.
 - [x] **Epic 6** — Build daemon: `synthc watch` rebuilds on changes to
@@ -376,6 +396,17 @@ follows (all easy to revisit):
   with a ring buffer so a subgraph shared between dry and delayed paths
   keeps its stateful nodes (filters, `fm`) consistent. Feedforward only —
   feedback/IIR delays remain future work per §13.
+- **`resample input:'a Signal f:(Scalar -> Scalar) : 'a Signal`** — time
+  warping: `f` is a playback-rate multiplier on the output's timeline, so
+  `out(t) = input(∫₀ᵗ f)`. `1.0` is the identity, `0.5` is half speed (an
+  octave down), `2.0` double. This is what expresses varispeed, tape
+  flutter, and Doppler pitch shift, including on sources with no harmonic
+  decomposition to `fm` (a `load_mono` file, say). The source runs in its
+  own context from its own epoch, exactly like a placement, and the read
+  head only moves forward: `0.0` freezes it, a negative rate clamps to
+  `0.0` (reverse playback is out of scope, §13), and rates above 64 are
+  rejected as runaways. Reads between source frames are linearly
+  interpolated.
 - **`reverb decay:Timestamp damping:Scalar mix:Scalar input:'a Signal :
   'a Signal`** — Schroeder reverb: four parallel feedback comb filters
   (damped, mutually detuned delays) into two series allpass diffusers, per
@@ -396,6 +427,13 @@ follows (all easy to revisit):
   reproducible) per-note timing deltas.
   There is no Integer type in v1: counts and indices are Scalars,
   validated at build time to be whole and non-negative.
+- **`to_sec`/`to_ms`/`to_min` `x:Scalar : Timestamp`** — the computed
+  counterpart of the literal unit suffixes, which can only follow a
+  literal. `to_ms 250.0` is `250ms`; `to_min (1.0 / bpm)` is one beat at
+  `bpm`. This is what lets a duration come out of a tempo, a loop index,
+  or a parameter instead of being typed in. There is no conversion back
+  to Scalar on purpose — a Timestamp that decays into a bare number is
+  how unit confusion gets in.
 - **`place_multi sample:'a Sample ats:Timestamp list : 'a Signal`** —
   places one sample at every timestamp in the list and mixes the
   placements (overlaps sum): `place_multi kick [0s; 500ms; 1s]`. The

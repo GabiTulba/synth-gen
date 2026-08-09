@@ -144,16 +144,13 @@ TEST(build_manifest_library_directives) {
   Manifest m;
   DiagnosticBag diags;
   bool ok = parseManifest(
-      R"({ "library": "Basic",
-           "expose": ["keys.synth", "pads.synth"],
-           "sources": ["internal.synth"],
-           "dependencies": ["Fx"] })",
-      "build.json", m, diags);
+      R"({ "library": "Basic", "dependencies": ["Fx"] })", "build.json", m,
+      diags);
   CHECK(ok);
   CHECK(m.isLibrary());
   CHECK(m.libraryName == "Basic");
-  CHECK(m.sources.size() == 3);  // expose implies source
-  CHECK(m.exposed.size() == 2);
+  // Members come from the directory, not the manifest.
+  CHECK(m.sources.empty());
   CHECK(m.deps.size() == 1 && m.deps[0] == "Fx");
   CHECK(!m.isRoot());
 }
@@ -161,24 +158,21 @@ TEST(build_manifest_library_directives) {
 TEST(build_manifest_rejects_project_and_library) {
   Manifest m;
   DiagnosticBag diags;
-  CHECK(!parseManifest(
-      R"({ "project": "x", "library": "Y", "expose": ["a.synth"] })",
-      "build.json", m, diags));
+  CHECK(!parseManifest(R"({ "project": "x", "library": "Y" })", "build.json", m,
+                       diags));
 }
 
-TEST(build_manifest_expose_rules) {
-  // expose outside a library.
+TEST(build_manifest_library_rules) {
+  // `expose` is gone: a library's public surface lives in lib.synth.
   Manifest m1;
   DiagnosticBag d1;
-  CHECK(!parseManifest(R"({ "project": "x", "expose": ["a.synth"] })",
+  CHECK(!parseManifest(R"({ "library": "L", "expose": ["a.synth"] })",
                        "build.json", m1, d1));
-  // Same file as both source and expose (order-independent in JSON).
   Manifest m2;
   DiagnosticBag d2;
-  CHECK(!parseManifest(
-      R"({ "library": "L", "sources": ["a.synth"], "expose": ["a.synth"] })",
-      "build.json", m2, d2));
-  // A library with no exposed files.
+  CHECK(!parseManifest(R"({ "project": "x", "expose": ["a.synth"] })",
+                       "build.json", m2, d2));
+  // A library does not list sources either.
   Manifest m3;
   DiagnosticBag d3;
   CHECK(!parseManifest(R"({ "library": "L", "sources": ["a.synth"] })",
@@ -186,14 +180,11 @@ TEST(build_manifest_expose_rules) {
   // Lowercase library name.
   Manifest m4;
   DiagnosticBag d4;
-  CHECK(!parseManifest(R"({ "library": "basic", "expose": ["a.synth"] })",
-                       "build.json", m4, d4));
-  // Duplicate expose entry.
+  CHECK(!parseManifest(R"({ "library": "basic" })", "build.json", m4, d4));
+  // A bare library manifest is complete on its own.
   Manifest m5;
   DiagnosticBag d5;
-  CHECK(!parseManifest(
-      R"({ "library": "L", "expose": ["a.synth", "a.synth"] })",
-      "build.json", m5, d5));
+  CHECK(parseManifest(R"({ "library": "L" })", "build.json", m5, d5));
 }
 
 TEST(build_manifest_root_build_rules) {
@@ -216,9 +207,11 @@ TEST(build_manifest_root_build_rules) {
 TEST(library_discovery_finds_nested_builds) {
   TempTree tp;
   tp.write("build.json", rootManifest("root", {"tunes"}));
-  tp.write("lib/basic/build.json", libraryManifest("Basic", {"keys.synth"}));
+  tp.write("lib/basic/build.json", libraryManifest("Basic"));
+  tp.write("lib/basic/lib.synth", libraryInterface({"Keys"}));
   tp.write("lib/basic/keys.synth", "open Core\nlet k : Scalar = 1.0 ;;");
-  tp.write("deep/nested/fx/build.json", libraryManifest("Fx", {"fx.synth"}, {}, {"Basic"}));
+  tp.write("deep/nested/fx/build.json", libraryManifest("Fx", {"Basic"}));
+  tp.write("deep/nested/fx/lib.synth", libraryInterface({"Fx"}));
   tp.write("deep/nested/fx/fx.synth", "open Core\nlet f : Scalar = 2.0 ;;");
   DiagnosticBag diags;
   LibraryRegistry reg = discoverLibraries(tp.dir.string(), diags);
@@ -229,7 +222,9 @@ TEST(library_discovery_finds_nested_builds) {
   CHECK(basic != nullptr);
   CHECK(fs::path(basic->dir) == tp.dir / "lib" / "basic");
   CHECK(basic->fileForModule("Keys") == "keys.synth");
-  CHECK(basic->isExposedModule("Keys"));
+  CHECK(basic->hasInterface);
+  // lib.synth is the interface, not a member.
+  CHECK(basic->files.size() == 1);
   const LibraryInfo* fx = reg.find("Fx");
   CHECK(fx != nullptr);
   CHECK(fx->deps.size() == 1 && fx->deps[0] == "Basic");
@@ -237,12 +232,15 @@ TEST(library_discovery_finds_nested_builds) {
 
 TEST(library_discovery_skips_build_output_dirs) {
   TempTree tp;
-  tp.write("lib/build.json", libraryManifest("L", {"a.synth"}));
+  tp.write("lib/build.json", libraryManifest("L"));
+  tp.write("lib/lib.synth", libraryInterface({"A"}));
   tp.write("lib/a.synth", "open Core\nlet a : Scalar = 1.0 ;;");
   // A stray manifest inside an output dir must not register ("_build"
   // outputs and legacy/cmake "build" dirs alike).
-  tp.write("lib/build/build.json", libraryManifest("Ghost", {"g.synth"}));
-  tp.write("_build/lib/build.json", libraryManifest("Shadow", {"s.synth"}));
+  tp.write("lib/build/build.json", libraryManifest("Ghost"));
+  tp.write("lib/build/lib.synth", libraryInterface({"G"}));
+  tp.write("_build/lib/build.json", libraryManifest("Shadow"));
+  tp.write("_build/lib/lib.synth", libraryInterface({"S"}));
   DiagnosticBag diags;
   LibraryRegistry reg = discoverLibraries(tp.dir.string(), diags);
   CHECK(!diags.hasErrors());
@@ -253,8 +251,10 @@ TEST(library_discovery_skips_build_output_dirs) {
 
 TEST(library_discovery_duplicate_names_error) {
   TempTree tp;
-  tp.write("a/build.json", libraryManifest("Same", {"x.synth"}));
-  tp.write("b/build.json", libraryManifest("Same", {"y.synth"}));
+  tp.write("a/build.json", libraryManifest("Same"));
+  tp.write("a/lib.synth", libraryInterface({"X"}));
+  tp.write("b/build.json", libraryManifest("Same"));
+  tp.write("b/lib.synth", libraryInterface({"Y"}));
   DiagnosticBag diags;
   discoverLibraries(tp.dir.string(), diags);
   CHECK(diags.hasErrors());
@@ -262,7 +262,8 @@ TEST(library_discovery_duplicate_names_error) {
 
 TEST(library_registry_unknown_dep_error) {
   TempTree tp;
-  tp.write("a/build.json", libraryManifest("A", {"x.synth"}, {}, {"Nope"}));
+  tp.write("a/build.json", libraryManifest("A", {"Nope"}));
+  tp.write("a/lib.synth", libraryInterface({"X"}));
   DiagnosticBag diags;
   discoverLibraries(tp.dir.string(), diags);
   CHECK(diags.hasErrors());
@@ -270,8 +271,10 @@ TEST(library_registry_unknown_dep_error) {
 
 TEST(library_registry_dep_cycle_error) {
   TempTree tp;
-  tp.write("a/build.json", libraryManifest("A", {"x.synth"}, {}, {"B"}));
-  tp.write("b/build.json", libraryManifest("B", {"y.synth"}, {}, {"A"}));
+  tp.write("a/build.json", libraryManifest("A", {"B"}));
+  tp.write("a/lib.synth", libraryInterface({"X"}));
+  tp.write("b/build.json", libraryManifest("B", {"A"}));
+  tp.write("b/lib.synth", libraryInterface({"Y"}));
   DiagnosticBag diags;
   discoverLibraries(tp.dir.string(), diags);
   CHECK(diags.hasErrors());
@@ -857,6 +860,83 @@ let _ = render "out" 8000.0
   CHECK(a == b);
 }
 
+TEST(build_timestamp_conversions_match_literals) {
+  // to_sec/to_ms/to_min must land on exactly the same instants as the
+  // lexer's unit suffixes, so a render driven by computed timestamps is
+  // byte-identical to the same render written with literals.
+  auto write = [](TempDir& tp, const char* body) {
+    tp.write("t.synth", body);
+    tp.write("build.json", projectManifest("ts", {"t.synth"}));
+  };
+  TempDir computed, literal;
+  write(computed, R"(
+open Core
+let hit : Scalar Sample = sample (sine 660.0 * exp_decay 20.0) 0s (to_ms 200.0) ;;
+let _ = place_multi hit (time_steps ~start:(to_ms 250.0)
+                                    ~step:(to_min (1.0 / 120.0)) ~count:3.0)
+  |> sample ~from:(to_sec 0.0) ~to:(to_sec 2.0)
+  |> render ~name:"out" ~rate:8000.0 ;;
+)");
+  write(literal, R"(
+open Core
+let hit : Scalar Sample = sample (sine 660.0 * exp_decay 20.0) 0s 200ms ;;
+let _ = place_multi hit (time_steps ~start:250ms ~step:500ms ~count:3.0)
+  |> sample ~from:0s ~to:2s
+  |> render ~name:"out" ~rate:8000.0 ;;
+)");
+  CHECK(buildProject(computed.dir.string()).ok);
+  CHECK(buildProject(literal.dir.string()).ok);
+  std::string a = slurp(computed.dir / "_build" / "artifacts" / "out.wav");
+  std::string b = slurp(literal.dir / "_build" / "artifacts" / "out.wav");
+  CHECK(!a.empty());
+  CHECK(a == b);
+}
+
+TEST(build_resample_identity_matches_the_input) {
+  // End-to-end: `|> resample ~f:(fun t -> 1.0)` reads one source frame per
+  // output frame, so the artifact must be byte-identical to the un-warped
+  // render. Also pins the pipe wiring - `input` is the primitive's
+  // unlabeled slot.
+  auto write = [](TempDir& tp, const char* body) {
+    tp.write("r.synth", body);
+    tp.write("build.json", projectManifest("rs", {"r.synth"}));
+  };
+  TempDir warped, plain;
+  write(warped, R"(
+open Core
+let _ = (sine 440.0) * (exp_decay 4.0)
+  |> resample ~f:(fun t:Scalar -> 1.0)
+  |> sample ~from:0s ~to:300ms |> render ~name:"out" ~rate:8000.0 ;;
+)");
+  write(plain, R"(
+open Core
+let _ = (sine 440.0) * (exp_decay 4.0)
+  |> sample ~from:0s ~to:300ms |> render ~name:"out" ~rate:8000.0 ;;
+)");
+  CHECK(buildProject(warped.dir.string()).ok);
+  CHECK(buildProject(plain.dir.string()).ok);
+  std::string a = slurp(warped.dir / "_build" / "artifacts" / "out.wav");
+  std::string b = slurp(plain.dir / "_build" / "artifacts" / "out.wav");
+  CHECK(!a.empty());
+  CHECK(a == b);
+}
+
+TEST(build_resample_runaway_rate_is_a_diagnostic) {
+  TempDir tp;
+  tp.write("r.synth", R"(
+open Core
+let _ = sine 440.0 |> resample ~f:(fun t:Scalar -> 1000.0)
+  |> sample ~from:0s ~to:100ms |> render ~name:"out" ~rate:8000.0 ;;
+)");
+  tp.write("build.json", projectManifest("runaway", {"r.synth"}));
+  BuildResult r = buildProject(tp.dir.string());
+  CHECK(!r.ok);
+  bool mentioned = false;
+  for (auto& d : r.diags.items)
+    if (d.message.find("resample: rate") != std::string::npos) mentioned = true;
+  CHECK(mentioned);
+}
+
 TEST(build_place_multi_overlaps_sum) {
   // Two placements of a constant-ish sample overlapping halfway: the
   // overlap region carries double amplitude.
@@ -1323,7 +1403,8 @@ namespace {
 // internal module) and a `tunes` project consuming it via `dep Basic`.
 void writeRootTree(TempTree& tp) {
   tp.write("build.json", rootManifest("demo", {"lib/basic", "tunes"}));
-  tp.write("lib/basic/build.json", libraryManifest("Basic", {"keys.synth"}, {"internal.synth"}));
+  tp.write("lib/basic/build.json", libraryManifest("Basic"));
+  tp.write("lib/basic/lib.synth", libraryInterface({"Keys"}));
   tp.write("lib/basic/keys.synth",
            "open Core\nimport Internal\n"
            "let strike freq:Scalar : Scalar Signal =\n"
@@ -1406,6 +1487,46 @@ TEST(build_library_standalone) {
                    "keys-demo.wav"));
 }
 
+TEST(build_library_without_interface_fails) {
+  // No lib.synth means no declared public surface: not a buildable library.
+  TempTree tp;
+  tp.write("build.json", libraryManifest("Bare"));
+  tp.write("thing.synth", "open Core\nlet x : Scalar = 1.0 ;;\n");
+  BuildResult r = buildProject(tp.dir.string());
+  CHECK(!r.ok);
+  bool hinted = false;
+  for (auto& d : r.diags.items)
+    if (d.message.find("lib.synth") != std::string::npos) hinted = true;
+  CHECK(hinted);
+}
+
+TEST(build_library_interface_reexports_to_consumer) {
+  // lib.synth's own defs are part of the library's surface, and it can
+  // rename a member module on the way out.
+  TempTree tp;
+  tp.write("build.json", rootManifest("demo", {"lib/fx", "tunes"}));
+  tp.write("lib/fx/build.json", libraryManifest("Fx"));
+  tp.write("lib/fx/lib.synth",
+           "open Core\nimport Shape\n"
+           "module Tone = Shape ;;\n"
+           "let bright freq:Scalar : Scalar Signal = Shape.body freq * 1.5 ;;\n");
+  tp.write("lib/fx/shape.synth",
+           "open Core\n"
+           "let body freq:Scalar : Scalar Signal = sine freq * exp_decay 8.0 ;;\n");
+  tp.write("tunes/build.json", projectManifest("tunes", {"song.synth"}, {"Fx"}));
+  tp.write("tunes/song.synth",
+           "open Core\nimport Fx\n"
+           "let _ = (Fx.bright 440.0 + Fx.Tone.body 220.0)\n"
+           "        |> sample ~from:0s ~to:100ms\n"
+           "        |> render ~name:\"song\" ~rate:8000.0 ;;\n");
+  RootBuildResult rr = buildRoot(tp.dir.string(), BuildOptions{});
+  for (auto& d : rr.diags.items) std::cerr << d.message << "\n";
+  for (auto& [rule, br] : rr.rules)
+    for (auto& d : br.diags.items) std::cerr << rule << ": " << d.message << "\n";
+  CHECK(rr.ok);
+  CHECK(fs::exists(tp.dir / "_build" / "tunes" / "artifacts" / "song.wav"));
+}
+
 TEST(build_subdir_build_resolves_deps_via_root) {
   // Building a dep-carrying project directly resolves libraries through
   // the enclosing root.
@@ -1449,9 +1570,11 @@ TEST(build_cross_library_byte_identity) {
 TEST(build_root_duplicate_library_names_fail) {
   TempTree tp;
   tp.write("build.json", rootManifest("demo", {"a"}));
-  tp.write("a/build.json", libraryManifest("Same", {"x.synth"}));
+  tp.write("a/build.json", libraryManifest("Same"));
+  tp.write("a/lib.synth", libraryInterface({"X"}));
   tp.write("a/x.synth", "open Core\nlet x : Scalar = 1.0 ;;\n");
-  tp.write("b/build.json", libraryManifest("Same", {"y.synth"}));
+  tp.write("b/build.json", libraryManifest("Same"));
+  tp.write("b/lib.synth", libraryInterface({"Y"}));
   tp.write("b/y.synth", "open Core\nlet y : Scalar = 1.0 ;;\n");
   RootBuildResult rr = buildRoot(tp.dir.string(), BuildOptions{});
   CHECK(!rr.ok);

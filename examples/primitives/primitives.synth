@@ -71,6 +71,12 @@ let _ =
   (blip |> reverb ~decay:900ms ~damping:0.4 ~mix:0.5) * 0.7
     |> sample ~from:0s ~to:2s
     |> render ~name:"reverb" ~rate:48000.0 ;;
+(* resample: f multiplies the playback rate, so a rate that ramps from
+   0.5 to 1.5 is a tape slowing down and speeding back up. *)
+let _ =
+  (saw 220.0 * 0.4 |> resample ~f:(fun t:Scalar -> 0.5 + t / 2.0))
+    |> sample ~from:0s ~to:2s
+    |> render ~name:"resample" ~rate:48000.0 ;;
 
 (* Combination *)
 let _ =
@@ -117,6 +123,18 @@ let _ =
   place_multi tick (time_steps ~start:0s ~step:250ms ~count:6.0)
     |> sample ~from:0s ~to:1600ms
     |> render ~name:"time_steps" ~rate:48000.0 ;;
+
+(* to_sec/to_ms/to_min: the unit suffixes as functions, for durations
+   that are computed rather than written. The step below is one beat at
+   140 BPM - a value no literal can spell. *)
+let bpm : Scalar = 140.0 ;;
+let _ =
+  let tick : Scalar Sample =
+    sine 880.0 * exp_decay 25.0 |> sample ~from:0s ~to:(to_ms 120.0) in
+  place_multi tick
+    (time_steps ~start:0s ~step:(to_min (1.0 / bpm)) ~count:8.0)
+    |> sample ~from:0s ~to:(to_sec (8.0 * 60.0 / bpm))
+    |> render ~name:"to_sec" ~rate:48000.0 ;;
 
 (* Signal constructors: `constant` holds a level forever (here a gain on
    a tone - a bare constant is inaudible DC); `time` is the ramp whose

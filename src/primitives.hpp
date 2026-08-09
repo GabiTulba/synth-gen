@@ -16,6 +16,7 @@ enum class PrimId {
   Pm,
   Am,
   Delay,
+  Resample,
   Reverb,
   ExpDecay,
   Adsr,
@@ -49,6 +50,9 @@ enum class PrimId {
   Sqrt,
   Log,
   Pow,
+  ToSec,
+  ToMs,
+  ToMin,
 };
 
 struct PrimSig {

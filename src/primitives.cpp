@@ -37,6 +37,12 @@ const std::vector<PrimSig>& primitives() {
     // silence before it. Echoes are delay + arithmetic + mix_all.
     add(PrimId::Delay, "delay", {"by", "signal"},
         {tTimestamp(), tSignal(a)}, tSignal(a));
+    // resample: time warping. `f` is a playback-rate multiplier sampled on
+    // the output's time base, so out(t) = input(phi(t)) with phi' = f - 1
+    // is identity, 0.5 an octave down, 2.0 an octave up. `input` comes
+    // first so `x |> resample ~f:g` reads naturally.
+    add(PrimId::Resample, "resample", {"input", "f"},
+        {tSignal(a), tFun({tScalar()}, tScalar())}, tSignal(a));
     // Reverb: Schroeder-style (parallel feedback combs + series allpasses,
     // internal to the primitive - the *language* stays acyclic). decay is
     // the RT60-style tail length, damping in [0,1] rolls off highs in the
@@ -148,6 +154,16 @@ const std::vector<PrimSig>& primitives() {
     add(PrimId::Sqrt, "sqrt", {"x"}, {a}, a);
     add(PrimId::Log, "log", {"x"}, {a}, a);
     add(PrimId::Pow, "pow", {"x", "y"}, {a, tScalar()}, a);
+    // Scalar -> Timestamp conversion. Timestamp literals (`500ms`) only
+    // cover values known when the source is written; these carry a
+    // *computed* Scalar into the time domain, which is what lets a
+    // duration be derived from a tempo, a loop index, or a parameter.
+    // The inverse direction is deliberately absent: Timestamps are
+    // durations, and letting them decay back into bare numbers is how
+    // unit confusion gets in.
+    add(PrimId::ToSec, "to_sec", {"x"}, {tScalar()}, tTimestamp());
+    add(PrimId::ToMs, "to_ms", {"x"}, {tScalar()}, tTimestamp());
+    add(PrimId::ToMin, "to_min", {"x"}, {tScalar()}, tTimestamp());
     return p;
   }();
   return prims;

@@ -1,0 +1,10 @@
+(* The `Basic` library interface: every instrument module here is
+   public, so each one gets a binding. *)
+
+module Bassdrum       = Bassdrum ;;
+module Bassdrum_harsh = Bassdrum_harsh ;;
+module Bitonal        = Bitonal ;;
+module Snare          = Snare ;;
+module Kick           = Kick ;;
+module Guitar         = Guitar ;;
+module Piano          = Piano ;;

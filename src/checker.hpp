@@ -20,9 +20,16 @@ struct CheckedModule {
   // imports (and, during checking, opens/aliases): "Keys" -> "Basic.Keys"
   // inside library Basic, "Basic.Keys" -> "Basic.Keys", ...
   std::map<std::string, std::string> moduleScope;
-  // Whole-library imports: surface library name -> declared library name.
-  std::map<std::string, std::string> importedLibs;
+  // This module's *public* module bindings: every `module X = Path` at
+  // top level, as surface name -> canonical module id. For a library's
+  // `lib.synth` (whose module id is the library name) this is the
+  // library's exposed module surface: `module Keys = Keys` in Basic's
+  // lib.synth is what makes `Basic.Keys` reachable from outside. For any
+  // other module it is what `open`ing it re-exports.
+  std::map<std::string, std::string> exportedModules;
   // The library this module belongs to ("" for standalone/project files).
+  // A library's interface module (lib.synth) carries it too: its own
+  // canonical id *is* the library name.
   std::string libName;
   // True for modules pulled in from dependency libraries: their `let _`
   // render effects belong to the library's own build, not this one.
@@ -50,11 +57,12 @@ struct ModuleLoadContext {
 };
 
 // Loads, parses and type-checks `rootFiles` plus everything they import.
-// Short-name imports resolve within the current library's file set, or by
-// today's same-directory rule for standalone files; library imports
-// (`import Lib`, `import Lib.File`) resolve through the context's registry
-// with `dep` and `expose` enforcement. Paths in diagnostics are as given /
-// derived. Returns the (possibly partially) checked program; check
+// Short-name imports resolve by the same-directory rule - inside a
+// library that is its own directory, so members freely import each other;
+// library imports (`import Lib`, `import Lib.File`) resolve through the
+// context's registry with `dep` enforcement, and `Lib.File` additionally
+// has to be bound by `Lib`'s lib.synth. Paths in diagnostics are as given
+// / derived. Returns the (possibly partially) checked program; check
 // diags.hasErrors().
 Program checkProject(const std::vector<std::string>& rootFiles,
                      DiagnosticBag& diags,

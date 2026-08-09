@@ -1,9 +1,10 @@
 (* preview.synth - library-system demo. The Basic library (examples/
-   basic) provides instrument voices: `import Basic` gives qualified
-   Basic.File.def access, `module` binds a shorter alias, and `open`
-   brings one file's definitions into scope directly (the kick below is
-   Basic.Kick.kick, unqualified). Requires `dep Basic` in .build; the
-   library is discovered from the examples/ root. *)
+   basic) provides instrument voices, published by its lib.synth:
+   `import Basic` gives qualified Basic.Mod.def access, `module` binds a
+   shorter alias, and `open` brings one module's definitions into scope
+   directly (the kick below is Basic.Kick.kick, unqualified). Requires
+   "Basic" in this project's "dependencies"; the library is discovered
+   from the examples/ root. *)
 
 open Core
 

@@ -289,6 +289,9 @@ class Interp {
                             scalarArg(args[2]))};
       case PrimId::Delay:
         return Value{makeDelay(timeArg(args[0]), signalArg(args[1]))};
+      case PrimId::Resample:
+        return Value{makeResample(signalArg(args[0]),
+                                  fnOfTime(args[1], mod, "resample"))};
       case PrimId::Reverb:
         return Value{makeReverb(timeArg(args[0]), scalarArg(args[1]),
                                 scalarArg(args[2]), signalArg(args[3]))};
@@ -503,6 +506,14 @@ class Interp {
           throw EvalError("signal_multi: needs at least one function");
         return Value{makeChannels(std::move(chans))};
       }
+      // The unit suffixes the lexer accepts on literals, as functions of
+      // a computed Scalar.
+      case PrimId::ToSec:
+        return Value{TimeV{scalarArg(args[0])}};
+      case PrimId::ToMs:
+        return Value{TimeV{scalarArg(args[0]) * 1e-3}};
+      case PrimId::ToMin:
+        return Value{TimeV{scalarArg(args[0]) * 60.0}};
       case PrimId::Exp:
         return math1(args[0], SigUnaryOp::Exp, "exp");
       case PrimId::Sqrt:

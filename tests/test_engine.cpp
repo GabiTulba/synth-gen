@@ -1,3 +1,4 @@
+#include <cmath>
 #include <cstdio>
 #include <filesystem>
 
@@ -195,6 +196,100 @@ TEST(engine_pm_constant_phase_offset) {
   SigPtr pm = makePm(0.0, makeConst(3.14159265358979323846 / 2.0));
   Rendered r = renderWindow(pm, 0.0, 0.01, 8000.0);
   for (double v : r.interleaved) CHECK_NEAR(v, 1.0, 1e-9);
+}
+
+TEST(engine_resample_identity_is_exact) {
+  // At rate 1.0 the read head lands on an integral source frame every
+  // output frame, so no interpolation happens and the output must be
+  // bit-identical to the input.
+  SigPtr src = makeOsc(OscKind::Sine, 440.0);
+  Rendered a = renderWindow(makeResample(src, makeConst(1.0)), 0.0, 0.1,
+                            48000.0);
+  Rendered b = renderWindow(src, 0.0, 0.1, 48000.0);
+  CHECK(a.interleaved.size() == b.interleaved.size());
+  for (size_t i = 0; i < a.interleaved.size(); i++)
+    CHECK(a.interleaved[i] == b.interleaved[i]);
+}
+
+TEST(engine_resample_half_rate_drops_an_octave) {
+  // Half speed is an octave down; linear interpolation costs a little
+  // amplitude accuracy, so compare against 220 Hz with a loose bound.
+  SigPtr half = makeResample(makeOsc(OscKind::Sine, 440.0), makeConst(0.5));
+  Rendered a = renderWindow(half, 0.0, 0.2, 48000.0);
+  Rendered b = renderWindow(makeOsc(OscKind::Sine, 220.0), 0.0, 0.2, 48000.0);
+  for (size_t i = 0; i < a.interleaved.size(); i++)
+    CHECK_NEAR(a.interleaved[i], b.interleaved[i], 1e-3);
+}
+
+TEST(engine_resample_double_rate_raises_an_octave) {
+  SigPtr up = makeResample(makeOsc(OscKind::Sine, 220.0), makeConst(2.0));
+  Rendered a = renderWindow(up, 0.0, 0.2, 48000.0);
+  Rendered b = renderWindow(makeOsc(OscKind::Sine, 440.0), 0.0, 0.2, 48000.0);
+  for (size_t i = 0; i < a.interleaved.size(); i++)
+    CHECK_NEAR(a.interleaved[i], b.interleaved[i], 1e-3);
+}
+
+TEST(engine_resample_nonpositive_rate_holds_the_read_head) {
+  // Rate 0 freezes on the current source sample; a negative rate clamps to
+  // zero rather than playing backwards. saw(0) == -1, so both hold at -1.
+  for (double rate : {0.0, -2.0}) {
+    SigPtr held = makeResample(makeOsc(OscKind::Saw, 440.0), makeConst(rate));
+    Rendered r = renderWindow(held, 0.0, 0.05, 48000.0);
+    for (double v : r.interleaved) CHECK_NEAR(v, -1.0, 1e-9);
+  }
+}
+
+TEST(engine_resample_preserves_channel_count) {
+  SigPtr stereo = makeChannels({makeConst(0.5), makeConst(-0.5)});
+  SigPtr rs = makeResample(stereo, makeConst(0.5));
+  CHECK(rs->channels() == 2);
+  Rendered r = renderWindow(rs, 0.0, 0.05, 8000.0);
+  CHECK(r.channels == 2);
+  CHECK_NEAR(r.interleaved[0], 0.5, 1e-9);
+  CHECK_NEAR(r.interleaved[1], -0.5, 1e-9);
+}
+
+TEST(engine_resample_rate_must_be_mono) {
+  SigPtr stereo = makeChannels({makeConst(0.1), makeConst(0.2)});
+  bool threw = false;
+  try {
+    makeResample(makeConst(1.0), stereo);
+  } catch (const EngineError&) {
+    threw = true;
+  }
+  CHECK(threw);
+}
+
+TEST(engine_resample_rate_above_the_cap_is_an_error) {
+  SigPtr rs = makeResample(makeOsc(OscKind::Sine, 440.0),
+                           makeConst(kMaxResampleRate * 2.0));
+  bool threw = false;
+  try {
+    renderWindow(rs, 0.0, 0.01, 8000.0);
+  } catch (const EngineError&) {
+    threw = true;
+  }
+  CHECK(threw);
+}
+
+TEST(engine_resample_sweep_matches_the_warped_phase) {
+  // A linear rate ramp r(t) = 1 + k*t warps phase to phi(t) = t + k*t^2/2,
+  // so resampling a sine of frequency F gives a chirp, sin(2*pi*F*phi(t)).
+  // Checks that the integration, not just a constant rate, is right. The
+  // read head advances by a left Riemann sum (as FmNode's phase does), so
+  // it lags the exact integral by k*t/(2*rate) seconds - correcting for
+  // that is what lets the tolerance stay tight.
+  const double k = 0.5, F = 100.0, rate = 48000.0;
+  SigPtr r = makeBinOp(SigBinOp::Add, makeConst(1.0),
+                       makeBinOp(SigBinOp::Mul, makeTime(), makeConst(k)));
+  Rendered got =
+      renderWindow(makeResample(makeOsc(OscKind::Sine, F), r), 0.0, 1.0, rate);
+  const double kTwoPi = 2.0 * 3.14159265358979323846;
+  for (size_t i = 0; i < got.interleaved.size(); i += 997) {
+    double t = (double)i / rate;
+    double phi = t + k * t * t / 2.0 - k * t / (2.0 * rate);
+    CHECK_NEAR(got.interleaved[i], std::sin(kTwoPi * F * phi), 1e-3);
+  }
 }
 
 TEST(engine_am_depth_and_formula) {

@@ -1,5 +1,4 @@
 {
   "library": "Voices",
-  "description": "Shared instrument cores for the examples: parametric drum voices, the inharmonic additive keys stack, detuned-saw pad tones, and sequencing helpers. Gain, clipping, and sample windows stay at call sites - that's where kits genuinely differ.",
-  "expose": ["drums.synth", "keys.synth", "pads.synth", "seq.synth"]
+  "description": "Shared instrument cores for the examples: parametric drum voices, the inharmonic additive keys stack, detuned-saw pad tones, and sequencing helpers. Gain, clipping, and sample windows stay at call sites - that's where kits genuinely differ. Members are every .synth file here; lib.synth declares what is public."
 }

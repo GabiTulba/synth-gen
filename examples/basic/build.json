@@ -1,14 +1,5 @@
 {
   "library": "Basic",
-  "description": "Basic instrument samples, packaged as a library: every module is public (exposed), and each still renders its own demo artifact when the library itself is built. Presets over the shared Voices cores, so building this directory needs the examples root in place.",
-  "dependencies": ["Voices"],
-  "expose": [
-    "bassdrum.synth",
-    "bassdrum_harsh.synth",
-    "bitonal.synth",
-    "snare.synth",
-    "kick.synth",
-    "guitar.synth",
-    "piano.synth"
-  ]
+  "description": "Basic instrument samples, packaged as a library: lib.synth exposes every module, and each still renders its own demo artifact when the library itself is built. Presets over the shared Voices cores, so building this directory needs the examples root in place.",
+  "dependencies": ["Voices"]
 }

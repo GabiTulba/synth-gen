@@ -249,18 +249,14 @@ bool parseManifest(const std::string& text, const std::string& file,
     } else if (key == "sources") {
       stringArray(value, key, out.sources);
     } else if (key == "expose") {
-      std::vector<std::string> items;
-      stringArray(value, key, items);
-      for (auto& e : items) {
-        if (std::find(out.exposed.begin(), out.exposed.end(), e) !=
-            out.exposed.end()) {
-          diags.error(file, keySpan(key),
-                      "manifest: duplicate 'expose' for '" + e + "'");
-          ok = false;
-        } else {
-          out.exposed.push_back(e);
-        }
-      }
+      // Removed: a library's public surface is declared in lib.synth.
+      std::vector<std::string> ignored;
+      stringArray(value, key, ignored);
+      diags.error(file, keySpan(key),
+                  "manifest: 'expose' is no longer a manifest key — declare "
+                  "a library's public surface in its 'lib.synth' (e.g. "
+                  "'module Keys = Keys ;;' to expose keys.synth)");
+      ok = false;
     } else if (key == "dependencies") {
       size_t before = out.deps.size();
       stringArray(value, key, out.deps);
@@ -281,22 +277,11 @@ bool parseManifest(const std::string& text, const std::string& file,
       ok = false;
     }
   }
-  // A file may be public or internal, not both (order-independent in JSON).
-  for (auto& e : out.exposed) {
-    if (std::find(out.sources.begin(), out.sources.end(), e) !=
-        out.sources.end()) {
-      diags.error(file, keySpan("expose"),
-                  "manifest: '" + e +
-                      "' is listed as both 'sources' and 'expose' "
-                      "('expose' implies 'source')");
-      ok = false;
-    }
-  }
-  // 'expose' implies 'source' (the double-listing case erred above).
   bool anySourceLine = !out.sources.empty();
-  for (auto& e : out.exposed) out.sources.push_back(e);
   // Manifest-kind validation. Exactly one of project/library; roots
-  // ('build' rules) are orchestrators; libraries must expose something.
+  // ('build' rules) are orchestrators; a library declares no files at all
+  // (its members are the .synth files in its directory, its surface is
+  // lib.synth).
   if (!out.projectName.empty() && !out.libraryName.empty()) {
     diags.projectError(
         "manifest: 'project' and 'library' cannot both be declared");
@@ -308,19 +293,16 @@ bool parseManifest(const std::string& text, const std::string& file,
           "manifest");
       ok = false;
     }
-    if (out.exposed.empty()) {
+    if (anySourceLine) {
       diags.projectError(
-          "manifest: a library must 'expose' at least one file");
+          "manifest: a library manifest does not list 'sources' — every "
+          "'.synth' file in the library's directory is a member, and "
+          "'lib.synth' declares what is public");
       ok = false;
     }
   } else {
     if (out.projectName.empty()) {
       diags.projectError("manifest: missing 'project' name");
-      ok = false;
-    }
-    if (!out.exposed.empty()) {
-      diags.projectError(
-          "manifest: 'expose' is only allowed in a 'library' manifest");
       ok = false;
     }
     if (out.isRoot()) {
@@ -449,13 +431,9 @@ static BuildResult buildUnitImpl(const std::string& projectDir,
       localReg = discoverLibraries(enclosingRoot, r.diags);
       registry = &localReg;
     } else if (r.manifest.isLibrary() && r.manifest.deps.empty()) {
-      LibraryInfo self;
-      self.name = r.manifest.libraryName;
-      self.dir = dir.string();
-      self.files = r.manifest.sources;
-      self.exposedFiles.insert(r.manifest.exposed.begin(),
-                               r.manifest.exposed.end());
-      localReg.byName.emplace(self.name, std::move(self));
+      // A dependency-free library builds standalone against a registry
+      // holding just itself (discovery would need a root).
+      localReg = discoverLibraries(dir.string(), r.diags);
       registry = &localReg;
     } else {
       r.diags.projectError(
@@ -471,10 +449,30 @@ static BuildResult buildUnitImpl(const std::string& projectDir,
     ctx.currentLib = registry->find(r.manifest.libraryName);
   const ModuleLoadContext* ctxPtr = registry ? &ctx : nullptr;
 
-  // 2. Parse & type-check every source file (plus imports).
+  // 2. Parse & type-check every source file (plus imports). A project
+  // lists its sources; a library's are its interface plus every member
+  // file discovered in its directory.
   auto frontEndStart = std::chrono::steady_clock::now();
   std::vector<std::string> roots;
-  for (auto& s : r.manifest.sources) roots.push_back((dir / s).string());
+  if (r.manifest.isLibrary()) {
+    if (!ctx.currentLib) {
+      r.diags.projectError("library '" + r.manifest.libraryName +
+                           "' was not discovered from its own directory");
+      return r;
+    }
+    if (ctx.currentLib->hasInterface) {
+      roots.push_back((dir / kLibraryInterfaceFile).string());
+    } else {
+      r.diags.projectError(
+          "library '" + r.manifest.libraryName + "' has no '" +
+          kLibraryInterfaceFile +
+          "': add one declaring its public surface (e.g. 'module Keys = "
+          "Keys ;;')");
+    }
+    for (auto& s : ctx.currentLib->files) roots.push_back((dir / s).string());
+  } else {
+    for (auto& s : r.manifest.sources) roots.push_back((dir / s).string());
+  }
   for (auto& s : roots) r.inputs.push_back(s);
   Program prog = checkProject(roots, r.diags, ctxPtr);
   size_t defCount = 0;

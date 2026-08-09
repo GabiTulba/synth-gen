@@ -18,8 +18,7 @@ struct SampleCache;  // signal.hpp; opaque here
 //     "project": "<name>",          project OR root (with "build" rules)
 //     "library": "<Name>",          declares a library (capitalized name)
 //     "description": "free text",   optional, ignored by the build
-//     "sources": ["file.synth"],    member files; internal in a library
-//     "expose": ["file.synth"],     library members, public; implies source
+//     "sources": ["file.synth"],    project only: its member files
 //     "dependencies": ["<Name>"],   library dependencies, by declared name
 //     "build": ["path"]             root only: rules (.synth file or a
 //                                   directory containing a build.json)
@@ -28,13 +27,13 @@ struct SampleCache;  // signal.hpp; opaque here
 // Exactly one of "project"/"library" per manifest. A "project" manifest
 // with "build" rules is a root (an orchestrator: no "sources"); a
 // "project" manifest with "sources" is a standalone project. A "library"
-// manifest must expose at least one file.
+// manifest lists no files: every `.synth` file in its directory is a
+// member, and its `lib.synth` declares the public surface.
 inline constexpr const char* kManifestFileName = "build.json";
 struct Manifest {
   std::string projectName;
   std::string libraryName;
-  std::vector<std::string> sources;  // relative; includes exposed files
-  std::vector<std::string> exposed;  // relative; the public subset
+  std::vector<std::string> sources;  // relative; projects only
   std::vector<std::string> deps;     // library names
   std::vector<std::string> buildRules;  // root only: rule paths (relative)
   bool isLibrary() const { return !libraryName.empty(); }

@@ -1,5 +1,6 @@
 #include "library.hpp"
 
+#include <algorithm>
 #include <filesystem>
 #include <fstream>
 #include <functional>
@@ -27,18 +28,32 @@ bool isHiddenName(const std::string& name) {
   return !name.empty() && name[0] == '.';
 }
 
+// A library's members are the `.synth` files sitting next to its
+// manifest, minus the interface file - the same "everything in this
+// directory" rule standalone files already follow, so siblings can import
+// each other without any manifest bookkeeping.
+void collectLibraryFiles(const fs::path& dir, LibraryInfo& info) {
+  std::error_code ec;
+  for (auto& entry : fs::directory_iterator(
+           dir, fs::directory_options::skip_permission_denied, ec)) {
+    if (!entry.is_regular_file(ec)) continue;
+    std::string name = entry.path().filename().string();
+    if (isHiddenName(name) || entry.path().extension() != ".synth") continue;
+    if (name == kLibraryInterfaceFile) {
+      info.hasInterface = true;
+      continue;
+    }
+    info.files.push_back(name);
+  }
+  std::sort(info.files.begin(), info.files.end());
+}
+
 }  // namespace
 
 std::string LibraryInfo::fileForModule(const std::string& moduleName) const {
   for (auto& f : files)
     if (moduleNameForPath(f) == moduleName) return f;
   return {};
-}
-
-bool LibraryInfo::isExposedModule(const std::string& moduleName) const {
-  for (auto& f : exposedFiles)
-    if (moduleNameForPath(f) == moduleName) return true;
-  return false;
 }
 
 LibraryRegistry discoverLibraries(const std::string& rootDir,
@@ -72,9 +87,14 @@ LibraryRegistry discoverLibraries(const std::string& rootDir,
               LibraryInfo info;
               info.name = m.libraryName;
               info.dir = dir.string();
-              info.files = m.sources;
-              info.exposedFiles.insert(m.exposed.begin(), m.exposed.end());
               info.deps = m.deps;
+              collectLibraryFiles(dir, info);
+              if (!info.hasInterface)
+                diags.projectError(
+                    "library '" + m.libraryName + "' in '" + dir.string() +
+                    "' has no '" + kLibraryInterfaceFile +
+                    "': a library's public surface is declared there (e.g. "
+                    "'module Keys = Keys ;;')");
               dirByName[m.libraryName] = dir.string();
               reg.byName.emplace(info.name, std::move(info));
             }

@@ -1234,6 +1234,97 @@ struct PlaceNode final : SigNode {
   }
 };
 
+// --- Resampling ------------------------------------------------------------
+
+// Time warping: out(t) = input(phi(t)), phi' = rate. The rate signal is
+// read on the *output* time base (an ordinary streaming pull); the source
+// is read on the warped base, so it needs a private context and a sliding
+// window - hence the state below.
+struct ResampleState final : NodeState {
+  double pos = 0;                  // read head, in fractional source frames
+  std::unique_ptr<RenderCtx> sub;  // the source's private context
+  std::vector<double> buf;         // sliding source window, interleaved
+  int64_t bufStart = 0;            // source frame index of buf's first frame
+};
+
+struct ResampleNode final : SigNode {
+  SigPtr source, rate;
+  ResampleNode(SigPtr s, SigPtr r) : source(std::move(s)), rate(std::move(r)) {
+    int rc = rate->channels();
+    if (rc != 1 && rc != -1)
+      throw EngineError("resample: the rate must be a mono signal");
+    contentHash =
+        hashMix(hashMix(hashTag(18), source->contentHash), rate->contentHash);
+  }
+  int channels() const override { return source->channels(); }
+  bool stateful() const override { return true; }
+  std::unique_ptr<NodeState> makeState() const override {
+    return std::make_unique<ResampleState>();
+  }
+  bool computeBlock(RenderCtx& ctx, NodeState& st0, int64_t start, int frames,
+                    double* out) const override {
+    auto& st = static_cast<ResampleState&>(st0);
+    int cc = concreteChannels();
+    Block r = pull(ctx, rate, start, frames);
+    if (!st.sub) {
+      st.sub = std::make_unique<RenderCtx>(ctx.rate);
+      st.sub->sampleCache = ctx.sampleCache;  // nested samples still share
+      // preRendered is deliberately not inherited: a warped source would be
+      // served at the wrong offset (same reason as PlaceNode).
+    }
+    bool anySound = false;
+    for (int f = 0; f < frames; f++) {
+      int64_t i0 = (int64_t)std::floor(st.pos);
+      // Extend the window to cover [i0, i0+1], compacting the consumed
+      // prefix first so both the copy and the buffer stay O(kBlockFrames).
+      while (st.bufStart + (int64_t)(st.buf.size() / (size_t)cc) < i0 + 2) {
+        if (i0 > st.bufStart) {
+          size_t drop = (size_t)(i0 - st.bufStart) * (size_t)cc;
+          if (drop >= st.buf.size()) st.buf.clear();
+          else st.buf.erase(st.buf.begin(), st.buf.begin() + (ptrdiff_t)drop);
+          st.bufStart = i0;
+        }
+        int64_t next = st.bufStart + (int64_t)(st.buf.size() / (size_t)cc);
+        bool srcSilent = false;
+        const double* p =
+            source->renderBlock(*st.sub, next, kBlockFrames, srcSilent);
+        size_t old = st.buf.size();
+        size_t n = (size_t)kBlockFrames * (size_t)cc;
+        st.buf.resize(old + n);
+        if (srcSilent) std::fill(st.buf.begin() + (ptrdiff_t)old, st.buf.end(),
+                                 0.0);
+        else std::memcpy(st.buf.data() + old, p, n * sizeof(double));
+      }
+      const double* w = st.buf.data() + (size_t)(i0 - st.bufStart) * (size_t)cc;
+      double frac = st.pos - (double)i0;
+      for (int c = 0; c < cc; c++) {
+        double s0 = w[c], s1 = w[(size_t)cc + (size_t)c];
+        double v = s0 + (s1 - s0) * frac;
+        out[(size_t)f * (size_t)cc + (size_t)c] = v;
+        if (v != 0.0) anySound = true;
+      }
+      double rr = r.at(f, 0);
+      // Written so NaN trips too. Reverse playback is out of scope: a
+      // negative rate holds the read head instead of rewinding.
+      if (!(rr <= kMaxResampleRate))
+        throw EngineError("resample: rate " + std::to_string(rr) +
+                          " exceeds the maximum of " +
+                          std::to_string(kMaxResampleRate) +
+                          " (the source would have to advance " +
+                          std::to_string(rr) + "x faster than the output)");
+      // One output second advances rr source seconds, so one output frame
+      // advances rr * (1/ctx.rate) * ctx.rate = rr source frames.
+      st.pos += rr < 0 ? 0.0 : rr;
+    }
+    return !anySound;
+  }
+  void forEachChild(
+      const std::function<void(const SigPtr&)>& fn) const override {
+    fn(source);
+    fn(rate);
+  }
+};
+
 // --- File signals ----------------------------------------------------------
 
 struct FileNode final : SigNode {
@@ -1408,6 +1499,9 @@ SigPtr makeChannels(std::vector<SigPtr> monoItems) {
 SigPtr makePlace(SigPtr source, double from, double to, double at) {
   return std::make_shared<PlaceNode>(std::move(source), from, to, at);
 }
+SigPtr makeResample(SigPtr input, SigPtr rate) {
+  return std::make_shared<ResampleNode>(std::move(input), std::move(rate));
+}
 SigPtr makeFileSignal(std::vector<std::vector<double>> channelData,
                       double fileRate) {
   return std::make_shared<FileNode>(std::move(channelData), fileRate);
@@ -1464,11 +1558,16 @@ void decomposeInto(const SigPtr& n, int depth, std::vector<SigPtr>& leaves) {
 // stops below placements: a placement replays its source in a private
 // context, so two leaves sharing a source through distinct placements do
 // not actually share any state (and already duplicate that work in a
-// sequential render).
+// sequential render). A resampler is the same for its source, but its
+// rate signal is pulled from the shared context, so that child is walked.
 void collectSharedState(const SigNode* n,
                         std::unordered_set<const SigNode*>& out) {
   if (!out.insert(n).second) return;
   if (dynamic_cast<const PlaceNode*>(n)) return;
+  if (auto* rs = dynamic_cast<const ResampleNode*>(n)) {
+    collectSharedState(rs->rate.get(), out);
+    return;
+  }
   n->forEachChild(
       [&](const SigPtr& c) { collectSharedState(c.get(), out); });
 }
@@ -1522,6 +1621,10 @@ bool containsSharedImpl(const SigNode* n, const SigNode* needle,
   if (n == needle) return true;
   if (!seen.insert(n).second) return false;
   if (dynamic_cast<const PlaceNode*>(n)) return false;
+  // A resampler's source is served from a private context (no preRendered),
+  // its rate from the shared one.
+  if (auto* rs = dynamic_cast<const ResampleNode*>(n))
+    return containsSharedImpl(rs->rate.get(), needle, seen);
   bool found = false;
   n->forEachChild([&](const SigPtr& c) {
     if (!found) found = containsSharedImpl(c.get(), needle, seen);

@@ -207,14 +207,15 @@ TEST(checker_import_cycle) {
 
 namespace {
 
-// A library tree fixture: writes a `Basic` library with one exposed and
-// one internal module, discovers the registry, and returns it.
+// A library tree fixture: writes a `Basic` library whose lib.synth
+// exposes one of its two modules, discovers the registry, and returns it.
 struct LibFixture {
   TempProject tp;
   LibraryRegistry reg;
   DiagnosticBag regDiags;
   LibFixture() {
-    tp.write("lib/basic/build.json", libraryManifest("Basic", {"keys.synth"}, {"internal.synth"}));
+    tp.write("lib/basic/build.json", libraryManifest("Basic"));
+    tp.write("lib/basic/lib.synth", libraryInterface({"Keys"}));
     tp.write("lib/basic/keys.synth",
              "open Core\nimport Internal\n"
              "let gain : Scalar = Internal.base * 2.0 ;;\n"
@@ -289,7 +290,9 @@ TEST(checker_within_library_internal_import_ok) {
   ModuleLoadContext ctx;
   ctx.registry = &fx.reg;
   ctx.currentLib = basic;
-  std::vector<std::string> roots;
+  // As the build system does it: the interface first, then every member.
+  std::vector<std::string> roots{
+      (fs::path(basic->dir) / kLibraryInterfaceFile).string()};
   for (auto& f : basic->files)
     roots.push_back((fs::path(basic->dir) / f).string());
   DiagnosticBag diags;
@@ -332,9 +335,11 @@ TEST(checker_library_short_name_scoped_to_library) {
   // Two libraries with same-stem member files no longer alias: each gets
   // its own canonical id.
   TempProject tp;
-  tp.write("a/build.json", libraryManifest("A", {"util.synth"}));
+  tp.write("a/build.json", libraryManifest("A"));
+  tp.write("a/lib.synth", libraryInterface({"Util"}));
   tp.write("a/util.synth", "open Core\nlet ua : Scalar = 1.0 ;;\n");
-  tp.write("b/build.json", libraryManifest("B", {"util.synth"}));
+  tp.write("b/build.json", libraryManifest("B"));
+  tp.write("b/lib.synth", libraryInterface({"Util"}));
   tp.write("b/util.synth", "open Core\nlet ub : Scalar = 2.0 ;;\n");
   DiagnosticBag regDiags;
   LibraryRegistry reg = discoverLibraries(tp.dir.string(), regDiags);
@@ -358,20 +363,22 @@ TEST(checker_cross_library_module_cycle_error) {
   // Module-level cycle across two libraries (registry built by hand so
   // the library-level dep validation doesn't mask the module cycle).
   TempProject tp;
+  tp.write("a/lib.synth", libraryInterface({"X"}));
   tp.write("a/x.synth", "open Core\nimport B.Y\nlet x : Scalar = 1.0 ;;\n");
+  tp.write("b/lib.synth", libraryInterface({"Y"}));
   tp.write("b/y.synth", "open Core\nimport A.X\nlet y : Scalar = 2.0 ;;\n");
   LibraryRegistry reg;
   LibraryInfo la;
   la.name = "A";
   la.dir = (tp.dir / "a").string();
   la.files = {"x.synth"};
-  la.exposedFiles = {"x.synth"};
+  la.hasInterface = true;
   la.deps = {"B"};
   LibraryInfo lb;
   lb.name = "B";
   lb.dir = (tp.dir / "b").string();
   lb.files = {"y.synth"};
-  lb.exposedFiles = {"y.synth"};
+  lb.hasInterface = true;
   lb.deps = {"A"};
   reg.byName.emplace("A", la);
   reg.byName.emplace("B", lb);
@@ -396,6 +403,167 @@ TEST(checker_open_library_brings_file_modules) {
   for (auto& d : diags.items) std::cerr << d.message << "\n";
   CHECK(!diags.hasErrors());
   CHECK(prog.find("Basic.Keys") != nullptr);
+}
+
+TEST(checker_library_siblings_need_no_manifest_listing) {
+  // Every .synth file in a library's directory is a member, and members
+  // import each other by short name with nothing declared anywhere.
+  TempProject tp;
+  tp.write("chain/build.json", libraryManifest("Chain"));
+  tp.write("chain/lib.synth", libraryInterface({"Top"}));
+  tp.write("chain/bottom.synth", "open Core\nlet base : Scalar = 0.25 ;;\n");
+  tp.write("chain/middle.synth",
+           "open Core\nimport Bottom\nlet mid : Scalar = Bottom.base * 2.0 ;;\n");
+  tp.write("chain/top.synth",
+           "open Core\nimport Middle\nlet top : Scalar = Middle.mid + 1.0 ;;\n");
+  DiagnosticBag regDiags;
+  LibraryRegistry reg = discoverLibraries(tp.dir.string(), regDiags);
+  CHECK(!regDiags.hasErrors());
+  const LibraryInfo* chain = reg.find("Chain");
+  CHECK(chain != nullptr);
+  CHECK(chain->hasInterface);
+  // lib.synth is not itself a member.
+  CHECK(chain->files.size() == 3);
+  std::string song = tp.write(
+      "song.synth", "open Core\nimport Chain\nlet x : Scalar = Chain.Top.top ;;\n");
+  ModuleLoadContext ctx;
+  ctx.registry = &reg;
+  ctx.deps = {"Chain"};
+  DiagnosticBag diags;
+  Program prog = checkProject({song}, diags, &ctx);
+  for (auto& d : diags.items) std::cerr << d.message << "\n";
+  CHECK(!diags.hasErrors());
+  CHECK(prog.find("Chain.Middle") != nullptr);
+  CHECK(prog.find("Chain.Bottom") != nullptr);
+}
+
+namespace {
+
+// A library whose lib.synth both renames a member module and re-exports a
+// value of its own.
+struct IfaceFixture {
+  TempProject tp;
+  LibraryRegistry reg;
+  DiagnosticBag regDiags;
+  IfaceFixture() {
+    tp.write("fx/build.json", libraryManifest("Fx"));
+    tp.write("fx/lib.synth",
+             "open Core\nimport Delay\n"
+             "module Echo = Delay ;;\n"
+             "let slap s:Scalar Signal : Scalar Signal = Delay.tap s * 0.5 ;;\n");
+    tp.write("fx/delay.synth",
+             "open Core\nimport Taps\n"
+             "let tap s:Scalar Signal : Scalar Signal = s * Taps.spread ;;\n");
+    tp.write("fx/taps.synth", "open Core\nlet spread : Scalar = 1.5 ;;\n");
+    reg = discoverLibraries(tp.dir.string(), regDiags);
+  }
+  ModuleLoadContext consumerCtx() {
+    ModuleLoadContext ctx;
+    ctx.registry = &reg;
+    ctx.deps = {"Fx"};
+    return ctx;
+  }
+};
+
+}  // namespace
+
+TEST(checker_lib_interface_renames_and_reexports) {
+  IfaceFixture fx;
+  CHECK(!fx.regDiags.hasErrors());
+  std::string song = fx.tp.write("song.synth", R"(
+open Core
+import Fx
+let a : Scalar Signal = Fx.Echo.tap (sine 440.0) ;;
+let b : Scalar Signal = Fx.slap (sine 220.0) ;;
+)");
+  ModuleLoadContext ctx = fx.consumerCtx();
+  DiagnosticBag diags;
+  Program prog = checkProject({song}, diags, &ctx);
+  for (auto& d : diags.items) std::cerr << d.message << "\n";
+  CHECK(!diags.hasErrors());
+  // The exposed name is `Echo`, but the canonical id stays the file's.
+  CHECK(prog.find("Fx.Delay") != nullptr);
+  CHECK(prog.find("Fx") != nullptr);
+  CHECK(prog.find("Fx.Echo") == nullptr);
+}
+
+TEST(checker_open_library_brings_values_and_renamed_modules) {
+  IfaceFixture fx;
+  std::string song = fx.tp.write("song.synth", R"(
+open Core
+open Fx
+let a : Scalar Signal = slap (sine 440.0) ;;
+let b : Scalar Signal = Echo.tap (sine 220.0) ;;
+)");
+  ModuleLoadContext ctx = fx.consumerCtx();
+  DiagnosticBag diags;
+  checkProject({song}, diags, &ctx);
+  for (auto& d : diags.items) std::cerr << d.message << "\n";
+  CHECK(!diags.hasErrors());
+}
+
+TEST(checker_unexposed_original_name_error) {
+  // `Delay` is a member, but lib.synth exposes it as `Echo` only.
+  IfaceFixture fx;
+  std::string song = fx.tp.write(
+      "song.synth",
+      "open Core\nimport Fx.Delay\nlet a : Scalar = 1.0 ;;\n");
+  ModuleLoadContext ctx = fx.consumerCtx();
+  DiagnosticBag diags;
+  checkProject({song}, diags, &ctx);
+  CHECK(diags.hasErrors());
+  bool hinted = false;
+  for (auto& d : diags.items)
+    if (d.message.find("not exposed") != std::string::npos) hinted = true;
+  CHECK(hinted);
+}
+
+TEST(checker_member_cannot_reference_own_library) {
+  TempProject tp;
+  tp.write("own/build.json", libraryManifest("Own"));
+  tp.write("own/lib.synth", libraryInterface({"A", "B"}));
+  tp.write("own/a.synth", "open Core\nlet x : Scalar = 1.0 ;;\n");
+  // A member must reach its sibling by short name, not through the
+  // library's own interface.
+  tp.write("own/b.synth",
+           "open Core\nimport Own.A\nlet y : Scalar = Own.A.x ;;\n");
+  DiagnosticBag regDiags;
+  LibraryRegistry reg = discoverLibraries(tp.dir.string(), regDiags);
+  const LibraryInfo* own = reg.find("Own");
+  CHECK(own != nullptr);
+  ModuleLoadContext ctx;
+  ctx.registry = &reg;
+  ctx.currentLib = own;
+  std::vector<std::string> roots{
+      (fs::path(own->dir) / kLibraryInterfaceFile).string()};
+  for (auto& f : own->files) roots.push_back((fs::path(own->dir) / f).string());
+  DiagnosticBag diags;
+  checkProject(roots, diags, &ctx);
+  CHECK(diags.hasErrors());
+  bool hinted = false;
+  for (auto& d : diags.items)
+    if (d.message.find("short name") != std::string::npos) hinted = true;
+  CHECK(hinted);
+}
+
+TEST(checker_library_without_interface_error) {
+  TempProject tp;
+  tp.write("bare/build.json", libraryManifest("Bare"));
+  tp.write("bare/thing.synth", "open Core\nlet x : Scalar = 1.0 ;;\n");
+  DiagnosticBag regDiags;
+  LibraryRegistry reg = discoverLibraries(tp.dir.string(), regDiags);
+  // Discovery itself flags the missing interface...
+  CHECK(regDiags.hasErrors());
+  CHECK(!reg.find("Bare")->hasInterface);
+  // ...and so does an import of it.
+  std::string song = tp.write(
+      "song.synth", "open Core\nimport Bare\nlet x : Scalar = 1.0 ;;\n");
+  ModuleLoadContext ctx;
+  ctx.registry = &reg;
+  ctx.deps = {"Bare"};
+  DiagnosticBag diags;
+  checkProject({song}, diags, &ctx);
+  CHECK(diags.hasErrors());
 }
 
 TEST(checker_open_file_unqualified_defs) {
@@ -1294,6 +1462,88 @@ let fade : Scalar Signal = exp (0.0 - time) ;;
   CHECK(typeEquals(prog.modules[0].defTypes.at("shaped"),
                    tSignal(tScalar())));
   CHECK(typeEquals(prog.modules[0].defTypes.at("curve"), tSignal(tScalar())));
+}
+
+TEST(checker_timestamp_conversions) {
+  TempProject tp;
+  std::string f = tp.write("t.synth", R"(
+open Core
+let bpm : Scalar = 120.0 ;;
+let beat : Timestamp = to_min (1.0 / bpm) ;;
+let lead : Timestamp = to_ms 250.0 ;;
+let tail : Timestamp = to_sec 1.5 ;;
+let steps : Timestamp list = time_steps ~start:lead ~step:beat ~count:4.0 ;;
+)");
+  DiagnosticBag diags;
+  Program prog = checkProject({f}, diags);
+  for (auto& d : diags.items)
+    std::cerr << renderDiagnostic(d, prog.modules.empty()
+                                         ? std::string{}
+                                         : prog.modules[0].parsed.source);
+  CHECK(!diags.hasErrors());
+  const auto& types = prog.modules[0].defTypes;
+  for (const char* n : {"beat", "lead", "tail"})
+    CHECK(typeEquals(types.at(n), tTimestamp()));
+  CHECK(typeEquals(types.at("steps"), tList(tTimestamp())));
+}
+
+TEST(checker_timestamp_conversion_type_errors) {
+  // The argument is a Scalar - a Timestamp does not round-trip back
+  // through the conversions, and the result is not a Scalar either.
+  for (const char* body :
+       {"open Core\nlet x : Timestamp = to_sec 500ms ;;",
+        "open Core\nlet x : Scalar = to_ms 250.0 ;;"}) {
+    TempProject tp;
+    std::string f = tp.write("bad.synth", body);
+    DiagnosticBag diags;
+    checkProject({f}, diags);
+    CHECK(diags.hasErrors());
+  }
+}
+
+TEST(checker_resample_typing) {
+  TempProject tp;
+  std::string f = tp.write("ok.synth", R"(
+open Core
+let warped : Scalar Signal = resample (saw 110.0) ~f:(fun t:Scalar -> 1.0 + t) ;;
+let piped : Scalar Signal = saw 110.0 |> resample ~f:(fun t:Scalar -> 0.5) ;;
+let wide : Vector Signal =
+  channels [sine 220.0; sine 330.0] |> resample ~f:(fun t:Scalar -> 2.0) ;;
+)");
+  DiagnosticBag diags;
+  Program prog = checkProject({f}, diags);
+  for (auto& d : diags.items)
+    std::cerr << renderDiagnostic(d, prog.modules.empty()
+                                         ? std::string{}
+                                         : prog.modules[0].parsed.source);
+  CHECK(!diags.hasErrors());
+  CHECK(typeEquals(prog.modules[0].defTypes.at("warped"), tSignal(tScalar())));
+  CHECK(typeEquals(prog.modules[0].defTypes.at("piped"), tSignal(tScalar())));
+  // The element type rides through: only the rate function is constrained.
+  CHECK(typeEquals(prog.modules[0].defTypes.at("wide"), tSignal(tVector())));
+}
+
+TEST(checker_resample_type_errors) {
+  // f must be a function, not a signal...
+  {
+    TempProject tp;
+    std::string f = tp.write("bad.synth",
+                             "open Core\nlet x : Scalar Signal = resample "
+                             "(saw 110.0) ~f:(sine 3.0) ;;");
+    DiagnosticBag diags;
+    checkProject({f}, diags);
+    CHECK(diags.hasErrors());
+  }
+  // ...and it takes a Scalar, not a Timestamp.
+  {
+    TempProject tp;
+    std::string f = tp.write("bad.synth",
+                             "open Core\nlet x : Scalar Signal = resample "
+                             "(saw 110.0) ~f:(fun t:Timestamp -> 1.0) ;;");
+    DiagnosticBag diags;
+    checkProject({f}, diags);
+    CHECK(diags.hasErrors());
+  }
 }
 
 TEST(checker_signal_constructor_type_errors) {

@@ -39,9 +39,8 @@ bool readFile(const fs::path& p, std::string& out) {
 
 class ModuleChecker {
  public:
-  ModuleChecker(CheckedModule& mod, const Program& prog, DiagnosticBag& diags,
-                const ModuleLoadContext* ctx = nullptr)
-      : mod_(mod), prog_(prog), diags_(diags), ctx_(ctx) {}
+  ModuleChecker(CheckedModule& mod, const Program& prog, DiagnosticBag& diags)
+      : mod_(mod), prog_(prog), diags_(diags) {}
 
   void run() {
     // Walk definitions in order: opens and module aliases are
@@ -74,7 +73,6 @@ class ModuleChecker {
   CheckedModule& mod_;
   const Program& prog_;
   DiagnosticBag& diags_;
-  const ModuleLoadContext* ctx_ = nullptr;
   // The position-ordered top-level value scope: own definitions and names
   // brought in by `open File`, later binders shadowing earlier ones. The
   // string is the canonical module id of an opened name ("" = own def).
@@ -315,17 +313,11 @@ class ModuleChecker {
     return it->second;
   }
 
-  const LibraryInfo* libByName(const std::string& n) const {
-    if (!ctx_) return nullptr;
-    if (ctx_->currentLib && ctx_->currentLib->name == n)
-      return ctx_->currentLib;
-    return ctx_->registry ? ctx_->registry->find(n) : nullptr;
-  }
-
-  // open Lib: bring the library's exposed file modules into module scope
-  // (so `File.name` works). open File / open Lib.File: bring that file's
-  // definitions into the unqualified value scope, shadowing earlier
-  // same-named binders.
+  // open M: bring M's definitions into the unqualified value scope
+  // (shadowing earlier same-named binders) and its public module bindings
+  // into module scope. For a library that is exactly the right thing:
+  // `open Basic` opens Basic's lib.synth, so its re-exported values are
+  // bare and `Keys.strike` works for every module it binds.
   void applyOpen(const TopDef& def) {
     try {
       const std::string& surface = def.moduleName;
@@ -342,45 +334,27 @@ class ModuleChecker {
         coreListOpen_ = true;
         return;
       }
-      // A whole-library open: inject its exposed file modules.
-      if (surface.find('.') == std::string::npos) {
-        auto il = mod_.importedLibs.find(surface);
-        if (il != mod_.importedLibs.end()) {
-          const LibraryInfo* lib = libByName(il->second);
-          if (lib) {
-            for (auto& f : lib->exposedFiles) {
-              std::string m = moduleNameForPath(f);
-              mod_.moduleScope[m] = il->second + "." + m;
-            }
-          }
-          return;
-        }
-      }
-      // A file-module open: inject its definitions as value names.
       std::string canonical = resolveModuleRef(surface, def.span);
       const CheckedModule* m = prog_.find(canonical);
       if (!m) fail(def.span, "module '" + canonical + "' was not checked");
       for (auto& [name, type] : m->defTypes)
         topScope_[name] = {type, canonical};
+      for (auto& [name, target] : m->exportedModules)
+        mod_.moduleScope[name] = target;
     } catch (const Abort&) {
       // Diagnostic recorded; later defs check against the scope so far.
     }
   }
 
   // module Alias = Path: bind (or override) a module name. The target may
-  // be a file module (by any spelling in scope) or a whole library.
+  // be a file module, a library, or an earlier alias - anything spelled in
+  // module scope. The binding is also this module's public surface: in a
+  // library's lib.synth, `module Keys = Keys` is what exposes Basic.Keys.
   void applyAlias(const TopDef& def) {
     try {
-      const std::string& target = def.moduleName;
-      if (target.find('.') == std::string::npos) {
-        auto il = mod_.importedLibs.find(target);
-        if (il != mod_.importedLibs.end()) {
-          mod_.importedLibs[def.name] = il->second;
-          return;
-        }
-      }
-      std::string canonical = resolveModuleRef(target, def.span);
+      std::string canonical = resolveModuleRef(def.moduleName, def.span);
       mod_.moduleScope[def.name] = canonical;
+      mod_.exportedModules[def.name] = canonical;
     } catch (const Abort&) {
       // Diagnostic recorded.
     }
@@ -399,24 +373,30 @@ class ModuleChecker {
     if (dot != std::string::npos) {
       std::string first = surface.substr(0, dot);
       std::string rest = surface.substr(dot + 1);
+      if (rest.find('.') != std::string::npos) return {};
       // An alias of Core composes with its List submodule (C.List).
       auto cs = mod_.moduleScope.find(first);
       if (cs != mod_.moduleScope.end() && cs->second == "Core" &&
           rest == "List")
         return "Core.List";
-      // "Lib.File" under a whole-library import (possibly via an alias
-      // of the library name).
-      auto il = mod_.importedLibs.find(first);
-      if (il != mod_.importedLibs.end() &&
-          rest.find('.') == std::string::npos) {
-        const LibraryInfo* lib = libByName(il->second);
-        if (lib && lib->fileForModule(rest).empty())
-          fail(span, "library '" + il->second + "' has no module named '" +
+      // "Lib.File": the qualifier names a module in scope (a library, via
+      // its lib.synth, or an alias of one) and `rest` must be one of the
+      // module bindings it publishes.
+      if (cs != mod_.moduleScope.end()) {
+        const std::string& qualifier = cs->second;
+        if (const CheckedModule* m = prog_.find(qualifier)) {
+          auto ex = m->exportedModules.find(rest);
+          if (ex != m->exportedModules.end()) return ex->second;
+          // A library's interface module carries the library's own name;
+          // a missing binding there is an exposure problem, not a typo.
+          if (m->libName == qualifier)
+            fail(span, "module '" + qualifier + "." + rest +
+                           "' is not exposed by library '" + qualifier +
+                           "' (add 'module " + rest + " = " + rest +
+                           " ;;' to its " + kLibraryInterfaceFile + ")");
+          fail(span, "module '" + qualifier + "' has no module named '" +
                          rest + "'");
-        if (lib && mod_.libName != lib->name && !lib->isExposedModule(rest))
-          fail(span, "module '" + il->second + "." + rest +
-                         "' is not exposed by library '" + il->second + "'");
-        return il->second + "." + rest;
+        }
       }
     }
     return {};
@@ -677,7 +657,6 @@ Program checkProject(const std::vector<std::string>& rootFiles,
     ParsedModule parsed;
     std::vector<std::string> loadDeps;  // canonical ids (topo edges)
     std::map<std::string, std::string> moduleScope;
-    std::map<std::string, std::string> importedLibs;
     std::string libName;
     bool external = false;
     // Raw module-path mentions to resolve: import / open / module alias.
@@ -745,30 +724,82 @@ Program checkProject(const std::vector<std::string>& rootFiles,
     return true;
   };
 
+  // A library's interface file is the library itself: `lib.synth` of
+  // library Basic is module `Basic`, not `Basic.Lib`.
+  auto canonicalInLibrary = [](const std::string& libName,
+                               const fs::path& path) {
+    return path.filename().string() == kLibraryInterfaceFile
+               ? libName
+               : libName + "." + moduleNameForPath(path.string());
+  };
+
   for (auto& f : rootFiles) {
-    std::string canonical = moduleNameForPath(f);
     std::string libName;
+    std::string canonical;
     if (currentLib) {
       libName = currentLib->name;
-      canonical = libName + "." + canonical;
+      canonical = canonicalInLibrary(libName, fs::path(f));
+    } else {
+      canonical = moduleNameForPath(f);
     }
     loadFile(fs::path(f), canonical, libName, false, {}, {});
   }
 
-  // Resolve module-path mentions transitively. Single names resolve to a
-  // sibling file module first (the current library's listed files, or the
-  // same-directory rule for standalone files), then to a discovered
-  // library; dotted paths are Lib.File through the registry with `dep`
-  // and `expose` enforcement.
-  for (size_t qi = 0; qi < queue.size(); qi++) {
-    std::string name = queue[qi];
+  // Load a library's interface module (its lib.synth) under the library's
+  // own name, diagnosing a library that has none. Returns false when the
+  // interface is unavailable.
+  auto loadLibraryInterface = [&](const LibraryInfo* lib, bool external,
+                                  Span span, const std::string& fromFile,
+                                  bool quiet) -> bool {
+    if (byName.count(lib->name)) return true;
+    if (!lib->hasInterface) {
+      if (!quiet)
+        diags.error(fromFile, span,
+                    "library '" + lib->name + "' has no '" +
+                        kLibraryInterfaceFile +
+                        "': its public surface is declared there");
+      return false;
+    }
+    return loadFile(fs::path(lib->dir) / kLibraryInterfaceFile, lib->name,
+                    lib->name, external, span, fromFile);
+  };
+
+  // What a library's lib.synth publishes, read straight off its parse
+  // tree: `module X = Path` -> the surface path X names. Resolving a
+  // `Lib.File` reference needs this before anything is type-checked, so
+  // it works on the syntax rather than on CheckedModule::exportedModules
+  // (which the checker fills later from the same defs).
+  auto aliasTargetIn = [&](const std::string& moduleId,
+                           const std::string& aliasName) -> std::string {
+    auto it = byName.find(moduleId);
+    if (it == byName.end()) return {};
+    for (auto& d : it->second.parsed.defs)
+      if (d.kind == TopDef::Kind::ModuleAlias && d.name == aliasName)
+        return d.moduleName;
+    return {};
+  };
+
+  // Resolve module-path mentions transitively, on demand: resolving
+  // `Lib.File` has to look inside `Lib`'s already-resolved interface, so
+  // a module's mentions may be needed before the queue reaches it.
+  // `resolving` doubles as the re-entry guard (a self-referential
+  // interface resolves to whatever it has so far; the topological sort
+  // reports the cycle).
+  std::set<std::string> resolving;
+  // By value: `queue` grows as modules load, so a reference into it (or
+  // into byName) would dangle across a nested load.
+  std::function<void(std::string)> resolveMentions =
+      [&](std::string name) {
+    if (!byName.count(name)) return;
+    if (!resolving.insert(name).second) return;
     // Note: byName may rehash as new modules load; re-find each iteration.
     for (size_t mi = 0; mi < byName.at(name).mentions.size(); mi++) {
       auto mention = byName.at(name).mentions[mi];
       const std::string& surface = mention.surface;
       Span span = mention.span;
-      Loaded& l = byName.at(name);
-      const std::string file = l.parsed.path;
+      const std::string file = byName.at(name).parsed.path;
+      const std::string fromLib = byName.at(name).libName;
+      const bool fromExternal = byName.at(name).external;
       // The built-in Core namespace never loads from disk; the checker
       // resolves it.
       if (surface == "Core" || surface.rfind("Core.", 0) == 0) continue;
@@ -778,20 +809,34 @@ Program checkProject(const std::vector<std::string>& rootFiles,
       // edges when the target is a real file/library - and stays quiet
       // otherwise; the checker diagnoses genuinely unresolved aliases.
       bool quiet = mention.kind == TopDef::Kind::ModuleAlias;
+      auto bind = [&](const std::string& key, const std::string& canonical) {
+        Loaded& l2 = byName.at(name);
+        l2.moduleScope[key] = canonical;
+        l2.loadDeps.push_back(canonical);
+      };
       size_t dot = surface.find('.');
       if (dot == std::string::npos) {
-        // Sibling file module of the current library?
-        if (!l.libName.empty()) {
-          const LibraryInfo* lib = libByName(l.libName);
+        // A sibling module: any `.synth` file next to this one. Inside a
+        // library that is the library's member set, so members import
+        // each other by short name with no manifest bookkeeping; the
+        // interface file is not a member and is deliberately not
+        // reachable this way (it would import its own importers).
+        if (!fromLib.empty()) {
+          const LibraryInfo* lib = libByName(fromLib);
+          if (surface == fromLib) {
+            if (!quiet)
+              diags.error(file, span,
+                          "'" + fromLib +
+                              "' is this library's own interface module; "
+                              "refer to sibling modules by their short name");
+            continue;
+          }
           std::string rel = lib ? lib->fileForModule(surface) : std::string{};
           if (!rel.empty()) {
-            std::string canonical = l.libName + "." + surface;
-            if (loadFile(fs::path(lib->dir) / rel, canonical, l.libName,
-                         l.external, span, file)) {
-              Loaded& l2 = byName.at(name);
-              l2.moduleScope[surface] = canonical;
-              l2.loadDeps.push_back(canonical);
-            }
+            std::string canonical = fromLib + "." + surface;
+            if (loadFile(fs::path(lib->dir) / rel, canonical, fromLib,
+                         fromExternal, span, file))
+              bind(surface, canonical);
             continue;
           }
         } else {
@@ -799,8 +844,7 @@ Program checkProject(const std::vector<std::string>& rootFiles,
           // satisfies the import (historical behavior), else the
           // same-directory rule.
           if (byName.count(surface)) {
-            l.moduleScope[surface] = surface;
-            l.loadDeps.push_back(surface);
+            bind(surface, surface);
             continue;
           }
           fs::path target =
@@ -808,15 +852,12 @@ Program checkProject(const std::vector<std::string>& rootFiles,
           std::error_code ec;
           bool haveFile = fs::exists(target, ec);
           if (haveFile || (!quiet && !libByName(surface))) {
-            if (loadFile(target, surface, "", l.external, span, file)) {
-              Loaded& l2 = byName.at(name);
-              l2.moduleScope[surface] = surface;
-              l2.loadDeps.push_back(surface);
-            }
+            if (loadFile(target, surface, "", fromExternal, span, file))
+              bind(surface, surface);
             continue;
           }
         }
-        // A whole library.
+        // A whole library: its interface module, under the library name.
         const LibraryInfo* lib = libByName(surface);
         if (!lib) {
           if (quiet) continue;
@@ -825,25 +866,20 @@ Program checkProject(const std::vector<std::string>& rootFiles,
                           surface + "'");
           continue;
         }
-        if (!depAllowed(surface, l.libName)) {
+        if (!depAllowed(surface, fromLib)) {
           if (quiet) continue;
           diags.error(file, span,
                       "library '" + surface +
-                          "' is not declared as a dependency (add 'dep " +
-                          surface + "' to the .build manifest)");
+                          "' is not declared as a dependency (add \"" +
+                          surface + "\" to \"dependencies\" in build.json)");
           continue;
         }
         bool external = !(currentLib && surface == currentLib->name);
-        for (auto& f : lib->exposedFiles) {
-          std::string canonical = surface + "." + moduleNameForPath(f);
-          if (loadFile(fs::path(lib->dir) / f, canonical, surface, external,
-                       span, file))
-            byName.at(name).loadDeps.push_back(canonical);
-        }
-        byName.at(name).importedLibs[surface] = surface;
+        if (loadLibraryInterface(lib, external, span, file, quiet))
+          bind(surface, surface);
         continue;
       }
-      // Dotted: Lib.File.
+      // Dotted: Lib.File - a module the library's lib.synth binds.
       std::string libName = surface.substr(0, dot);
       std::string modName = surface.substr(dot + 1);
       if (modName.find('.') != std::string::npos) {
@@ -858,39 +894,61 @@ Program checkProject(const std::vector<std::string>& rootFiles,
         diags.error(file, span, "unknown library '" + libName + "'");
         continue;
       }
-      if (!depAllowed(libName, l.libName)) {
+      if (libName == fromLib) {
+        if (quiet) continue;
+        diags.error(file, span,
+                    "inside library '" + libName +
+                        "' refer to sibling module '" + modName +
+                        "' by its short name");
+        continue;
+      }
+      if (!depAllowed(libName, fromLib)) {
         if (quiet) continue;
         diags.error(file, span,
                     "library '" + libName +
-                        "' is not declared as a dependency (add 'dep " +
-                        libName + "' to the .build manifest)");
-        continue;
-      }
-      std::string rel = lib->fileForModule(modName);
-      if (rel.empty()) {
-        if (quiet) continue;
-        diags.error(file, span, "library '" + libName +
-                                    "' has no module named '" + modName +
-                                    "'");
-        continue;
-      }
-      if (l.libName != libName && !lib->isExposedModule(modName)) {
-        if (quiet) continue;
-        diags.error(file, span, "module '" + surface +
-                                    "' is not exposed by library '" +
-                                    libName + "'");
+                        "' is not declared as a dependency (add \"" +
+                        libName + "\" to \"dependencies\" in build.json)");
         continue;
       }
       bool external = !(currentLib && libName == currentLib->name);
-      std::string canonical = libName + "." + modName;
-      if (loadFile(fs::path(lib->dir) / rel, canonical, libName, external,
-                   span, file)) {
-        Loaded& l2 = byName.at(name);
-        l2.moduleScope[surface] = canonical;
-        l2.loadDeps.push_back(canonical);
+      if (!loadLibraryInterface(lib, external, span, file, quiet)) continue;
+      resolveMentions(libName);
+      // The interface binds the exposed name; follow it (through an alias
+      // chain, if the interface renames in steps) to a canonical id.
+      std::string target = aliasTargetIn(libName, modName);
+      std::string canonical;
+      for (int hop = 0; hop < 8 && !target.empty(); hop++) {
+        auto& iface = byName.at(libName).moduleScope;
+        auto it = iface.find(target);
+        if (it != iface.end()) {
+          canonical = it->second;
+          break;
+        }
+        target = aliasTargetIn(libName, target);
       }
+      if (canonical.empty()) {
+        if (quiet) continue;
+        if (aliasTargetIn(libName, modName).empty())
+          diags.error(file, span,
+                      "module '" + surface + "' is not exposed by library '" +
+                          libName + "' (add 'module " + modName + " = " +
+                          modName + " ;;' to " +
+                          (fs::path(lib->dir) / kLibraryInterfaceFile)
+                              .generic_string() +
+                          ")");
+        else
+          diags.error(file, span, "library '" + libName + "' exposes '" +
+                                      modName +
+                                      "' but its target does not resolve");
+        continue;
+      }
+      bind(surface, canonical);
+      // Reaching `Lib.File` goes through `Lib`'s interface, so the
+      // library module is in scope (and checked first) as well.
+      bind(libName, libName);
     }
-  }
+  };
+  for (size_t qi = 0; qi < queue.size(); qi++) resolveMentions(queue[qi]);
 
   // Topological sort (DFS); cycles are project errors.
   std::vector<std::string> order;
@@ -918,11 +976,10 @@ Program checkProject(const std::vector<std::string>& rootFiles,
     cm.parsed = std::move(l.parsed);
     cm.imports = l.loadDeps;
     cm.moduleScope = std::move(l.moduleScope);
-    cm.importedLibs = std::move(l.importedLibs);
     cm.libName = l.libName;
     cm.external = l.external;
     prog.modules.push_back(std::move(cm));
-    ModuleChecker(prog.modules.back(), prog, diags, ctx).run();
+    ModuleChecker(prog.modules.back(), prog, diags).run();
   }
   return prog;
 }

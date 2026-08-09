@@ -1,0 +1,8 @@
+(* The `Voices` library interface: every module a consumer can reach is
+   bound here. Nothing else in this directory is visible from outside -
+   the members themselves import each other freely by short name. *)
+
+module Drums = Drums ;;
+module Keys  = Keys ;;
+module Pads  = Pads ;;
+module Seq   = Seq ;;

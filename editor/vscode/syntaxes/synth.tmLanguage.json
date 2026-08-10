@@ -1,0 +1,125 @@
+{
+  "$schema": "https://raw.githubusercontent.com/martinring/tmlanguage/master/tmlanguage.json",
+  "name": "SynthGraph",
+  "scopeName": "source.synth",
+  "patterns": [
+    { "include": "#comment" },
+    { "include": "#string" },
+    { "include": "#letBinding" },
+    { "include": "#moduleDef" },
+    { "include": "#keyword" },
+    { "include": "#constant" },
+    { "include": "#time" },
+    { "include": "#number" },
+    { "include": "#label" },
+    { "include": "#typeVar" },
+    { "include": "#modulePath" },
+    { "include": "#type" },
+    { "include": "#operator" },
+    { "include": "#punctuation" }
+  ],
+  "repository": {
+    "comment": {
+      "name": "comment.block.synth",
+      "begin": "\\(\\*",
+      "end": "\\*\\)",
+      "patterns": [{ "include": "#comment" }]
+    },
+    "string": {
+      "name": "string.quoted.double.synth",
+      "begin": "\"",
+      "end": "\"",
+      "patterns": [
+        { "name": "constant.character.escape.synth", "match": "\\\\." }
+      ]
+    },
+    "letBinding": {
+      "match": "\\b(let)\\s+([a-z_][A-Za-z0-9_']*)",
+      "captures": {
+        "1": { "name": "keyword.other.let.synth" },
+        "2": { "name": "entity.name.function.synth" }
+      }
+    },
+    "moduleDef": {
+      "match": "\\b(module)\\s+([A-Z][A-Za-z0-9_']*)",
+      "captures": {
+        "1": { "name": "keyword.other.module.synth" },
+        "2": { "name": "entity.name.namespace.synth" }
+      }
+    },
+    "keyword": {
+      "patterns": [
+        {
+          "name": "keyword.control.synth",
+          "match": "\\b(if|then|else)\\b"
+        },
+        {
+          "name": "keyword.other.synth",
+          "match": "\\b(let|in|fun|import|open|module|struct|end|external)\\b"
+        }
+      ]
+    },
+    "constant": {
+      "name": "constant.language.boolean.synth",
+      "match": "\\b(true|false)\\b"
+    },
+    "time": {
+      "name": "constant.numeric.timestamp.synth",
+      "match": "\\b\\d+(\\.\\d+)?(ns|us|ms|s|m)(?![A-Za-z0-9_'])"
+    },
+    "number": {
+      "name": "constant.numeric.synth",
+      "match": "\\b\\d+(\\.\\d+)?(?![A-Za-z0-9_'])"
+    },
+    "label": {
+      "name": "variable.parameter.label.synth",
+      "match": "~[a-z_][A-Za-z0-9_']*"
+    },
+    "typeVar": {
+      "name": "storage.type.generic.synth",
+      "match": "'[a-z][A-Za-z0-9_']*"
+    },
+    "modulePath": {
+      "name": "entity.name.namespace.synth",
+      "match": "\\b[A-Z][A-Za-z0-9_']*(?=\\s*\\.)"
+    },
+    "type": {
+      "patterns": [
+        {
+          "name": "support.type.primitive.synth",
+          "match": "\\b(Scalar|Vector|Timestamp|String|Bool|Signal|Sample)\\b"
+        },
+        {
+          "name": "support.type.synth",
+          "match": "\\b(list|unit)\\b"
+        },
+        {
+          "name": "entity.name.type.synth",
+          "match": "\\b[A-Z][A-Za-z0-9_']*\\b"
+        }
+      ]
+    },
+    "operator": {
+      "patterns": [
+        { "name": "keyword.operator.pipe.synth", "match": "\\|>" },
+        { "name": "keyword.operator.arrow.synth", "match": "->" },
+        {
+          "name": "keyword.operator.comparison.synth",
+          "match": "==|!=|<=|>=|<|>"
+        },
+        { "name": "keyword.operator.logical.synth", "match": "&&|\\|\\|" },
+        {
+          "name": "keyword.operator.arithmetic.synth",
+          "match": "[+\\-*/]"
+        },
+        { "name": "keyword.operator.assignment.synth", "match": "=" }
+      ]
+    },
+    "punctuation": {
+      "patterns": [
+        { "name": "punctuation.terminator.synth", "match": ";;" },
+        { "name": "punctuation.separator.synth", "match": "[;,:.]" }
+      ]
+    }
+  }
+}

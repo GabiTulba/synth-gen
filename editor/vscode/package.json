@@ -1,0 +1,53 @@
+{
+  "name": "synthgraph",
+  "displayName": "SynthGraph",
+  "description": "Language support for SynthGraph (.synth): syntax highlighting, diagnostics, completion, go-to-definition and hover via `synthc lsp`.",
+  "version": "0.1.0",
+  "publisher": "synthgraph",
+  "license": "MIT",
+  "engines": {
+    "vscode": "^1.75.0"
+  },
+  "categories": [
+    "Programming Languages"
+  ],
+  "main": "./extension.js",
+  "activationEvents": [
+    "onLanguage:synth"
+  ],
+  "contributes": {
+    "languages": [
+      {
+        "id": "synth",
+        "aliases": [
+          "SynthGraph",
+          "synth"
+        ],
+        "extensions": [
+          ".synth"
+        ],
+        "configuration": "./language-configuration.json"
+      }
+    ],
+    "grammars": [
+      {
+        "language": "synth",
+        "scopeName": "source.synth",
+        "path": "./syntaxes/synth.tmLanguage.json"
+      }
+    ],
+    "configuration": {
+      "title": "SynthGraph",
+      "properties": {
+        "synthgraph.synthcPath": {
+          "type": "string",
+          "default": "",
+          "description": "Path to the synthc executable. When empty, the extension looks for build/synthc in the workspace, then for synthc on PATH."
+        }
+      }
+    }
+  },
+  "dependencies": {
+    "vscode-languageclient": "^9.0.1"
+  }
+}

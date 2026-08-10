@@ -41,6 +41,10 @@ build/synthc watch examples/pluck
 # Front-end checks only (for editor integration):
 build/synthc lint path/to/file.synth
 
+# Language server (JSON-RPC over stdio): diagnostics, completion,
+# go-to-definition and hover for editors; see editor/vscode:
+build/synthc lsp
+
 # Stream the build log (-v works for watch too): phase timings, one line
 # per artifact with its worker thread and discretize/write durations, and
 # per-target dependency statistics (direct deps, dependents, closure):
@@ -50,6 +54,16 @@ build/synthc build examples/basic -v
 # whenever a build rewrites the metadata (pair it with `synthc watch`):
 build/synth-dev examples/pluck
 ```
+
+### Editor support (VS Code)
+
+`editor/vscode/` contains a VS Code extension for `.synth` files: syntax
+highlighting, inline diagnostics on every keystroke, completion (names
+in scope and `Module.` members), go-to-definition (including into the
+bundled Core interface) and type-on-hover. Everything but the grammar is
+served by `synthc lsp`, the language server built into the compiler, so
+editor analysis and build analysis can never disagree. Setup
+instructions are in [`editor/vscode/README.md`](editor/vscode/README.md).
 
 ### The `build.json` manifest
 
@@ -324,7 +338,9 @@ waveshaper, `sqrt time` a fade-in curve.
 | `src/build.*` | `build.json` manifest (projects, libraries, roots), project validation, target enumeration, cached + parallel rendering, artifact + metadata emission, lint mode, watch loops (project + root daemon) |
 | `src/library.*` | Library registry: dynamic discovery of `library` manifests under a root, directory-scanned member sets, `lib.synth` interface detection, dep validation, enclosing-root search |
 | `src/incremental.*` | Dependency tracking: Merkle content hashes over definition closures for the build cache |
-| `src/main.cpp` | `synthc` CLI (`build`, `watch`, `lint`) |
+| `src/lsp.*` | `synthc lsp`: an LSP server over the front-end (diagnostics, completion, go-to-definition, hover), with unsaved-buffer overlays |
+| `src/main.cpp` | `synthc` CLI (`build`, `watch`, `lint`, `lsp`) |
+| `editor/vscode/` | VS Code extension: TextMate grammar for `.synth` plus a thin client that launches `synthc lsp` |
 | `src/devapp/` | `synth-dev`: JSON/metadata reader, SDL audio player, ImGui shell with live refresh and `--self-test` |
 | `tests/` | Unit + end-to-end tests (assert-based, run via CTest) |
 | `examples/pluck/` | The design doc's §3.4 example as a buildable project |

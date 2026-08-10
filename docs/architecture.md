@@ -100,7 +100,7 @@ before reading any of them:
 | `src/build.*` | `build.json` manifest (projects, libraries, roots), project validation, target enumeration, cached + parallel rendering, artifact + metadata emission, lint mode, watch loops (project + root daemon) |
 | `src/library.*` | Library registry: dynamic discovery of `library` manifests under a root, directory-scanned member sets, `lib.synth` interface detection, dep validation, enclosing-root search |
 | `src/incremental.*` | Dependency tracking: Merkle content hashes over definition closures for the build cache |
-| `src/lsp.*` | `synthc lsp`: an LSP server over the front-end (diagnostics, completion, go-to-definition, hover), with unsaved-buffer overlays |
+| `src/lsp.*` | `synthc lsp`: an LSP server over the front-end (diagnostics, completion, go-to-definition, hover, find-references, rename, outline, formatting), with unsaved-buffer overlays |
 | `src/main.cpp` | `synthc` CLI (`build`, `watch`, `lint`, `lsp`) |
 | `editor/vscode/` | VS Code extension: TextMate grammar for `.synth` plus a thin client that launches `synthc lsp` |
 | `src/devapp/` | `synth-dev`: JSON/metadata reader, SDL audio player, ImGui shell with live refresh and `--self-test` |

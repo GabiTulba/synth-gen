@@ -51,9 +51,14 @@ the documentation describes only what is.
   construction; there are deliberately no user-facing controls yet
   (size limits, pinning, on-disk persistence of sample windows across
   daemon restarts).
-- **Richer LSP.** The server covers diagnostics, completion,
-  go-to-definition, and hover; rename, find-references, document
-  outline, and formatting are natural next steps.
+- **Richer LSP, continued.** The server now covers diagnostics,
+  completion, go-to-definition, hover, find-references, rename, document
+  outline, and formatting; still open are signature help, semantic
+  tokens, workspace-wide symbol search, renaming modules and labeled
+  parameters (a labeled parameter's name is call-site syntax, so its
+  rename must rewrite every `~label:` argument too), and a formatter
+  that re-flows lines rather than only normalizing spacing within the
+  author's layout.
 - **Dev app playback features.** The artifact browser plays targets
   start-to-finish; seeking, looping, A/B between builds, and inline
   waveform display (the data already exists for `render_vis`) would make

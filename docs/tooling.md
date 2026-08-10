@@ -31,6 +31,29 @@ compiler front-end:
 - **Go to definition** — into the same file, sibling modules, library
   members, and the bundled Core interface (`stdlib/core/lib.synth`).
 - **Hover** — the checked type of the identifier under the cursor.
+- **Find references** — for parameters, locals (shadowing respected),
+  and top-level definitions. Because the checker rewrites every resolved
+  reference to canonical form, matching is exact — never textual. The
+  search covers the open documents plus every `.synth` file under the
+  enclosing project root, so uses are found in files that import the
+  definition even when they are not open.
+- **Rename** — built on the same reference search, returned as a
+  workspace edit across all affected files. Renames that cannot be done
+  safely are refused: labeled parameters (the label is part of every
+  call site's syntax), Core definitions (the bundled stdlib is
+  read-only), and new names that are not value identifiers. Collision
+  with an existing name in scope is not checked — the diagnostics on the
+  next keystroke report any breakage.
+- **Document outline** — modules and definitions as a nested symbol
+  tree, each with its checked type.
+- **Formatting** — deliberately conservative and purely lexical: the
+  author's line breaks, indentation, comments, and alignment columns are
+  kept, while token spacing is normalized (operators spaced, delimiters
+  tight, annotation colons as written), trailing whitespace stripped,
+  blank-line runs collapsed, and the final newline fixed. Token text is
+  copied verbatim, so formatting can never change what a file means; a
+  file the lexer cannot read is left untouched. The whole `examples/`
+  and `stdlib/` tree is already a fixed point of the formatter.
 
 Unsaved buffers are layered over the on-disk project: imports and
 libraries resolve exactly as a build after save would see them. Every

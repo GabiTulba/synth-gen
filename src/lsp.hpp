@@ -14,11 +14,16 @@ namespace synth {
 // plain message bodies.
 //
 // Supported: diagnostics (published on open/change), go-to-definition,
-// completion (unqualified names in scope and `Module.` members), and
-// hover (the checked type of the identifier under the cursor). Documents
-// use full-text sync; unsaved buffers are layered over the on-disk
-// project via ModuleLoadContext::overlay, so imports and libraries
-// resolve exactly as a build would see them after a save.
+// completion (unqualified names in scope and `Module.` members), hover
+// (the checked type of the identifier under the cursor), find-references
+// and rename (local binders and top-level definitions; references are
+// searched across the open documents plus every source file under the
+// enclosing project root), document outline (nested modules and
+// definitions), and formatting (a conservative whitespace normalizer
+// that keeps the author's line structure and comments). Documents use
+// full-text sync; unsaved buffers are layered over the on-disk project
+// via ModuleLoadContext::overlay, so imports and libraries resolve
+// exactly as a build would see them after a save.
 class LspServer {
  public:
   // Handles one JSON-RPC message body (no framing). Returns the message
@@ -39,12 +44,15 @@ class LspServer {
     DiagnosticBag diags;
   };
 
-  std::map<std::string, Document> docs_;   // by uri
-  std::map<std::string, Analysis> cache_;  // by uri; cleared on any edit
+  std::map<std::string, Document> docs_;  // by uri
+  // By canonicalSourceKey of the analyzed root file; cleared on any edit.
+  std::map<std::string, Analysis> cache_;
   bool shutdown_ = false;
   bool exit_ = false;
 
   Analysis& analysisFor(const std::string& uri);
+  Analysis& analysisForPath(const std::string& path);
+  std::vector<std::string> workspaceSourceFiles(const std::string& nearPath);
   std::string publishDiagnostics(const std::string& uri);
 };
 

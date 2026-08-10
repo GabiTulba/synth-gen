@@ -4,12 +4,16 @@
 #include <cctype>
 #include <cstdlib>
 #include <filesystem>
+#include <functional>
 #include <istream>
 #include <optional>
 #include <ostream>
+#include <set>
+#include <tuple>
 
 #include "build.hpp"
 #include "json.hpp"
+#include "lexer.hpp"
 #include "library.hpp"
 #include "types.hpp"
 
@@ -140,6 +144,7 @@ bool isIdentCont(char c) {
 struct Binder {
   std::string name;
   Span span;
+  bool labeled = false;  // a `~name:Type` parameter
 };
 
 // Innermost Ident whose span covers `off`, recording the local binders
@@ -158,7 +163,7 @@ const Expr* findIdent(const Expr& e, uint32_t off,
       return nullptr;
     }
     case Expr::Kind::Lambda: {
-      for (auto& p : e.params) binders.push_back({p.name, p.span});
+      for (auto& p : e.params) binders.push_back({p.name, p.span, p.labeled});
       if (const Expr* r = findIdent(*e.items[0], off, binders)) return r;
       binders.resize(binders.size() - e.params.size());
       return nullptr;
@@ -191,7 +196,8 @@ bool findAt(const std::vector<TopDef>& defs, uint32_t off,
     hit.def = &d;
     hit.prefix = prefix;
     if (d.kind == TopDef::Kind::Let) {
-      for (auto& p : d.params) hit.binders.push_back({p.name, p.span});
+      for (auto& p : d.params)
+        hit.binders.push_back({p.name, p.span, p.labeled});
       if (d.body) hit.ident = findIdent(*d.body, off, hit.binders);
     }
     return true;
@@ -259,6 +265,227 @@ Span binderNameSpan(const std::string& src, const Binder& b) {
     if (leftOk && rightOk) return {i, end};
   }
   return {b.span.lo, b.span.lo};
+}
+
+// --- References & rename ---------------------------------------------------
+
+// Identity of the value symbol under the cursor: either a local binder
+// (parameter, lambda parameter, `let ... in`) inside one top-level
+// definition, or a top-level definition identified by its defining
+// module (canonical id + source key, so same-named modules in different
+// directories never conflate) and its stored, possibly dotted, name.
+struct SymbolTarget {
+  bool local = false;
+  const TopDef* def = nullptr;  // local: the enclosing top-level let
+  Binder binder;                // local: the binding site
+  std::string hostId;           // top-level: canonical module id
+  std::string hostKey;          // top-level: canonicalSourceKey of its file
+  std::string stored;           // top-level: stored (dotted) name
+};
+
+// The local binder whose *name occurrence* (declaration site) is under
+// `off`, innermost match winning. Complements findIdent, which only
+// sees uses.
+struct BinderDecl {
+  Binder binder;
+  bool found = false;
+};
+
+void findBinderDecl(const std::string& src, const Expr& e, uint32_t off,
+                    BinderDecl& out) {
+  if (!covers(e.span, off)) return;
+  switch (e.kind) {
+    case Expr::Kind::Let: {
+      Binder b{e.name, e.span};
+      Span ns = binderNameSpan(src, b);
+      if (e.name != "_" && ns.hi > ns.lo && covers(ns, off)) out = {b, true};
+      findBinderDecl(src, *e.items[0], off, out);
+      findBinderDecl(src, *e.items[1], off, out);
+      return;
+    }
+    case Expr::Kind::Lambda:
+      for (auto& p : e.params)
+        if (p.name != "_" && covers(p.span, off))
+          out = {{p.name, p.span, p.labeled}, true};
+      findBinderDecl(src, *e.items[0], off, out);
+      return;
+    default:
+      for (auto& it : e.items) findBinderDecl(src, *it, off, out);
+      return;
+  }
+}
+
+// Visits every Ident in `e` with the local binders in scope at it
+// (innermost last), mirroring findIdent's scoping.
+template <typename Fn>
+void forEachIdent(const Expr& e, std::vector<Binder>& binders, const Fn& fn) {
+  switch (e.kind) {
+    case Expr::Kind::Ident:
+      fn(e, binders);
+      return;
+    case Expr::Kind::Let:
+      forEachIdent(*e.items[0], binders, fn);
+      binders.push_back({e.name, e.span});
+      forEachIdent(*e.items[1], binders, fn);
+      binders.pop_back();
+      return;
+    case Expr::Kind::Lambda:
+      for (auto& p : e.params) binders.push_back({p.name, p.span, p.labeled});
+      forEachIdent(*e.items[0], binders, fn);
+      binders.resize(binders.size() - e.params.size());
+      return;
+    default:
+      for (auto& it : e.items) forEachIdent(*it, binders, fn);
+      return;
+  }
+}
+
+// The leaf-name subrange of a reference: for a qualified `Keys.strike`
+// only `strike` is the symbol's own text (and the part a rename edits).
+Span identLeafSpan(const std::string& src, const Expr& e) {
+  uint32_t lo = e.span.lo;
+  std::string surface = src.substr(e.span.lo, e.span.hi - e.span.lo);
+  if (size_t dot = surface.rfind('.'); dot != std::string::npos)
+    lo = e.span.lo + (uint32_t)dot + 1;
+  return {lo, e.span.hi};
+}
+
+struct RefLoc {
+  const CheckedModule* mod = nullptr;
+  Span span{};
+  bool isDecl = false;
+};
+
+// References to a local binder: its declaration plus every use in the
+// enclosing definition's body that resolves to it (shadowing respected).
+void collectLocalRefs(const CheckedModule& cm, const SymbolTarget& t,
+                      std::vector<RefLoc>& out) {
+  const std::string& src = cm.parsed.source;
+  Span decl = binderNameSpan(src, t.binder);
+  if (decl.hi > decl.lo) out.push_back({&cm, decl, true});
+  const TopDef& d = *t.def;
+  if (!d.body) return;
+  std::vector<Binder> binders;
+  for (auto& p : d.params) binders.push_back({p.name, p.span, p.labeled});
+  forEachIdent(*d.body, binders,
+               [&](const Expr& e, const std::vector<Binder>& bs) {
+    if (!e.moduleName.empty() || e.name != t.binder.name) return;
+    for (auto it = bs.rbegin(); it != bs.rend(); ++it)
+      if (it->name == e.name) {
+        if (it->span.lo == t.binder.span.lo &&
+            it->span.hi == t.binder.span.hi)
+          out.push_back({&cm, identLeafSpan(src, e), false});
+        return;  // some other binder shadows ours (or is ours)
+      }
+  });
+}
+
+// References to a top-level definition within one checked program: the
+// declaration in the defining module plus every use. The checker rewrote
+// resolved references to canonical form (moduleName = defining module's
+// id, "" for the module's own globals; name = stored dotted key), so
+// matching is a straight comparison once local binders are ruled out.
+void collectProgramRefs(const Program& prog, const SymbolTarget& t,
+                        std::vector<RefLoc>& out) {
+  const CheckedModule* host = prog.find(t.hostId);
+  if (!host || canonicalSourceKey(host->parsed.path) != t.hostKey)
+    return;  // this program's module of that id is a different file
+  if (const TopDef* d = findDef(host->parsed.defs, t.stored)) {
+    Span ns = nameSpan(host->parsed.source, *d);
+    if (ns.hi > ns.lo) out.push_back({host, ns, true});
+  }
+  for (auto& m : prog.modules) {
+    std::function<void(const std::vector<TopDef>&)> walk =
+        [&](const std::vector<TopDef>& defs) {
+      for (auto& d : defs) {
+        if (d.kind == TopDef::Kind::ModuleDef) {
+          walk(d.defs);
+          continue;
+        }
+        if (d.kind != TopDef::Kind::Let || !d.body) continue;
+        std::vector<Binder> binders;
+        for (auto& p : d.params)
+          binders.push_back({p.name, p.span, p.labeled});
+        forEachIdent(*d.body, binders,
+                     [&](const Expr& e, const std::vector<Binder>& bs) {
+          if (e.moduleName.empty() &&
+              e.name.find('.') == std::string::npos)
+            for (auto it = bs.rbegin(); it != bs.rend(); ++it)
+              if (it->name == e.name) return;  // a local wins
+          std::string hostId =
+              e.moduleName.empty() ? m.parsed.name : e.moduleName;
+          if (hostId != t.hostId || e.name != t.stored) return;
+          out.push_back({&m, identLeafSpan(m.parsed.source, e), false});
+        });
+      }
+    };
+    walk(m.parsed.defs);
+  }
+}
+
+// The symbol at `off`, if it is one references/rename can work with:
+// a value binding or a reference to one. Module names, imports, opens
+// and labels are not targets.
+std::optional<SymbolTarget> targetAt(const Program& prog,
+                                     const CheckedModule& cm,
+                                     const std::string& text, uint32_t off) {
+  DefHit hit;
+  findAt(cm.parsed.defs, off, "", hit);
+  if (hit.ident) {
+    const Expr& e = *hit.ident;
+    std::string surface = text.substr(e.span.lo, e.span.hi - e.span.lo);
+    size_t lastDot = surface.rfind('.');
+    if (lastDot != std::string::npos &&
+        off < e.span.lo + (uint32_t)lastDot + 1)
+      return std::nullopt;  // on the module part of a qualified name
+    if (e.moduleName.empty() && e.name.find('.') == std::string::npos)
+      for (auto it = hit.binders.rbegin(); it != hit.binders.rend(); ++it)
+        if (it->name == e.name) {
+          SymbolTarget t;
+          t.local = true;
+          t.def = hit.def;
+          t.binder = *it;
+          return t;
+        }
+    const CheckedModule* host =
+        e.moduleName.empty() ? &cm : prog.find(e.moduleName);
+    if (!host || !findDef(host->parsed.defs, e.name)) return std::nullopt;
+    SymbolTarget t;
+    t.hostId = host->parsed.name;
+    t.hostKey = canonicalSourceKey(host->parsed.path);
+    t.stored = e.name;
+    return t;
+  }
+  if (hit.def && hit.def->kind == TopDef::Kind::Let) {
+    Span ns = nameSpan(text, *hit.def);
+    if (hit.def->name != "_" && ns.hi > ns.lo && covers(ns, off)) {
+      SymbolTarget t;
+      t.hostId = cm.parsed.name;
+      t.hostKey = canonicalSourceKey(cm.parsed.path);
+      t.stored = hit.prefix + hit.def->name;
+      return t;
+    }
+    for (auto& p : hit.def->params)
+      if (p.name != "_" && covers(p.span, off)) {
+        SymbolTarget t;
+        t.local = true;
+        t.def = hit.def;
+        t.binder = {p.name, p.span, p.labeled};
+        return t;
+      }
+    if (hit.def->body) {
+      BinderDecl bd;
+      findBinderDecl(text, *hit.def->body, off, bd);
+      if (bd.found) {
+        SymbolTarget t;
+        t.local = true;
+        t.def = hit.def;
+        t.binder = bd.binder;
+        return t;
+      }
+    }
+  }
+  return std::nullopt;
 }
 
 // --- Module scope ----------------------------------------------------------
@@ -492,24 +719,199 @@ Value diagnosticValue(const std::string& text, const Diagnostic& d) {
   return v;
 }
 
+// --- Document symbols ------------------------------------------------------
+
+// LSP SymbolKind constants (the few we use).
+constexpr int kSymModule = 2;
+constexpr int kSymFunction = 12;
+constexpr int kSymConstant = 14;
+
+// Hierarchical DocumentSymbols: inline modules nest, lets carry their
+// checked type as detail. `let _` render effects have no name to list.
+Value documentSymbols(const CheckedModule& cm, const std::string& text,
+                      const std::vector<TopDef>& defs,
+                      const std::string& prefix) {
+  std::vector<Value> items;
+  for (auto& d : defs) {
+    if (d.kind == TopDef::Kind::ModuleDef) {
+      Value v = json::makeObject();
+      v.set("name", json::makeString(d.name));
+      v.set("kind", json::makeNumber(kSymModule));
+      v.set("range", rangeValue(text, d.span));
+      v.set("selectionRange", rangeValue(text, nameSpan(text, d)));
+      v.set("children",
+            documentSymbols(cm, text, d.defs, prefix + d.name + "."));
+      items.push_back(std::move(v));
+    } else if (d.kind == TopDef::Kind::Let && d.name != "_") {
+      auto it = cm.defTypes.find(prefix + d.name);
+      TypePtr ty = it != cm.defTypes.end() ? it->second : nullptr;
+      bool isFun =
+          !d.params.empty() || (ty && ty->kind == Type::Kind::Fun);
+      Value v = json::makeObject();
+      v.set("name", json::makeString(d.name));
+      v.set("kind", json::makeNumber(isFun ? kSymFunction : kSymConstant));
+      if (ty) v.set("detail", json::makeString(typeName(ty)));
+      v.set("range", rangeValue(text, d.span));
+      v.set("selectionRange", rangeValue(text, nameSpan(text, d)));
+      items.push_back(std::move(v));
+    }
+  }
+  return json::makeArray(std::move(items));
+}
+
+// --- Formatting ------------------------------------------------------------
+// Conservative and purely lexical: the author's line breaks, indentation
+// and comments are kept; only horizontal whitespace between tokens is
+// normalized (plus trailing whitespace, runs of blank lines, and the
+// final newline). Token text is copied from the source verbatim, so
+// formatting can never change what the file means.
+
+bool endsValue(Tok k) {
+  switch (k) {
+    case Tok::Ident:
+    case Tok::UpIdent:
+    case Tok::TypeVar:
+    case Tok::Number:
+    case Tok::IntNum:
+    case Tok::Time:
+    case Tok::Bool:
+    case Tok::String:
+    case Tok::RParen:
+    case Tok::RBracket:
+      return true;
+    default:
+      return false;
+  }
+}
+
+// Spaces between two tokens on one line (no comment between them).
+// `gap` is the original inter-token text: annotation colons keep the
+// author's choice (spaced `let x : Scalar`, tight `~gain:Scalar`),
+// normalized to at most one space.
+int spacesBetween(Tok prev, Tok cur, const std::string& gap,
+                  bool prevUnaryMinus) {
+  if (prevUnaryMinus) return 0;
+  if (prev == Tok::Tilde || prev == Tok::Dot || prev == Tok::LParen ||
+      prev == Tok::LBracket)
+    return 0;
+  if (cur == Tok::Dot || cur == Tok::Comma || cur == Tok::Semi ||
+      cur == Tok::RParen || cur == Tok::RBracket)
+    return 0;
+  if (prev == Tok::Colon || cur == Tok::Colon) return gap.empty() ? 0 : 1;
+  return 1;
+}
+
+// Trailing spaces/tabs stripped before every newline; tabs in what
+// remains become two spaces (the language's indent unit).
+std::string stripTrailingWs(const std::string& s) {
+  std::string out;
+  for (char c : s) {
+    if (c == '\n')
+      while (!out.empty() && (out.back() == ' ' || out.back() == '\t'))
+        out.pop_back();
+    out += c;
+  }
+  return out;
+}
+
+std::string expandTabs(const std::string& s) {
+  std::string out;
+  for (char c : s)
+    if (c == '\t')
+      out += "  ";
+    else
+      out += c;
+  return out;
+}
+
+std::string formatTokens(const std::string& src,
+                         const std::vector<Token>& toks) {
+  std::string out;
+  uint32_t prevEnd = 0;
+  Tok prev = Tok::Eof;
+  bool first = true;
+  bool prevUnaryMinus = false;
+  for (auto& t : toks) {
+    uint32_t lo = t.kind == Tok::Eof ? (uint32_t)src.size() : t.span.lo;
+    std::string gap = src.substr(prevEnd, lo - prevEnd);
+    bool hasComment = gap.find("(*") != std::string::npos;
+    if (t.kind == Tok::Eof) {
+      if (hasComment) {
+        std::string g = stripTrailingWs(gap);
+        if (first) g.erase(0, g.find_first_not_of('\n'));
+        while (!g.empty() && g.back() == '\n') g.pop_back();
+        out += g;
+      }
+      if (!out.empty()) out += '\n';
+      break;
+    }
+    if (hasComment) {
+      // Comments (and any alignment around them) pass through verbatim.
+      std::string g = stripTrailingWs(gap);
+      if (first) g.erase(0, g.find_first_not_of('\n'));
+      out += g;
+    } else if (first) {
+      // Drop blank space before the first token.
+    } else if (size_t nl = (size_t)std::count(gap.begin(), gap.end(), '\n');
+               nl > 0) {
+      // Keep the line break (collapsing 2+ blank lines to one) and the
+      // author's indentation of the new line.
+      out.append(std::min<size_t>(nl, 2), '\n');
+      out += expandTabs(gap.substr(gap.rfind('\n') + 1));
+    } else {
+      size_t n = (size_t)spacesBetween(prev, t.kind, gap, prevUnaryMinus);
+      // A run of two or more spaces before `=` is a hand-aligned column
+      // (library interfaces align their module bindings): layout, not
+      // noise, so it is kept.
+      if (t.kind == Tok::Equals && gap.size() >= 2 &&
+          gap.find_first_not_of(' ') == std::string::npos)
+        n = gap.size();
+      out.append(n, ' ');
+    }
+    out.append(src, t.span.lo, t.span.hi - t.span.lo);
+    prevUnaryMinus = t.kind == Tok::Minus && (first || !endsValue(prev));
+    prev = t.kind;
+    prevEnd = t.span.hi;
+    first = false;
+  }
+  return out;
+}
+
+// --- Rename ----------------------------------------------------------------
+
+// Value names are lowercase-initial identifiers (types and modules are
+// uppercase-initial and not renameable here).
+bool validValueName(const std::string& s) {
+  if (s.empty() || s == "_") return false;
+  if (!std::islower((unsigned char)s[0]) && s[0] != '_') return false;
+  for (char c : s)
+    if (!isIdentCont(c)) return false;
+  for (const char* k : kKeywords)
+    if (s == k) return false;
+  return true;
+}
+
 }  // namespace
 
 // --- The server ------------------------------------------------------------
 
 LspServer::Analysis& LspServer::analysisFor(const std::string& uri) {
-  auto cached = cache_.find(uri);
+  return analysisForPath(docs_.at(uri).path);
+}
+
+LspServer::Analysis& LspServer::analysisForPath(const std::string& path) {
+  std::string key = canonicalSourceKey(path);
+  auto cached = cache_.find(key);
   if (cached != cache_.end()) return cached->second;
 
   Analysis a;
-  const Document& doc = docs_.at(uri);
   std::map<std::string, std::string> overlay;
   for (auto& [u, d] : docs_) overlay[d.key] = d.text;
 
   ModuleLoadContext ctx;
   ctx.overlay = &overlay;
   LibraryRegistry reg;
-  std::string root =
-      findEnclosingRoot(fs::path(doc.path).parent_path().string());
+  std::string root = findEnclosingRoot(fs::path(path).parent_path().string());
   if (!root.empty()) {
     reg = discoverLibraries(root, a.diags);
     ctx.registry = &reg;
@@ -517,15 +919,50 @@ LspServer::Analysis& LspServer::analysisFor(const std::string& uri) {
     // scope, so editing never demands manifest bookkeeping first.
     for (auto& [name, li] : reg.byName) ctx.deps.push_back(name);
     std::error_code ec;
-    fs::path fp = fs::absolute(doc.path, ec);
+    fs::path fp = fs::absolute(path, ec);
     for (auto& [name, li] : reg.byName) {
       fs::path rel = fs::relative(fp, fs::absolute(li.dir, ec), ec);
       if (!rel.empty() && rel.string().rfind("..", 0) != 0)
         ctx.currentLib = reg.find(name);
     }
   }
-  a.program = checkProject({doc.path}, a.diags, &ctx);
-  return cache_.emplace(uri, std::move(a)).first->second;
+  a.program = checkProject({path}, a.diags, &ctx);
+  return cache_.emplace(key, std::move(a)).first->second;
+}
+
+// The files a reference search covers: every open document plus every
+// .synth file under the enclosing project root (skipping build outputs
+// and hidden directories). Each is analyzed as its own root, so a
+// definition's uses are found in files that import it even when those
+// files are not open.
+std::vector<std::string> LspServer::workspaceSourceFiles(
+    const std::string& nearPath) {
+  std::vector<std::string> files;
+  std::set<std::string> seen;
+  auto add = [&](const std::string& p) {
+    if (seen.insert(canonicalSourceKey(p)).second) files.push_back(p);
+  };
+  for (auto& [u, d] : docs_) add(d.path);
+  std::string root =
+      findEnclosingRoot(fs::path(nearPath).parent_path().string());
+  if (!root.empty()) {
+    std::error_code ec;
+    fs::recursive_directory_iterator it(
+        root, fs::directory_options::skip_permission_denied, ec);
+    for (; !ec && it != fs::recursive_directory_iterator();
+         it.increment(ec)) {
+      std::string base = it->path().filename().string();
+      std::error_code typeEc;
+      if (it->is_directory(typeEc)) {
+        if (base == "_build" || base == "build" ||
+            (!base.empty() && base[0] == '.'))
+          it.disable_recursion_pending();
+        continue;
+      }
+      if (it->path().extension() == ".synth") add(it->path().string());
+    }
+  }
+  return files;
 }
 
 std::string LspServer::publishDiagnostics(const std::string& uri) {
@@ -601,6 +1038,10 @@ std::vector<std::string> LspServer::onMessage(const std::string& body) {
     caps.set("completionProvider", std::move(completion));
     caps.set("definitionProvider", json::makeBool(true));
     caps.set("hoverProvider", json::makeBool(true));
+    caps.set("referencesProvider", json::makeBool(true));
+    caps.set("renameProvider", json::makeBool(true));
+    caps.set("documentSymbolProvider", json::makeBool(true));
+    caps.set("documentFormattingProvider", json::makeBool(true));
     Value info = json::makeObject();
     info.set("name", json::makeString("synthc"));
     Value result = json::makeObject();
@@ -658,9 +1099,42 @@ std::vector<std::string> LspServer::onMessage(const std::string& body) {
   }
   if (method == "textDocument/didSave") return out;
 
+  if (method == "textDocument/formatting") {
+    std::string uri = textDocumentUri();
+    auto docIt = docs_.find(uri);
+    if (docIt == docs_.end()) {
+      respond(json::makeNull());
+      return out;
+    }
+    const Document& doc = docIt->second;
+    DiagnosticBag lexDiags;
+    std::vector<Token> toks = lex(doc.text, doc.path, lexDiags);
+    if (lexDiags.hasErrors()) {
+      // Formatting a file the lexer cannot read would risk mangling it.
+      respond(json::makeNull());
+      return out;
+    }
+    std::string formatted = formatTokens(doc.text, toks);
+    if (formatted == doc.text) {
+      respond(json::makeArray());
+      return out;
+    }
+    Value edit = json::makeObject();
+    edit.set("range",
+             rangeValue(doc.text, Span{0, (uint32_t)doc.text.size()}));
+    edit.set("newText", json::makeString(formatted));
+    std::vector<Value> edits;
+    edits.push_back(std::move(edit));
+    respond(json::makeArray(std::move(edits)));
+    return out;
+  }
+
   if (method == "textDocument/definition" ||
       method == "textDocument/completion" ||
-      method == "textDocument/hover") {
+      method == "textDocument/hover" ||
+      method == "textDocument/references" ||
+      method == "textDocument/rename" ||
+      method == "textDocument/documentSymbol") {
     std::string uri = textDocumentUri();
     auto docIt = docs_.find(uri);
     if (docIt == docs_.end()) {
@@ -673,11 +1147,117 @@ std::vector<std::string> LspServer::onMessage(const std::string& body) {
     for (auto& m : a.program.modules)
       if (canonicalSourceKey(m.parsed.path) == doc.key) cm = &m;
     if (!cm) {
-      respond(method == "textDocument/completion" ? json::makeArray()
-                                                  : json::makeNull());
+      respond(method == "textDocument/completion" ||
+                      method == "textDocument/documentSymbol"
+                  ? json::makeArray()
+                  : json::makeNull());
       return out;
     }
     uint32_t off = requestOffset(doc);
+
+    if (method == "textDocument/documentSymbol") {
+      respond(documentSymbols(*cm, doc.text, cm->parsed.defs, ""));
+      return out;
+    }
+
+    if (method == "textDocument/references" ||
+        method == "textDocument/rename") {
+      auto target = targetAt(a.program, *cm, doc.text, off);
+      if (!target) {
+        if (method == "textDocument/rename")
+          respondError(-32602, "nothing renameable at this position");
+        else
+          respond(json::makeNull());
+        return out;
+      }
+      if (method == "textDocument/rename") {
+        std::string newName =
+            params ? params->getString("newName") : std::string{};
+        if (!validValueName(newName)) {
+          respondError(-32602, "'" + newName +
+                                   "' is not a valid value name "
+                                   "(lowercase-initial identifier)");
+          return out;
+        }
+        if (target->local && target->binder.labeled) {
+          respondError(-32602,
+                       "cannot rename labeled parameter '~" +
+                           target->binder.name +
+                           "': the label is part of every call site");
+          return out;
+        }
+        if (!target->local) {
+          std::string stdlibKey = canonicalSourceKey(bundledStdlibDir());
+          if (!stdlibKey.empty() &&
+              target->hostKey.rfind(stdlibKey, 0) == 0) {
+            respondError(-32602,
+                         "cannot rename a definition in the bundled "
+                         "standard library");
+            return out;
+          }
+        }
+      }
+      std::vector<RefLoc> refs;
+      if (target->local) {
+        collectLocalRefs(*cm, *target, refs);
+      } else {
+        for (auto& f : workspaceSourceFiles(doc.path))
+          collectProgramRefs(analysisForPath(f).program, *target, refs);
+      }
+      std::stable_sort(refs.begin(), refs.end(),
+                       [](const RefLoc& x, const RefLoc& y) {
+        if (x.mod->parsed.path != y.mod->parsed.path)
+          return x.mod->parsed.path < y.mod->parsed.path;
+        return x.span.lo < y.span.lo;
+      });
+      std::set<std::tuple<std::string, uint32_t, uint32_t>> seen;
+
+      if (method == "textDocument/references") {
+        bool includeDecl = true;
+        if (const Value* c = params ? params->get("context") : nullptr)
+          if (const Value* v = c->get("includeDeclaration"))
+            includeDecl = v->boolean;
+        std::vector<Value> items;
+        for (auto& r : refs) {
+          if (!includeDecl && r.isDecl) continue;
+          if (!seen.insert({canonicalSourceKey(r.mod->parsed.path),
+                            r.span.lo, r.span.hi})
+                   .second)
+            continue;
+          items.push_back(locationValue(r.mod->parsed.path,
+                                        r.mod->parsed.source, r.span));
+        }
+        respond(json::makeArray(std::move(items)));
+        return out;
+      }
+
+      // rename
+      std::string newName = params->getString("newName");
+      std::vector<std::pair<std::string, std::vector<Value>>> byUri;
+      for (auto& r : refs) {
+        std::string key = canonicalSourceKey(r.mod->parsed.path);
+        if (!seen.insert({key, r.span.lo, r.span.hi}).second) continue;
+        Value edit = json::makeObject();
+        edit.set("range", rangeValue(r.mod->parsed.source, r.span));
+        edit.set("newText", json::makeString(newName));
+        std::string u = pathToUri(key);
+        auto grp = std::find_if(
+            byUri.begin(), byUri.end(),
+            [&](const auto& g) { return g.first == u; });
+        if (grp == byUri.end()) {
+          byUri.push_back({u, {}});
+          grp = byUri.end() - 1;
+        }
+        grp->second.push_back(std::move(edit));
+      }
+      Value changes = json::makeObject();
+      for (auto& [u, edits] : byUri)
+        changes.set(u, json::makeArray(std::move(edits)));
+      Value result = json::makeObject();
+      result.set("changes", std::move(changes));
+      respond(std::move(result));
+      return out;
+    }
 
     if (method == "textDocument/definition") {
       DefHit hit;

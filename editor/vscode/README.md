@@ -14,6 +14,17 @@ Language support for SynthGraph (`.synth`) source files:
 - **Go to definition** — into the same file, sibling modules, library
   members, and the bundled Core interface (`stdlib/core/lib.synth`).
 - **Hover** — the checked type of the identifier under the cursor.
+- **Find references / rename** — parameters, locals, and top-level
+  definitions; references are found across every source file under the
+  project root, not just open ones. Renaming a labeled parameter or a
+  Core definition is refused (the label is call-site syntax; Core is
+  read-only).
+- **Outline** — modules and definitions, nested, with their checked
+  types (drives the breadcrumb bar and `Ctrl+Shift+O`).
+- **Formatting** — a conservative whitespace normalizer: your line
+  breaks, indentation, comments, and alignment columns are kept; token
+  spacing, trailing whitespace, blank-line runs, and the final newline
+  are normalized.
 
 Everything but the grammar is served by `synthc lsp`, the language
 server built into the compiler, so editor analysis and build analysis

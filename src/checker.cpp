@@ -944,6 +944,15 @@ Program checkProject(const std::vector<std::string>& rootFiles,
   return checkProject(rootFiles, diags, nullptr);
 }
 
+std::string canonicalSourceKey(const std::string& path) {
+  std::error_code ec;
+  fs::path abs = fs::absolute(path, ec);
+  if (ec) abs = path;
+  fs::path canon = fs::weakly_canonical(abs, ec);
+  if (ec) canon = abs;
+  return canon.lexically_normal().string();
+}
+
 Program checkProject(const std::vector<std::string>& rootFiles,
                      DiagnosticBag& diags, const ModuleLoadContext* ctx) {
   Program prog;
@@ -1006,6 +1015,19 @@ Program checkProject(const std::vector<std::string>& rootFiles,
            from->deps.end();
   };
 
+  // Read a source file, honoring the context's in-memory overlay (the
+  // LSP server's unsaved editor buffers) before touching disk.
+  auto readSource = [&](const fs::path& p, std::string& out) -> bool {
+    if (ctx && ctx->overlay) {
+      auto it = ctx->overlay->find(canonicalSourceKey(p.string()));
+      if (it != ctx->overlay->end()) {
+        out = it->second;
+        return true;
+      }
+    }
+    return readFile(p, out);
+  };
+
   // Load one module file under its canonical id. Returns false only when
   // the file cannot be read (diagnosed).
   auto loadFile = [&](const fs::path& path, const std::string& canonical,
@@ -1013,7 +1035,7 @@ Program checkProject(const std::vector<std::string>& rootFiles,
                       const std::string& errFile) -> bool {
     if (byName.count(canonical)) return true;
     std::string source;
-    if (!readFile(path, source)) {
+    if (!readSource(path, source)) {
       if (errFile.empty())
         diags.projectError("cannot read source file '" + path.string() + "'");
       else

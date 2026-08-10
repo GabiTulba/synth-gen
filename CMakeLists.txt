@@ -26,6 +26,7 @@ add_library(synthgraph_core
   src/library.cpp
   src/build.cpp
   src/json.cpp
+  src/lsp.cpp
   src/core/native.cpp
   src/core/oscillators.cpp
   src/core/effects.cpp
@@ -98,6 +99,7 @@ add_executable(synth_tests
   tests/test_checker.cpp
   tests/test_engine.cpp
   tests/test_build.cpp
+  tests/test_lsp.cpp
 )
 target_link_libraries(synth_tests PRIVATE synthgraph_core)
 target_include_directories(synth_tests PRIVATE tests)

@@ -61,6 +61,10 @@ struct ModuleLoadContext {
   const LibraryRegistry* registry = nullptr;
   const LibraryInfo* currentLib = nullptr;
   std::vector<std::string> deps;
+  // Optional in-memory source overrides, keyed by weakly-canonical
+  // absolute path: a file present here is read from the map instead of
+  // disk. The LSP server uses this to check unsaved editor buffers.
+  const std::map<std::string, std::string>* overlay = nullptr;
 };
 
 // Loads, parses and type-checks `rootFiles` plus everything they import.
@@ -76,5 +80,10 @@ Program checkProject(const std::vector<std::string>& rootFiles,
                      const ModuleLoadContext* ctx);
 Program checkProject(const std::vector<std::string>& rootFiles,
                      DiagnosticBag& diags);
+
+// The normalization used for ModuleLoadContext::overlay keys: absolute,
+// weakly canonical, lexically normal. Overlay writers and the loader must
+// agree on it exactly, so it lives here.
+std::string canonicalSourceKey(const std::string& path);
 
 }  // namespace synth

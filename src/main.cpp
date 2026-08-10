@@ -8,6 +8,7 @@
 
 #include "build.hpp"
 #include "checker.hpp"
+#include "lsp.hpp"
 
 namespace {
 
@@ -23,6 +24,8 @@ int usage() {
       "                                   and rebuild on change\n"
       "  synthc lint FILE...              front-end checks only (parse +\n"
       "                                   type-check), no artifacts\n"
+      "  synthc lsp                       language server (JSON-RPC over\n"
+      "                                   stdio) for editor integration\n"
       "\n"
       "  -v, --verbose   stream the build log: phase timings, per-target\n"
       "                  worker threads and durations, dependency stats\n";
@@ -157,6 +160,10 @@ int main(int argc, char** argv) {
   if (cmd == "lint") {
     if (args.size() < 2) return usage();
     return cmdLint({args.begin() + 1, args.end()});
+  }
+  if (cmd == "lsp") {
+    if (args.size() > 1) return usage();
+    return synth::runLspServer(std::cin, std::cout);
   }
   return usage();
 }

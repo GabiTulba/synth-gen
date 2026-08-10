@@ -1,6 +1,7 @@
 #include "json.hpp"
 
 #include <cctype>
+#include <cstdio>
 #include <cstdlib>
 
 namespace synth::json {
@@ -198,8 +199,131 @@ double Value::getNumber(const std::string& key, double fallback) const {
   return v && v->kind == Kind::Number ? v->number : fallback;
 }
 
+void Value::set(const std::string& key, Value v) {
+  if (kind != Kind::Object) {
+    kind = Kind::Object;
+    object.clear();
+  }
+  for (auto& [k, existing] : object)
+    if (k == key) {
+      existing = std::move(v);
+      return;
+    }
+  object.emplace_back(key, std::move(v));
+}
+
+Value makeNull() { return Value{}; }
+
+Value makeBool(bool b) {
+  Value v;
+  v.kind = Value::Kind::Bool;
+  v.boolean = b;
+  return v;
+}
+
+Value makeNumber(double n) {
+  Value v;
+  v.kind = Value::Kind::Number;
+  v.number = n;
+  return v;
+}
+
+Value makeString(std::string s) {
+  Value v;
+  v.kind = Value::Kind::String;
+  v.string = std::move(s);
+  return v;
+}
+
+Value makeArray(std::vector<Value> items) {
+  Value v;
+  v.kind = Value::Kind::Array;
+  v.array = std::move(items);
+  return v;
+}
+
+Value makeObject() {
+  Value v;
+  v.kind = Value::Kind::Object;
+  return v;
+}
+
 bool parse(const std::string& text, Value& out, std::string& error) {
   return Parser(text, error).parseTop(out);
+}
+
+namespace {
+
+void serializeString(const std::string& s, std::string& out) {
+  out += '"';
+  for (unsigned char c : s) {
+    switch (c) {
+      case '"': out += "\\\""; break;
+      case '\\': out += "\\\\"; break;
+      case '\n': out += "\\n"; break;
+      case '\t': out += "\\t"; break;
+      case '\r': out += "\\r"; break;
+      case '\b': out += "\\b"; break;
+      case '\f': out += "\\f"; break;
+      default:
+        if (c < 0x20) {
+          static const char* hex = "0123456789abcdef";
+          out += "\\u00";
+          out += hex[c >> 4];
+          out += hex[c & 0xF];
+        } else {
+          out += (char)c;
+        }
+    }
+  }
+  out += '"';
+}
+
+void serializeInto(const Value& v, std::string& out) {
+  switch (v.kind) {
+    case Value::Kind::Null: out += "null"; return;
+    case Value::Kind::Bool: out += v.boolean ? "true" : "false"; return;
+    case Value::Kind::Number: {
+      double n = v.number;
+      if (n == (double)(long long)n) {
+        out += std::to_string((long long)n);
+      } else {
+        char buf[32];
+        std::snprintf(buf, sizeof buf, "%.17g", n);
+        out += buf;
+      }
+      return;
+    }
+    case Value::Kind::String: serializeString(v.string, out); return;
+    case Value::Kind::Array: {
+      out += '[';
+      for (size_t i = 0; i < v.array.size(); i++) {
+        if (i) out += ',';
+        serializeInto(v.array[i], out);
+      }
+      out += ']';
+      return;
+    }
+    case Value::Kind::Object: {
+      out += '{';
+      for (size_t i = 0; i < v.object.size(); i++) {
+        if (i) out += ',';
+        serializeString(v.object[i].first, out);
+        out += ':';
+        serializeInto(v.object[i].second, out);
+      }
+      out += '}';
+      return;
+    }
+  }
+}
+
+}  // namespace
+
+std::string serialize(const Value& v) {
+  std::string out;
+  serializeInto(v, out);
+  return out;
 }
 
 }  // namespace synth::json

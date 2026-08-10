@@ -28,13 +28,15 @@ let shape rate:Scalar : Scalar Signal =
 
 (* A saw as a stack of six Doppler-swept FM partials: harmonic n at
    base*n with amplitude 1/n, each deviating by `depth` of its own
-   frequency. *)
+   frequency. `partial` is a local function - it captures base, rate and
+   depth from the enclosing parameters and feeds List.init by name. *)
 let swept_saw ~base:Scalar ~rate:Scalar ~depth:Scalar ~gain:Scalar
     : Scalar Signal =
-  mix_all (List.init ~n:6 ~f:(fun i:Int ->
+  let partial i:Int : Scalar Signal =
     let n : Scalar = to_scalar i + 1.0 in
     (fm ~carrier:(base * n) ~modulator:(shape rate * (base * n * depth)))
-      * (1.0 / n))) * gain
+      * (1.0 / n) in
+  mix_all (List.init ~n:6 ~f:partial) * gain
 ;;
 
 let proximity rate:Scalar : Scalar Signal =

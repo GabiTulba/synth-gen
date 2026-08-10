@@ -28,19 +28,16 @@ let chord ~a:Scalar ~b:Scalar ~c:Scalar ~d:Scalar ~detune:Scalar
   (stack |> lowpass ~cutoff:1100.0) * env
 ;;
 
-(* Am -> F -> C -> G, four seconds (two bars at 120 BPM) per chord. *)
+(* Am -> F -> C -> G, four seconds (two bars at 120 BPM) per chord.
+   `bar` is a local function that captures the enclosing detune and cuts
+   each chord to the 4 s grid, so only the chord tones vary per call. *)
 let progression detune:Scalar : Scalar Signal =
-  let am : Scalar Sample =
-    chord ~a:110.0 ~b:164.81 ~c:220.0 ~d:261.63 ~detune:detune
+  let bar ~a:Scalar ~b:Scalar ~c:Scalar ~d:Scalar : Scalar Sample =
+    chord ~a:a ~b:b ~c:c ~d:d ~detune:detune
       |> sample ~from:0s ~to:4s in
-  let f : Scalar Sample =
-    chord ~a:87.31 ~b:130.81 ~c:174.61 ~d:220.0 ~detune:detune
-      |> sample ~from:0s ~to:4s in
-  let c : Scalar Sample =
-    chord ~a:130.81 ~b:196.0 ~c:261.63 ~d:329.63 ~detune:detune
-      |> sample ~from:0s ~to:4s in
-  let g : Scalar Sample =
-    chord ~a:98.0 ~b:146.83 ~c:196.0 ~d:246.94 ~detune:detune
-      |> sample ~from:0s ~to:4s in
+  let am : Scalar Sample = bar ~a:110.0 ~b:164.81 ~c:220.0 ~d:261.63 in
+  let f : Scalar Sample = bar ~a:87.31 ~b:130.81 ~c:174.61 ~d:220.0 in
+  let c : Scalar Sample = bar ~a:130.81 ~b:196.0 ~c:261.63 ~d:329.63 in
+  let g : Scalar Sample = bar ~a:98.0 ~b:146.83 ~c:196.0 ~d:246.94 in
   P.place4 am f c g
 ;;

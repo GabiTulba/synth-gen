@@ -17,9 +17,10 @@ let detuned ~freq:Scalar ~detune:Scalar : Scalar Signal =
 ;;
 
 (* Four chord samples on the 16 s cycle grid (four seconds each, two
-   bars at 120 BPM). *)
-let place4 a:Scalar Sample b:Scalar Sample c:Scalar Sample d:Scalar Sample
-    : Scalar Signal =
+   bars at 120 BPM). Polymorphic in the channel layout: placing is
+   placing, whether the chords are mono or a stereo Vector. *)
+let place4 a:'a Sample b:'a Sample c:'a Sample d:'a Sample
+    : 'a Signal =
   mix_all [a |> place ~at:0s; b |> place ~at:4s;
            c |> place ~at:8s; d |> place ~at:12s]
 ;;

@@ -58,4 +58,9 @@ LibraryRegistry discoverLibraries(const std::string& rootDir,
 // 'build' rules). Returns the directory containing it, or "" if none.
 std::string findEnclosingRoot(const std::string& dir);
 
+// Directory holding the bundled standard library sources (the Core
+// library lives at <stdlib>/core). Resolution: $SYNTH_STDLIB_DIR, then
+// the build-time source location.
+std::string bundledStdlibDir();
+
 }  // namespace synth

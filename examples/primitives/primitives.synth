@@ -5,6 +5,14 @@
    clipping in the 16-bit artifacts. *)
 
 open Core
+open Core.Osc
+open Core.Fx
+open Core.Arrange
+open Core.Render
+open Core.Io
+open Core.Time
+open Core.Sig
+open Core.Math
 
 (* Generators *)
 let _ =

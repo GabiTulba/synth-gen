@@ -75,7 +75,6 @@ interface file alongside the members. That file **is** the library —
 module `Basic` — and only what it binds is visible from outside:
 
 ```
-open Core
 import Keys
 
 module Keys = Keys ;;      (* publish a member module *)
@@ -126,7 +125,8 @@ removed with `git clean -Xdf examples`.
 
 ```ocaml
 (* pluck.synth *)
-open Core
+open Core            (* submodule names: Osc, Fx, Arrange, List, ... *)
+open Core.Osc open Core.Fx open Core.Arrange open Core.Render
 
 let pluck freq:Scalar : Scalar Signal =
   (sine freq) * (exp_decay 6.0)
@@ -148,27 +148,38 @@ let _ = render "demo" 48000.0 (sample song 0s 2s)
 ;;
 ```
 
-All primitives live in the built-in **`Core`** module — files start
-with `open Core` (bare `sine`, `render`, ...), or use qualified
-`Core.sine`; the list functions form the `Core.List` submodule
-(`List.map`, `List.fold`, `List.init`, `List.repeat`; `open Core.List`
-makes them bare). `Core` aliases like any module (`module C = Core`).
+All primitives live in **`Core`** — a real library bundled with the
+compiler (`stdlib/core/lib.synth`) whose every definition is an
+`external` binding to an engine implementation in `src/core/*.cpp`,
+organized into functional submodules: `Osc`, `Fx`, `Arrange`, `Render`,
+`Io`, `List`, `Time`, `Sig`, `Math`. Core is not ambient — bring it
+into scope like any library: `import Core` (qualified
+`Core.Osc.sine`), `open Core` (module-qualified `Osc.sine`,
+`List.map`), or `open Core.Osc` (bare `sine`). It aliases like any
+module (`module C = Core`, `module L = Core.List`). Code fragments
+below assume the relevant submodules are open.
 
-Fully annotated, no inference, no Booleans/branching/recursion in v1.
+Fully annotated, no inference, no recursion in v1.
 `render` is the language's only effect. Files are modules (`import A`
 resolves `a.synth` in the same directory — inside a library, that is a
 fellow member); libraries add `import Lib` / `import Lib.Mod`
 (qualified `Lib.def` / `Lib.Mod.def` access), `open Lib` /
 `open Lib.Mod` (unqualified access, position-ordered shadowing), and
 module aliases (`module K = Basic.Keys`). See
-`examples/song/preview.synth`.
+`examples/song/preview.synth`. Files can also namespace definitions
+with **inline modules** — `module A = struct … end`, nested at will,
+referenced as `A.x` (from other files `File.A.x`) or via `open A`, with
+`open`s inside a `struct` scoped to it.
 
 Ergonomic features on top of the doc's core: **labeled arguments**,
-**partial application**, **lambdas**, the **pipe operator**, and **local
+**partial application**, **lambdas**, **polymorphic signatures**,
+**inline modules**, **build-time Booleans with `if`/`else`**,
+**external functions in C++**, the **pipe operator**, and **local
 `let ... in` bindings**:
 
 ```ocaml
 open Core
+open Core.Osc open Core.Fx open Core.Arrange open Core.Render open Core.Time
 
 let voice ~amp:Scalar ~freq:Scalar : Scalar Signal = (sine freq) * amp ;;
 let quiet : Scalar -> Scalar Signal = voice ~amp:0.25 ;;   (* curried *)
@@ -199,6 +210,97 @@ locals, and must be parenthesized when used as an argument or pipe
 right-hand side. `x |> f a` desugars to `f a x` (the piped value becomes
 the final positional argument).
 
+An annotation may name **type variables**, so one definition serves every
+element type the way the primitives do — the checker instantiates it
+afresh at each use:
+
+```ocaml
+let dampen ~input:'a Signal : 'a Signal =
+  lowpass ~cutoff:600.0 (soft_clip ~threshold:0.8 input) ;;
+
+let mono : Scalar Signal = dampen (saw 220.0) ;;
+let wide : Vector Signal = dampen (channels [saw 220.0; saw 221.0]) ;;
+```
+
+The variable is still *written*, never inferred, and inside the body it
+is rigid: `'a` is whatever the caller picked, so the body can pass it
+along but cannot assume it is a Scalar or a Signal. Every variable in
+the result must appear in a parameter, otherwise no call site could
+determine it. Polymorphic definitions curry, take and return functions
+(`let twice ~f:('a -> 'a) ~x:'a : 'a = f (f x)`), and are published by
+libraries like any other value. Types are erased before evaluation, so a
+polymorphic definition renders bit-identically to the monomorphic one it
+replaces.
+
+**Inline modules** namespace related definitions inside one file:
+
+```ocaml
+import Core
+module Voices = struct
+  open Core.Osc open Core.Fx   (* scoped: end at this module's `end` *)
+  let base : Scalar = 220.0 ;;
+  module Wet = struct
+    let damp ~input:'a Signal : 'a Signal = lowpass ~cutoff:600.0 input ;;
+  end
+  let lead : Scalar Signal = Wet.damp (sine base) ;;
+end ;;
+
+let mono : Scalar Signal = Voices.Wet.damp (Core.Osc.sine Voices.base) ;;
+```
+
+Bodies nest arbitrarily and see the enclosing scope; members are
+addressed by dotted path (from other files, `File.Voices.base`) or
+brought into scope with `open Voices`. A member is just a top-level
+definition under its dotted name — same typing, evaluation, and
+incremental caching as everything else.
+
+**Booleans and `if`/`else`** make configuration part of the language.
+`Bool` is a build-time value — comparisons (`< <= > >= == !=`, on two
+Scalars or two Timestamps), `&&`/`||` (short-circuit), and `not` decide
+it while the graph is assembled, and `if` picks a value, a signal chain,
+or even which target renders. Only the taken branch evaluates; signals
+themselves are never compared or branched per sample.
+
+```ocaml
+let fast : Bool = tempo >= 120.0 && not (tempo > 200.0) ;;
+
+let voice ~freq:Scalar ~crisp:Bool : Scalar Signal =
+  if crisp then highpass ~cutoff:900.0 (saw freq)
+  else lowpass ~cutoff:500.0 (sine freq) ;;
+
+let _ =
+  if fast then render "fast" 48000.0 (sample mix 0s 8s)
+  else render "slow" 48000.0 (sample mix 0s 16s) ;;
+```
+
+**External functions** implement a definition in C++. Declare the
+signature in synth, point at a `.cpp` file next to your source, and
+synthc compiles it at build time (cached by content under
+`_build/externals/`, watched by the daemon like an audio input):
+
+```ocaml
+open Core.Osc
+let succ a:Scalar : Scalar = external "succ.cpp" ;;
+let tone : Scalar Signal = sine (succ 439.0) ;;
+```
+
+```cpp
+// succ.cpp
+#include <synth/external.hpp>
+
+SYNTH_EXTERNAL(succ) {
+  *result = synth::ext::Value::scalar(args[0].asScalar() + 1.0);
+  return true;
+}
+```
+
+Only build-time data crosses the boundary (Scalar, Timestamp, Bool,
+String, Vector, lists, tuples — never signals, which stay lazy engine
+graphs). This is also how Core itself is built: `stdlib/core/lib.synth`
+declares every primitive as an `external` bound to the engine
+implementations in `src/core/`, so `open Core` genuinely imports a
+library rather than triggering compiler magic.
+
 Signals can also be built directly: `constant 0.5` holds a level
 forever, `time` is the ramp whose sample at t seconds is t, and
 `signal ~f:(fun t:Scalar -> exp (0.0 - 3.0 * t))` samples a function of
@@ -212,7 +314,10 @@ waveshaper, `sqrt time` a fade-in curve.
 | Path | Contents |
 |------|----------|
 | `src/lexer.*`, `src/parser.*`, `src/ast.hpp` | Language front-end: tokens (incl. timestamp unit-suffix literals), OCaml-like parser, AST with source spans |
-| `src/types.*`, `src/primitives.*`, `src/checker.*` | Type system, primitive signatures, fully-annotated checker with polymorphic primitive instantiation, module resolution |
+| `src/types.*`, `src/checker.*` | Type system (rigid vs. free type variables, unification), fully-annotated checker with use-site instantiation of stored signatures, module resolution (files, libraries, inline `struct ... end` modules, the bundled Core) |
+| `stdlib/core/lib.synth` | The Core library: every primitive's name and signature, declared in synth source as `external` bindings |
+| `src/core/` | The built-in external implementations those bindings dispatch to (oscillators, effects, sampling, render, io, lists, signals, math) |
+| `src/external.*` | User externals: the generated `<synth/external.hpp>` API, build-time C++ compilation, content-hash caching, dlopen binding |
 | `src/signal.*` | Signal engine: lazy signal DAG, render-time discretization, sample/place windowing, filters, mixing |
 | `src/eval.*` | Evaluator: reduces definitions to values, collects render targets, `load_*` build-time validation |
 | `src/wav.*` | WAV read (PCM 16/24/32, float 32/64) and write (PCM 16) |
@@ -241,7 +346,8 @@ waveshaper, `sqrt time` a fade-in curve.
 - [x] **Epic 1** — Lexer, parser, AST, source spans, module resolution,
   parse diagnostics.
 - [x] **Epic 2** — Type checker: primitive/parameterized types, annotated
-  checking, primitive instantiation, higher-order arguments, operator
+  checking, use-site instantiation of primitive and user signatures
+  (`'a` in a definition's annotation), higher-order arguments, operator
   typing with broadcasting, typed diagnostics.
 - [x] **Epic 3** — Evaluator & signal engine: signal representation,
   pure-expression evaluation, `sample`/`place` semantics, render-time

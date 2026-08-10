@@ -160,4 +160,14 @@ std::string findEnclosingRoot(const std::string& dir) {
   return {};
 }
 
+std::string bundledStdlibDir() {
+  if (const char* env = std::getenv("SYNTH_STDLIB_DIR"); env && *env)
+    return env;
+#ifdef SYNTH_STDLIB_DEFAULT
+  return SYNTH_STDLIB_DEFAULT;
+#else
+  return "stdlib";
+#endif
+}
+
 }  // namespace synth

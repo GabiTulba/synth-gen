@@ -1,0 +1,145 @@
+(* SynthGraph Core - the standard library.
+   Every definition here is an `external` binding to an implementation
+   compiled into synthc (src/core/<file>). This file is the single
+   source of truth for Core's names and signatures.
+
+   Core is organized into functional submodules and must be brought into
+   scope explicitly: `import Core` for qualified access
+   (Core.Osc.sine), `open Core` for module-qualified access (Osc.sine),
+   or `open Core.Osc` for bare names (sine). *)
+
+(* --- Oscillators & modulation (src/core/oscillators.cpp) ------------- *)
+
+module Osc = struct
+  let sine ~freq:Scalar : Scalar Signal = external "oscillators.cpp" ;;
+  let saw ~freq:Scalar : Scalar Signal = external "oscillators.cpp" ;;
+  let square ~freq:Scalar : Scalar Signal = external "oscillators.cpp" ;;
+  (* Deterministic pseudo-noise via cascaded FM: no RNG anywhere,
+     renders stay reproducible. freq sets the spectral center. *)
+  let noise ~freq:Scalar : Scalar Signal = external "oscillators.cpp" ;;
+  let fm ~carrier:Scalar ~modulator:Scalar Signal : Scalar Signal =
+    external "oscillators.cpp" ;;
+  let pm ~carrier:Scalar ~modulator:Scalar Signal : Scalar Signal =
+    external "oscillators.cpp" ;;
+  let am ~carrier:'a Signal ~modulator:Scalar Signal ~depth:Scalar
+      : 'a Signal = external "oscillators.cpp" ;;
+end ;;
+
+(* --- Effects, filters, envelopes (src/core/effects.cpp) -------------- *)
+
+module Fx = struct
+  let delay ~by:Timestamp ~signal:'a Signal : 'a Signal =
+    external "effects.cpp" ;;
+  (* Time warping: f is a playback-rate multiplier sampled on the
+     output's time base (1.0 identity, 0.5 an octave down, 2.0 up). *)
+  let resample ~input:'a Signal ~f:(Scalar -> Scalar) : 'a Signal =
+    external "effects.cpp" ;;
+  let reverb ~decay:Timestamp ~damping:Scalar ~mix:Scalar
+      ~input:'a Signal : 'a Signal = external "effects.cpp" ;;
+  let exp_decay ~rate:Scalar : Scalar Signal = external "effects.cpp" ;;
+  let adsr ~attack:Timestamp ~decay:Timestamp ~sustain:Scalar
+      ~release:Timestamp ~hold:Timestamp : Scalar Signal =
+    external "effects.cpp" ;;
+  let lowpass ~cutoff:Scalar ~input:'a Signal : 'a Signal =
+    external "effects.cpp" ;;
+  let highpass ~cutoff:Scalar ~input:'a Signal : 'a Signal =
+    external "effects.cpp" ;;
+  let hard_clip ~threshold:Scalar ~input:'a Signal : 'a Signal =
+    external "effects.cpp" ;;
+  let soft_clip ~threshold:Scalar ~input:'a Signal : 'a Signal =
+    external "effects.cpp" ;;
+end ;;
+
+(* --- Slicing, placement, mixing (src/core/sampling.cpp) -------------- *)
+
+module Arrange = struct
+  let mix_all ~signals:'a Signal list : 'a Signal =
+    external "sampling.cpp" ;;
+  let channels ~chans:Scalar Signal list : Vector Signal =
+    external "sampling.cpp" ;;
+  let sample ~signal:'a Signal ~from:Timestamp ~to:Timestamp : 'a Sample =
+    external "sampling.cpp" ;;
+  let place ~sample:'a Sample ~at:Timestamp : 'a Signal =
+    external "sampling.cpp" ;;
+  let place_multi ~sample:'a Sample ~ats:Timestamp list : 'a Signal =
+    external "sampling.cpp" ;;
+end ;;
+
+(* --- Render targets (src/core/render.cpp) - the language's only
+   effect. Artifact names share one project-wide name space. ----------- *)
+
+module Render = struct
+  let render ~name:String ~rate:Scalar ~sample:'a Sample : unit =
+    external "render.cpp" ;;
+  let render_vis ~name:String ~rate:Scalar ~sample:'a Sample : unit =
+    external "render.cpp" ;;
+  let render_stems ~name:String ~rate:Scalar
+      ~stems:(String, 'a Sample) list : unit = external "render.cpp" ;;
+  let render_vis_stems ~name:String ~rate:Scalar
+      ~stems:(String, 'a Sample) list : unit = external "render.cpp" ;;
+end ;;
+
+(* --- Audio import (src/core/io.cpp) - build inputs, resolved relative
+   to the source file that names them. -------------------------------- *)
+
+module Io = struct
+  let load_mono ~path:String : Scalar Signal = external "io.cpp" ;;
+  let load_multi ~path:String : Vector Signal = external "io.cpp" ;;
+end ;;
+
+(* --- List functions (src/core/lists.cpp) ----------------------------- *)
+
+module List = struct
+  let map ~f:('a -> 'b) ~xs:'a list : 'b list = external "lists.cpp" ;;
+  let fold ~f:('a -> 'b -> 'a) ~init:'a ~xs:'b list : 'a =
+    external "lists.cpp" ;;
+  (* init builds [f 0.0; f 1.0; ...; f (n-1)]; counts must be whole and
+     non-negative, checked at build time. *)
+  let init ~n:Scalar ~f:(Scalar -> 'a) : 'a list = external "lists.cpp" ;;
+  let repeat ~n:Scalar ~x:'a : 'a list = external "lists.cpp" ;;
+end ;;
+
+(* --- Time: conversions and Timestamp sequences ------------------------
+   (src/core/math.cpp for conversions, src/core/lists.cpp for the
+   sequence builders). -------------------------------------------------- *)
+
+module Time = struct
+  (* The computed counterpart of the literal suffixes; there is
+     deliberately no conversion back from Timestamp. *)
+  let to_sec ~x:Scalar : Timestamp = external "math.cpp" ;;
+  let to_ms ~x:Scalar : Timestamp = external "math.cpp" ;;
+  let to_min ~x:Scalar : Timestamp = external "math.cpp" ;;
+  let time_steps ~start:Timestamp ~step:Timestamp ~count:Scalar
+      : Timestamp list = external "lists.cpp" ;;
+  (* Humanization: hash-derived deltas in [-spread, +spread], a pure
+     function of (seed, index) - deterministic and cacheable. *)
+  let jitter ~seed:Scalar ~spread:Timestamp ~steps:Timestamp list
+      : Timestamp list = external "lists.cpp" ;;
+end ;;
+
+(* --- Signal constructors (src/core/signals.cpp) ---------------------- *)
+
+module Sig = struct
+  let constant ~value:Scalar : Scalar Signal = external "signals.cpp" ;;
+  let constant_multi ~levels:Scalar list : Vector Signal =
+    external "signals.cpp" ;;
+  (* The ramp whose sample at t seconds is t. *)
+  let time : Scalar Signal = external "signals.cpp" ;;
+  let signal ~f:(Scalar -> Scalar) : Scalar Signal =
+    external "signals.cpp" ;;
+  let signal_multi ~fs:(Scalar -> Scalar) list : Vector Signal =
+    external "signals.cpp" ;;
+end ;;
+
+(* --- Math & Bool (src/core/math.cpp) --------------------------------- *)
+
+module Math = struct
+  (* Polymorphic over Scalars, Vectors and Signals (elementwise);
+     anything else is a build-time error. Domain follows IEEE. *)
+  let exp ~x:'a : 'a = external "math.cpp" ;;
+  let sqrt ~x:'a : 'a = external "math.cpp" ;;
+  let log ~x:'a : 'a = external "math.cpp" ;;
+  let pow ~x:'a ~y:Scalar : 'a = external "math.cpp" ;;
+  (* Boolean negation; && and || are (short-circuiting) operators. *)
+  let not ~b:Bool : Bool = external "math.cpp" ;;
+end ;;

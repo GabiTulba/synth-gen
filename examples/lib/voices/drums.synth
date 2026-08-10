@@ -5,6 +5,14 @@
    site - that's where the kits genuinely differ. *)
 
 open Core
+open Core.Osc
+open Core.Fx
+open Core.Arrange
+open Core.Render
+open Core.Io
+open Core.Time
+open Core.Sig
+open Core.Math
 
 let kick ~carrier:Scalar ~drop_rate:Scalar ~drop_depth:Scalar
          ~body_decay:Scalar ~click_freq:Scalar ~click_decay:Scalar

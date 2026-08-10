@@ -3,6 +3,14 @@
    intro/breakdown. *)
 
 open Core
+open Core.Osc
+open Core.Fx
+open Core.Arrange
+open Core.Render
+open Core.Io
+open Core.Time
+open Core.Sig
+open Core.Math
 
 let voice freq:Scalar : Scalar Signal =
   (saw freq + saw (freq * 1.006)) * 0.5

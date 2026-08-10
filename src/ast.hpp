@@ -11,7 +11,11 @@ namespace synth {
 struct Expr;
 using ExprPtr = std::unique_ptr<Expr>;
 
-enum class BinOpKind { Add, Sub, Mul, Div };
+enum class BinOpKind {
+  Add, Sub, Mul, Div,        // arithmetic (§3, pointwise lifting)
+  Lt, Le, Gt, Ge, Eq, Ne,    // comparisons: Scalar/Timestamp pairs -> Bool
+  And, Or,                   // Bool -> Bool -> Bool, short-circuit
+};
 
 struct Param {
   std::string name;
@@ -24,14 +28,17 @@ struct Expr {
   enum class Kind {
     NumLit,    // num
     TimeLit,   // num (seconds)
+    BoolLit,   // num (1.0 = true, 0.0 = false)
     StrLit,    // str
     Ident,     // moduleName ("" if unqualified) + name
     App,       // items[0] = callee, items[1..] = args
     BinOp,     // op, items[0], items[1]
+    If,        // items[0] = condition, items[1] = then, items[2] = else
     ListLit,   // items
     TupleLit,  // items (size >= 2)
     Let,       // name, declType; items[0] = bound expr, items[1] = body
     Lambda,    // params; items[0] = body
+    External,  // str = C++ file; whole body of a top-level let only
   };
   Kind kind;
   Span span{};
@@ -59,15 +66,17 @@ struct TopDef {
     Import,       // moduleName (possibly dotted: "Lib" or "Lib.File")
     Open,         // moduleName (dotted path brought into scope)
     ModuleAlias,  // name = alias, moduleName = dotted target path
+    ModuleDef,    // name = module, defs = its body (module N = struct ... end)
     Let,          // name ("_" for effect bindings), params, retType, body
   };
   Kind kind;
   Span span{};
   std::string moduleName;      // Import / Open / ModuleAlias target
-  std::string name;            // Let / ModuleAlias
+  std::string name;            // Let / ModuleAlias / ModuleDef
   std::vector<Param> params;   // Let (empty for constants)
   TypePtr retType;             // Let; null for `let _ = ...` (implied unit)
   ExprPtr body;                // Let
+  std::vector<TopDef> defs;    // ModuleDef body (lets, opens, nested modules)
 };
 
 struct ParsedModule {

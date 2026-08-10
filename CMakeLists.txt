@@ -16,18 +16,33 @@ add_library(synthgraph_core
   src/lexer.cpp
   src/parser.cpp
   src/types.cpp
-  src/primitives.cpp
   src/checker.cpp
   src/incremental.cpp
   src/signal.cpp
   src/vis.cpp
   src/eval.cpp
+  src/external.cpp
   src/wav.cpp
   src/library.cpp
   src/build.cpp
   src/json.cpp
+  src/core/native.cpp
+  src/core/oscillators.cpp
+  src/core/effects.cpp
+  src/core/sampling.cpp
+  src/core/render.cpp
+  src/core/io.cpp
+  src/core/lists.cpp
+  src/core/signals.cpp
+  src/core/math.cpp
 )
 target_include_directories(synthgraph_core PUBLIC src)
+# The bundled standard library (stdlib/core) is read at run time; the
+# source-tree location is the default, overridable via $SYNTH_STDLIB_DIR.
+target_compile_definitions(synthgraph_core
+  PUBLIC SYNTH_STDLIB_DEFAULT="${CMAKE_CURRENT_SOURCE_DIR}/stdlib")
+# User `external "file.cpp"` implementations are dlopen()ed.
+target_link_libraries(synthgraph_core PUBLIC ${CMAKE_DL_LIBS})
 
 add_executable(synthc src/main.cpp)
 target_link_libraries(synthc PRIVATE synthgraph_core)

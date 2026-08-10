@@ -3,6 +3,14 @@
    widths), and the shared 4 x 4 s chord-progression placement. *)
 
 open Core
+open Core.Osc
+open Core.Fx
+open Core.Arrange
+open Core.Render
+open Core.Io
+open Core.Time
+open Core.Sig
+open Core.Math
 
 let detuned ~freq:Scalar ~detune:Scalar : Scalar Signal =
   (saw (freq - detune) + saw (freq + detune)) * 0.5

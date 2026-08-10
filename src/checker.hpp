@@ -1,5 +1,6 @@
 #pragma once
 #include <map>
+#include <set>
 #include <string>
 #include <vector>
 
@@ -14,7 +15,13 @@ struct CheckedModule {
                         // "Lib.File" for library members, "File" otherwise
   // Types of top-level lets (constants have their value type; functions a
   // Fun type). Only named bindings appear here; `let _` targets do not.
+  // A definition inside an inline module (`module A = struct ... end`)
+  // appears under its dotted path from the file root: "A.x", "A.B.y".
   std::map<std::string, TypePtr> defTypes;
+  // Dotted paths (from the file root) of every inline module this file
+  // defines: "A", "A.B". Lets qualified references and `open` reach into
+  // them, here and from other modules.
+  std::set<std::string> inlineModules;
   std::vector<std::string> imports;  // canonical ids of load dependencies
   // Surface module path -> canonical module id, built from this file's
   // imports (and, during checking, opens/aliases): "Keys" -> "Basic.Keys"

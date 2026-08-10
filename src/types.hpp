@@ -6,9 +6,19 @@
 
 namespace synth {
 
-// Semantic types. User code is fully annotated and monomorphic; type
-// variables (Var) appear only in built-in primitive signatures and are
-// instantiated at call sites.
+// Semantic types. User code is fully annotated; type variables (Var) come
+// from built-in primitive signatures and from user annotations ('a), and
+// are instantiated at every use site.
+//
+// A Var carries an integer id whose *sign* says how it may be solved:
+//   id >= 0  free      - a placeholder created by instantiating a
+//                        signature at a use site; unification binds it.
+//   id <  0  rigid     - a type variable written in a signature, checked
+//                        from inside the definition that declares it. It
+//                        stands for one unknown but arbitrary type, so it
+//                        unifies only with itself (and with free vars);
+//                        binding it to a concrete type would let a body
+//                        assume something the caller never promised.
 struct Type;
 using TypePtr = std::shared_ptr<const Type>;
 
@@ -18,6 +28,7 @@ struct Type {
     Vector,
     Timestamp,
     String,
+    Bool,
     Unit,
     Signal,   // elem
     Sample,   // elem
@@ -33,7 +44,9 @@ struct Type {
   // Labels drive call-site matching and printing; equality ignores them.
   std::vector<std::string> labels;
   TypePtr ret;                  // Fun
-  int var = 0;                  // Var
+  int var = 0;                  // Var: id; negative = rigid (see above)
+  std::string varName;          // Var: surface name ("a" for 'a), for
+                                // diagnostics only; equality ignores it
 
   explicit Type(Kind k) : kind(k) {}
 
@@ -46,6 +59,7 @@ TypePtr tScalar();
 TypePtr tVector();
 TypePtr tTimestamp();
 TypePtr tString();
+TypePtr tBool();
 TypePtr tUnit();
 TypePtr tSignal(TypePtr elem);
 TypePtr tSample(TypePtr elem);
@@ -55,14 +69,29 @@ TypePtr tFun(std::vector<TypePtr> params, TypePtr ret);
 TypePtr tFun(std::vector<TypePtr> params, std::vector<std::string> labels,
              TypePtr ret);
 TypePtr tVar(int id);
+// A named variable; `id` must be negative for a rigid one (tRigidVar) and
+// non-negative for a free one that keeps its surface name in diagnostics.
+TypePtr tVar(int id, std::string name);
+// A user-written 'name. `seq` counts variables allocated so far (0, 1, ...);
+// the id it maps to is negative and unique per seq.
+TypePtr tRigidVar(int seq, std::string name);
+bool isRigidVar(const TypePtr& t);
+// Does `t` mention a variable of the given flavour? A rigid one is a
+// legitimate part of a polymorphic definition's type; a free one left over
+// after a call means the call site failed to determine something.
+bool containsRigidVar(const TypePtr& t);
+bool containsFreeVar(const TypePtr& t);
+bool containsAnyVar(const TypePtr& t);
 
 bool typeEquals(const TypePtr& a, const TypePtr& b);
 std::string typeName(const TypePtr& t);
 
-// Unification of two types, either of which may contain Vars (primitive
-// signature variables, instantiated fresh per call site). `subst` maps
-// var id -> type; bindings are chased on both sides and an occurs check
-// keeps the substitution acyclic.
+// Unification of two types, either of which may contain Vars (signature
+// variables, instantiated fresh per use site). `subst` maps var id -> type;
+// bindings are chased on both sides and an occurs check keeps the
+// substitution acyclic. Only free variables are ever bound: a rigid one
+// matches itself, absorbs a free one, and fails against anything else, so
+// it never appears as a key in `subst`.
 using Subst = std::map<int, TypePtr>;
 bool unify(const TypePtr& sig, const TypePtr& concrete, Subst& subst);
 TypePtr applySubst(const TypePtr& t, const Subst& subst);

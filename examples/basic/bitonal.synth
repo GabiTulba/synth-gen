@@ -3,6 +3,14 @@
    riding on top. *)
 
 open Core
+open Core.Osc
+open Core.Fx
+open Core.Arrange
+open Core.Render
+open Core.Io
+open Core.Time
+open Core.Sig
+open Core.Math
 
 let modded : Scalar Signal =
   let bitone : Scalar Signal = (saw 220.0 + saw 224.0) * 0.5 in

@@ -7,6 +7,14 @@
    module it lives in: `Effects.fly_by` works after `import Effects`. *)
 
 open Core
+open Core.Osc
+open Core.Fx
+open Core.Arrange
+open Core.Render
+open Core.Io
+open Core.Time
+open Core.Sig
+open Core.Math
 import Doppler
 
 module Doppler = Doppler ;;

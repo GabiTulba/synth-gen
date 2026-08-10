@@ -3,6 +3,14 @@
    Detune is a parameter so each stereo side runs a different width. *)
 
 open Core
+open Core.Osc
+open Core.Fx
+open Core.Arrange
+open Core.Render
+open Core.Io
+open Core.Time
+open Core.Sig
+open Core.Math
 
 import Voices
 module P = Voices.Pads

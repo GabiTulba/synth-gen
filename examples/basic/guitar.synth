@@ -3,6 +3,14 @@
    Built on the shared additive partial from Voices.Keys. *)
 
 open Core
+open Core.Osc
+open Core.Fx
+open Core.Arrange
+open Core.Render
+open Core.Io
+open Core.Time
+open Core.Sig
+open Core.Math
 
 import Voices
 module K = Voices.Keys

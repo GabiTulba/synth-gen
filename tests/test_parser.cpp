@@ -341,3 +341,202 @@ TEST(parser_let_in_requires_annotation_and_in) {
   parseSrc("let x : Scalar = let y : Scalar = 1.0 y ;;", d2);
   CHECK(d2.hasErrors());
 }
+
+TEST(parser_type_variables) {
+  DiagnosticBag diags;
+  auto defs = parseSrc(
+      "let dampen ~input:'a Signal : 'a Signal = lowpass ~cutoff:600.0 input ;;",
+      diags);
+  CHECK(!diags.hasErrors());
+  CHECK(defs.size() == 1);
+  const TypePtr& param = defs[0].params[0].type;
+  CHECK(param->kind == Type::Kind::Signal);
+  CHECK(param->elem->kind == Type::Kind::Var);
+  CHECK(param->elem->varName == "a");
+  CHECK(isRigidVar(param->elem));
+  // The same name in the return type is the same variable.
+  CHECK(defs[0].retType->elem->var == param->elem->var);
+}
+
+TEST(parser_type_variables_are_scoped_per_definition) {
+  DiagnosticBag diags;
+  auto defs = parseSrc(
+      "let f ~x:'a : 'a = x ;;\n"
+      "let g ~y:'a : 'a = y ;;",
+      diags);
+  CHECK(!diags.hasErrors());
+  CHECK(defs.size() == 2);
+  // Same spelling, different definitions: distinct variables.
+  CHECK(defs[0].retType->var != defs[1].retType->var);
+}
+
+TEST(parser_type_variable_in_function_type_and_list) {
+  DiagnosticBag diags;
+  auto defs = parseSrc("let twice ~f:('a -> 'a) ~xs:'a list : 'a = f 1.0 ;;",
+                       diags);
+  CHECK(!diags.hasErrors());
+  const TypePtr& f = defs[0].params[0].type;
+  CHECK(f->kind == Type::Kind::Fun);
+  CHECK(f->items[0]->kind == Type::Kind::Var);
+  CHECK(f->ret->var == f->items[0]->var);
+  CHECK(defs[0].params[1].type->kind == Type::Kind::List);
+  CHECK(defs[0].params[1].type->elem->var == f->items[0]->var);
+}
+
+TEST(parser_inline_module) {
+  DiagnosticBag diags;
+  auto defs = parseSrc(R"(
+module Voices = struct
+  open Core
+  let lead freq:Scalar : Scalar Signal = sine freq ;;
+  module Fx = struct
+    let gain : Scalar = 0.5 ;;
+  end
+end ;;
+let after : Scalar = 1.0 ;;
+)",
+                       diags);
+  CHECK(!diags.hasErrors());
+  CHECK(defs.size() == 2);
+  CHECK(defs[0].kind == TopDef::Kind::ModuleDef);
+  CHECK(defs[0].name == "Voices");
+  CHECK(defs[0].defs.size() == 3);
+  CHECK(defs[0].defs[0].kind == TopDef::Kind::Open);
+  CHECK(defs[0].defs[1].kind == TopDef::Kind::Let);
+  CHECK(defs[0].defs[1].name == "lead");
+  CHECK(defs[0].defs[2].kind == TopDef::Kind::ModuleDef);
+  CHECK(defs[0].defs[2].name == "Fx");
+  CHECK(defs[0].defs[2].defs.size() == 1);
+  CHECK(defs[1].kind == TopDef::Kind::Let);
+  CHECK(defs[1].name == "after");
+}
+
+TEST(parser_inline_module_end_without_semisemi) {
+  DiagnosticBag diags;
+  auto defs = parseSrc(
+      "module A = struct let x : Scalar = 1.0 ;; end\n"
+      "let y : Scalar = 2.0 ;;",
+      diags);
+  CHECK(!diags.hasErrors());
+  CHECK(defs.size() == 2);
+  CHECK(defs[0].kind == TopDef::Kind::ModuleDef);
+}
+
+TEST(parser_inline_module_rejects_import) {
+  DiagnosticBag diags;
+  auto defs = parseSrc(
+      "module A = struct import Other ;; let x : Scalar = 1.0 ;; end ;;",
+      diags);
+  CHECK(diags.hasErrors());
+  // Recovery keeps the rest of the body.
+  CHECK(defs.size() == 1);
+  CHECK(defs[0].defs.size() == 1);
+  CHECK(defs[0].defs[0].name == "x");
+}
+
+TEST(parser_inline_module_rejects_nested_alias) {
+  DiagnosticBag diags;
+  parseSrc("module A = struct module K = Core end ;;", diags);
+  CHECK(diags.hasErrors());
+}
+
+TEST(parser_inline_module_requires_end) {
+  DiagnosticBag diags;
+  parseSrc("module A = struct let x : Scalar = 1.0 ;;", diags);
+  CHECK(diags.hasErrors());
+}
+
+TEST(parser_struct_and_end_stay_ordinary_identifiers) {
+  // `struct` and `end` are contextual, so they still work as binding
+  // names and expression references everywhere else.
+  DiagnosticBag diags;
+  auto defs = parseSrc(
+      "let end : Scalar = 1.0 ;;\n"
+      "module A = struct let x : Scalar = end ;; end ;;",
+      diags);
+  CHECK(!diags.hasErrors());
+  CHECK(defs.size() == 2);
+  CHECK(defs[0].name == "end");
+  CHECK(defs[1].defs.size() == 1);
+  CHECK(defs[1].defs[0].body->kind == Expr::Kind::Ident);
+  CHECK(defs[1].defs[0].body->name == "end");
+}
+
+TEST(parser_if_expression) {
+  DiagnosticBag diags;
+  auto defs = parseSrc(
+      "let x : Scalar = if a < b then 1.0 else 2.0 + 3.0 ;;", diags);
+  CHECK(!diags.hasErrors());
+  const ExprPtr& body = defs[0].body;
+  CHECK(body->kind == Expr::Kind::If);
+  CHECK(body->items.size() == 3);
+  CHECK(body->items[0]->kind == Expr::Kind::BinOp);
+  CHECK(body->items[0]->op == BinOpKind::Lt);
+  CHECK(body->items[1]->kind == Expr::Kind::NumLit);
+  // The else branch extends maximally: 2.0 + 3.0, not (2.0) + dangling.
+  CHECK(body->items[2]->kind == Expr::Kind::BinOp);
+  CHECK(body->items[2]->op == BinOpKind::Add);
+}
+
+TEST(parser_bool_literals_and_type) {
+  DiagnosticBag diags;
+  auto defs = parseSrc("let flag ~on:Bool : Bool = true ;;", diags);
+  CHECK(!diags.hasErrors());
+  CHECK(defs[0].params[0].type->kind == Type::Kind::Bool);
+  CHECK(defs[0].retType->kind == Type::Kind::Bool);
+  CHECK(defs[0].body->kind == Expr::Kind::BoolLit);
+  CHECK(defs[0].body->num == 1.0);
+}
+
+TEST(parser_logic_precedence) {
+  // a + 1.0 < b && c || d  ==>  (((a + 1.0) < b) && c) || d
+  DiagnosticBag diags;
+  auto defs = parseSrc("let x : Bool = a + 1.0 < b && c || d ;;", diags);
+  CHECK(!diags.hasErrors());
+  const ExprPtr& body = defs[0].body;
+  CHECK(body->op == BinOpKind::Or);
+  CHECK(body->items[0]->op == BinOpKind::And);
+  CHECK(body->items[0]->items[0]->op == BinOpKind::Lt);
+  CHECK(body->items[0]->items[0]->items[0]->op == BinOpKind::Add);
+  CHECK(body->items[1]->kind == Expr::Kind::Ident);
+}
+
+TEST(parser_comparison_feeds_pipe) {
+  // A comparison can be piped: a < b |> f  ==>  f (a < b).
+  DiagnosticBag diags;
+  auto defs = parseSrc("let x : Bool = a < b |> f ;;", diags);
+  CHECK(!diags.hasErrors());
+  const ExprPtr& body = defs[0].body;
+  CHECK(body->kind == Expr::Kind::App);
+  CHECK(body->items[0]->name == "f");
+  CHECK(body->items[1]->op == BinOpKind::Lt);
+}
+
+TEST(parser_if_requires_else) {
+  DiagnosticBag diags;
+  parseSrc("let x : Scalar = if true then 1.0 ;;", diags);
+  CHECK(diags.hasErrors());
+}
+
+TEST(parser_external_body) {
+  DiagnosticBag diags;
+  auto defs = parseSrc("let succ a:Scalar : Scalar = external \"succ.cpp\" ;;",
+                       diags);
+  CHECK(!diags.hasErrors());
+  CHECK(defs.size() == 1);
+  CHECK(defs[0].body->kind == Expr::Kind::External);
+  CHECK(defs[0].body->str == "succ.cpp");
+}
+
+TEST(parser_external_is_contextual) {
+  // `external` is an ordinary identifier everywhere but a full-body
+  // `external "file"` position.
+  DiagnosticBag diags;
+  auto defs = parseSrc(
+      "let external : Scalar = 1.0 ;;\n"
+      "let x : Scalar = external ;;",
+      diags);
+  CHECK(!diags.hasErrors());
+  CHECK(defs[0].name == "external");
+  CHECK(defs[1].body->kind == Expr::Kind::Ident);
+}

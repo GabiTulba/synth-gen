@@ -22,6 +22,10 @@ TypePtr tString() {
   static TypePtr t = make(Type::Kind::String);
   return t;
 }
+TypePtr tBool() {
+  static TypePtr t = make(Type::Kind::Bool);
+  return t;
+}
 TypePtr tUnit() {
   static TypePtr t = make(Type::Kind::Unit);
   return t;
@@ -65,6 +69,51 @@ TypePtr tVar(int id) {
   t->var = id;
   return t;
 }
+TypePtr tVar(int id, std::string name) {
+  auto t = std::make_shared<Type>(Type::Kind::Var);
+  t->var = id;
+  t->varName = std::move(name);
+  return t;
+}
+TypePtr tRigidVar(int seq, std::string name) {
+  return tVar(-1 - seq, std::move(name));
+}
+bool isRigidVar(const TypePtr& t) {
+  return t->kind == Type::Kind::Var && t->var < 0;
+}
+
+namespace {
+// Walks `t` looking for a Var the predicate accepts.
+template <typename Pred>
+bool anyVar(const TypePtr& t, Pred pred) {
+  switch (t->kind) {
+    case Type::Kind::Var:
+      return pred(t->var);
+    case Type::Kind::Signal:
+    case Type::Kind::Sample:
+    case Type::Kind::List:
+      return anyVar(t->elem, pred);
+    case Type::Kind::Tuple:
+    case Type::Kind::Fun: {
+      for (auto& x : t->items)
+        if (anyVar(x, pred)) return true;
+      return t->ret && anyVar(t->ret, pred);
+    }
+    default:
+      return false;
+  }
+}
+}  // namespace
+
+bool containsRigidVar(const TypePtr& t) {
+  return anyVar(t, [](int id) { return id < 0; });
+}
+bool containsFreeVar(const TypePtr& t) {
+  return anyVar(t, [](int id) { return id >= 0; });
+}
+bool containsAnyVar(const TypePtr& t) {
+  return anyVar(t, [](int) { return true; });
+}
 
 bool typeEquals(const TypePtr& a, const TypePtr& b) {
   if (a.get() == b.get()) return true;
@@ -74,6 +123,7 @@ bool typeEquals(const TypePtr& a, const TypePtr& b) {
     case Type::Kind::Vector:
     case Type::Kind::Timestamp:
     case Type::Kind::String:
+    case Type::Kind::Bool:
     case Type::Kind::Unit:
       return true;
     case Type::Kind::Signal:
@@ -102,6 +152,7 @@ std::string typeName(const TypePtr& t) {
     case Type::Kind::Vector: return "Vector";
     case Type::Kind::Timestamp: return "Timestamp";
     case Type::Kind::String: return "String";
+    case Type::Kind::Bool: return "Bool";
     case Type::Kind::Unit: return "unit";
     case Type::Kind::Signal: return typeName(t->elem) + " Signal";
     case Type::Kind::Sample: return typeName(t->elem) + " Sample";
@@ -124,7 +175,11 @@ std::string typeName(const TypePtr& t) {
       return s + typeName(t->ret) + ")";
     }
     case Type::Kind::Var:
-      return std::string("'") + char('a' + (t->var % 26));
+      // A user-written variable prints under the name the signature gave
+      // it; an anonymous one (a freshened primitive variable) gets a
+      // letter, so a diagnostic still reads 'a -> 'a rather than '?.
+      if (!t->varName.empty()) return "'" + t->varName;
+      return std::string("'") + char('a' + (t->var < 0 ? -t->var : t->var) % 26);
   }
   return "?";
 }
@@ -166,25 +221,31 @@ bool unify(const TypePtr& sig, const TypePtr& concrete, Subst& subst) {
     auto it = subst.find(concrete->var);
     if (it != subst.end()) return unify(sig, it->second, subst);
   }
-  if (sig->kind == Type::Kind::Var && concrete->kind == Type::Kind::Var &&
-      sig->var == concrete->var)
-    return true;
-  if (sig->kind == Type::Kind::Var) {
+  const bool sigVar = sig->kind == Type::Kind::Var;
+  const bool concreteVar = concrete->kind == Type::Kind::Var;
+  if (sigVar && concreteVar && sig->var == concrete->var) return true;
+  // Only free variables are solved. A rigid one is a type the *caller*
+  // chooses, so the definition that declares it may not pin it down: it
+  // matches itself (above), absorbs a free variable (below, from whichever
+  // side that variable is on), and fails against everything else.
+  if (sigVar && sig->var >= 0) {
     if (occurs(sig->var, concrete, subst)) return false;
     subst[sig->var] = concrete;
     return true;
   }
-  if (concrete->kind == Type::Kind::Var) {
+  if (concreteVar && concrete->var >= 0) {
     if (occurs(concrete->var, sig, subst)) return false;
     subst[concrete->var] = sig;
     return true;
   }
+  if (sigVar || concreteVar) return false;  // a rigid var vs. anything else
   if (sig->kind != concrete->kind) return false;
   switch (sig->kind) {
     case Type::Kind::Scalar:
     case Type::Kind::Vector:
     case Type::Kind::Timestamp:
     case Type::Kind::String:
+    case Type::Kind::Bool:
     case Type::Kind::Unit:
       return true;
     case Type::Kind::Signal:

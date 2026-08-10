@@ -79,3 +79,67 @@ TEST(lexer_tilde_and_pipe) {
   CHECK(toks[3].kind == Tok::Number);
   CHECK(toks[4].kind == Tok::PipeGt);
 }
+
+TEST(lexer_type_variables) {
+  DiagnosticBag diags;
+  auto toks = lex("~x:'a Signal : 'elem list", "t", diags);
+  CHECK(!diags.hasErrors());
+  CHECK(toks[0].kind == Tok::Tilde);
+  CHECK(toks[3].kind == Tok::TypeVar);
+  CHECK(toks[3].text == "a");
+  CHECK(toks[4].kind == Tok::UpIdent);
+  CHECK(toks[6].kind == Tok::TypeVar);
+  CHECK(toks[6].text == "elem");
+}
+
+TEST(lexer_quote_still_continues_an_identifier) {
+  // x' is one identifier; the quote only starts a token when it leads.
+  DiagnosticBag diags;
+  auto toks = lex("x' 'a", "t", diags);
+  CHECK(!diags.hasErrors());
+  CHECK(toks[0].kind == Tok::Ident);
+  CHECK(toks[0].text == "x'");
+  CHECK(toks[1].kind == Tok::TypeVar);
+  CHECK(toks[1].text == "a");
+}
+
+TEST(lexer_bool_keywords_and_literals) {
+  DiagnosticBag diags;
+  auto toks = lex("if true then else false", "t", diags);
+  CHECK(!diags.hasErrors());
+  CHECK(toks[0].kind == Tok::If);
+  CHECK(toks[1].kind == Tok::Bool);
+  CHECK(toks[1].num == 1.0);
+  CHECK(toks[2].kind == Tok::Then);
+  CHECK(toks[3].kind == Tok::Else);
+  CHECK(toks[4].kind == Tok::Bool);
+  CHECK(toks[4].num == 0.0);
+}
+
+TEST(lexer_comparison_and_logic_operators) {
+  DiagnosticBag diags;
+  auto toks = lex("< <= > >= == != && || |> = |", "t", diags);
+  CHECK(toks[0].kind == Tok::Lt);
+  CHECK(toks[1].kind == Tok::Le);
+  CHECK(toks[2].kind == Tok::Gt);
+  CHECK(toks[3].kind == Tok::Ge);
+  CHECK(toks[4].kind == Tok::EqEq);
+  CHECK(toks[5].kind == Tok::BangEq);
+  CHECK(toks[6].kind == Tok::AndAnd);
+  CHECK(toks[7].kind == Tok::OrOr);
+  CHECK(toks[8].kind == Tok::PipeGt);
+  CHECK(toks[9].kind == Tok::Equals);
+  // A lone '|' is still an error (only '|>' and '||' exist).
+  CHECK(diags.hasErrors());
+}
+
+TEST(lexer_arrow_and_ge_disambiguation) {
+  // '->' stays Arrow; '>=' is one token; '> =' is two.
+  DiagnosticBag diags;
+  auto toks = lex("-> >= > =", "t", diags);
+  CHECK(!diags.hasErrors());
+  CHECK(toks[0].kind == Tok::Arrow);
+  CHECK(toks[1].kind == Tok::Ge);
+  CHECK(toks[2].kind == Tok::Gt);
+  CHECK(toks[3].kind == Tok::Equals);
+}

@@ -75,7 +75,7 @@ TEST(metadata_loads_real_build_output) {
   // End-to-end contract check: what buildProject writes, the dev app reads.
   TempDir tp;
   tp.write("song.synth", R"(
-open Core
+open Core.Osc open Core.Arrange open Core.Render
 let _ = render "beep" 8000.0 (sample ((sine 440.0) * 0.5) 0s 250ms) ;;
 )");
   tp.write("build.json", projectManifest("devapp-demo", {"song.synth"}));

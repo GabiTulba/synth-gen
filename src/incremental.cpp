@@ -21,10 +21,35 @@ uint64_t hashString(const std::string& s, uint64_t seed = kFnvOffset) {
   return fnv1a(s.data(), s.size(), seed);
 }
 
-const TopDef* findDef(const CheckedModule& mod, const std::string& name) {
-  for (auto& d : mod.parsed.defs)
+// `name` is a stored (canonical) definition name: bare for top-level lets,
+// dotted for members of inline modules ("A.x" reaches into
+// `module A = struct ... end`).
+const TopDef* findDefIn(const std::vector<TopDef>& defs,
+                        const std::string& name) {
+  for (auto& d : defs) {
     if (d.kind == TopDef::Kind::Let && d.name == name) return &d;
+    if (d.kind == TopDef::Kind::ModuleDef &&
+        name.size() > d.name.size() + 1 &&
+        name.compare(0, d.name.size(), d.name) == 0 &&
+        name[d.name.size()] == '.') {
+      if (const TopDef* r = findDefIn(d.defs, name.substr(d.name.size() + 1)))
+        return r;
+    }
+  }
   return nullptr;
+}
+
+const TopDef* findDef(const CheckedModule& mod, const std::string& name) {
+  return findDefIn(mod.parsed.defs, name);
+}
+
+// Every Let at any depth (top level and inside inline modules).
+template <typename Fn>
+void forEachLet(const std::vector<TopDef>& defs, Fn&& fn) {
+  for (auto& d : defs) {
+    if (d.kind == TopDef::Kind::Let) fn(d);
+    else if (d.kind == TopDef::Kind::ModuleDef) forEachLet(d.defs, fn);
+  }
 }
 
 // Collects the top-level definitions referenced by an expression:
@@ -114,22 +139,27 @@ std::map<const TopDef*, DefStats> defGraphStats(const Program& prog) {
   std::map<const TopDef*, std::vector<const TopDef*>> edges;
 
   for (auto& mod : prog.modules) {
-    for (auto& def : mod.parsed.defs) {
-      if (def.kind != TopDef::Kind::Let) continue;
+    // The stats present the *user's* definition graph: the bundled Core
+    // library's declarations (and edges into them) stay out, exactly as
+    // primitives always have. Content hashing (defClosureHash) still
+    // covers them.
+    if (mod.libName == "Core") continue;
+    forEachLet(mod.parsed.defs, [&](const TopDef& def) {
       DefStats& st = stats[&def];
       st.mod = &mod;
       st.def = &def;
-      if (!def.body) continue;
+      if (!def.body) return;
       std::set<std::string> params;
       for (auto& p : def.params) params.insert(p.name);
       DepMap deps;
       collectDeps(*def.body, params, mod, prog, deps);
       for (auto& [key, dep] : deps) {
         if (dep.second == &def) continue;
+        if (dep.first->libName == "Core") continue;
         st.directDeps++;
         edges[&def].push_back(dep.second);
       }
-    }
+    });
   }
   for (auto& [def, outs] : edges)
     for (const TopDef* d : outs) {

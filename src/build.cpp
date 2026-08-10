@@ -476,12 +476,24 @@ static BuildResult buildUnitImpl(const std::string& projectDir,
   for (auto& s : roots) r.inputs.push_back(s);
   Program prog = checkProject(roots, r.diags, ctxPtr);
   size_t defCount = 0;
+  size_t userModuleCount = 0;
   for (auto& m : prog.modules) {
     sourcesByPath[m.parsed.path] = m.parsed.source;
     if (std::find(roots.begin(), roots.end(), m.parsed.path) == roots.end())
       r.inputs.push_back(m.parsed.path);
-    for (auto& d : m.parsed.defs)
-      if (d.kind == TopDef::Kind::Let) defCount++;
+    // The bundled Core library rides along in every program; the log
+    // reports the *user's* modules and definitions.
+    if (m.libName == "Core") continue;
+    userModuleCount++;
+    // Count lets at any depth (inline module members included).
+    std::function<void(const std::vector<TopDef>&)> count =
+        [&](const std::vector<TopDef>& ds) {
+          for (auto& d : ds) {
+            if (d.kind == TopDef::Kind::Let) defCount++;
+            else if (d.kind == TopDef::Kind::ModuleDef) count(d.defs);
+          }
+        };
+    count(m.parsed.defs);
   }
   // Watch the build.json of every library that contributed modules: its
   // expose/dependencies entries shape this build.
@@ -492,7 +504,7 @@ static BuildResult buildUnitImpl(const std::string& projectDir,
         if (const LibraryInfo* li = registry->find(m.libName))
           r.inputs.push_back((fs::path(li->dir) / kManifestFileName).string());
   }
-  log.line("front-end: " + std::to_string(prog.modules.size()) +
+  log.line("front-end: " + std::to_string(userModuleCount) +
            " module(s), " + std::to_string(defCount) +
            " definition(s) parsed + checked in " +
            fmtSecs(BuildLog::secondsSince(frontEndStart)));
@@ -512,7 +524,8 @@ static BuildResult buildUnitImpl(const std::string& projectDir,
   auto evalStart = std::chrono::steady_clock::now();
   std::vector<RenderTarget> targets;
   std::vector<std::string> audioInputs;
-  bool evalOk = evaluateProgram(prog, targets, r.diags, &audioInputs);
+  bool evalOk = evaluateProgram(prog, targets, r.diags, &audioInputs,
+                                (buildDir / "externals").string());
   for (auto& a : audioInputs) r.inputs.push_back(a);
   log.line("evaluate: " + std::to_string(targets.size()) + " target(s), " +
            std::to_string(audioInputs.size()) + " audio input(s) in " +

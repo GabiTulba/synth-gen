@@ -2,6 +2,7 @@
 
 #include <cctype>
 #include <filesystem>
+#include <map>
 
 namespace synth {
 
@@ -22,7 +23,7 @@ class Parser {
         } else if (at(Tok::Open)) {
           defs.push_back(parseOpen());
         } else if (at(Tok::Module)) {
-          defs.push_back(parseModuleAlias());
+          defs.push_back(parseModuleDef(/*insideStruct=*/false));
         } else if (at(Tok::Let)) {
           defs.push_back(parseLet());
         } else {
@@ -47,6 +48,13 @@ class Parser {
   const std::string& file_;
   DiagnosticBag& diags_;
   size_t pos_ = 0;
+  // Type variables are scoped to one top-level definition: every 'a in its
+  // parameters, return type, lambda parameters and local annotations is the
+  // same variable, and the next definition starts over. Ids stay unique
+  // file-wide anyway (nextTypeVarSeq_ never resets) so a stored signature
+  // can never be confused with another definition's.
+  std::map<std::string, TypePtr> typeVars_;
+  int nextTypeVarSeq_ = 0;
 
   const Token& peek(int ahead = 0) const {
     size_t i = pos_ + ahead;
@@ -104,14 +112,35 @@ class Parser {
     return d;
   }
 
-  // module Alias = Dotted.Path [;;]
-  TopDef parseModuleAlias() {
+  // module N = struct <defs> end [;;]   (an inline module definition)
+  // module Alias = Dotted.Path [;;]     (a module alias; top level only)
+  // `struct` and `end` are contextual: they lex as ordinary identifiers
+  // (like `list` and `unit`) and only mean anything right here, so
+  // existing bindings named `end` keep working.
+  TopDef parseModuleDef(bool insideStruct) {
+    Span lo = advance().span;  // 'module'
+    const Token& name = expect(Tok::UpIdent, "module name");
+    expect(Tok::Equals, "'=' after module name");
+    if (at(Tok::Ident) && peek().text == "struct") {
+      advance();  // 'struct'
+      TopDef d{};
+      d.kind = TopDef::Kind::ModuleDef;
+      d.name = name.text;
+      d.defs = parseStructBody();
+      if (!(at(Tok::Ident) && peek().text == "end"))
+        fail(peek().span,
+             "expected 'end' to close 'module " + d.name + " = struct'");
+      const Token& end = advance();
+      d.span = {lo.lo, end.span.hi};
+      if (at(Tok::SemiSemi)) advance();  // optional ';;'
+      return d;
+    }
+    if (insideStruct)
+      fail(name.span,
+           "module aliases are only allowed at the top level of a file");
     TopDef d{};
     d.kind = TopDef::Kind::ModuleAlias;
-    Span lo = advance().span;  // 'module'
-    const Token& name = expect(Tok::UpIdent, "module alias name");
     d.name = name.text;
-    expect(Tok::Equals, "'=' after module alias name");
     uint32_t hi = name.span.hi;
     d.moduleName = parseModulePath(hi);
     d.span = {lo.lo, hi};
@@ -119,10 +148,45 @@ class Parser {
     return d;
   }
 
+  // The defs between `struct` and `end`: lets, opens (scoped to the
+  // module), and nested module definitions. Imports are file-scoped by
+  // design and stay at the top level.
+  std::vector<TopDef> parseStructBody() {
+    std::vector<TopDef> defs;
+    while (!at(Tok::Eof) && !(at(Tok::Ident) && peek().text == "end")) {
+      try {
+        if (at(Tok::Import)) {
+          fail(peek().span, "'import' is not allowed inside a module "
+                            "(imports are file-scoped; move it to the top "
+                            "level)");
+        } else if (at(Tok::Open)) {
+          defs.push_back(parseOpen());
+        } else if (at(Tok::Module)) {
+          defs.push_back(parseModuleDef(/*insideStruct=*/true));
+        } else if (at(Tok::Let)) {
+          defs.push_back(parseLet());
+        } else {
+          fail(peek().span,
+               std::string("expected 'let', 'open', 'module' or 'end', "
+                           "found ") + tokenName(peek().kind));
+        }
+      } catch (const Recover&) {
+        // Recover within the body: skip past the next ';;' but never past
+        // the module's own 'end'.
+        while (!at(Tok::Eof) && !at(Tok::SemiSemi) &&
+               !(at(Tok::Ident) && peek().text == "end"))
+          pos_++;
+        if (at(Tok::SemiSemi)) pos_++;
+      }
+    }
+    return defs;
+  }
+
   TopDef parseLet() {
     TopDef d{};
     d.kind = TopDef::Kind::Let;
     Span lo = advance().span;  // 'let'
+    typeVars_.clear();         // 'a is scoped to this definition
     const Token& name = expect(Tok::Ident, "binding name");
     d.name = name.text;
     parseParams(d.params);
@@ -134,7 +198,22 @@ class Parser {
                         "except 'let _' must be annotated)");
     }
     expect(Tok::Equals, "'='");
-    d.body = parseExpr();
+    // `external "file.cpp"` as the *entire* body binds the definition to
+    // a C++ implementation. `external` is contextual (an ordinary
+    // identifier elsewhere); the string literal after it is what commits
+    // this parse, so a binding named `external` still works - except
+    // applied directly to a string literal, which needs parentheses.
+    if (at(Tok::Ident) && peek().text == "external" &&
+        peek(1).kind == Tok::String) {
+      const Token& kw = advance();
+      const Token& file = advance();
+      auto ext = std::make_unique<Expr>(Expr::Kind::External,
+                                        Span{kw.span.lo, file.span.hi});
+      ext->str = file.text;
+      d.body = std::move(ext);
+    } else {
+      d.body = parseExpr();
+    }
     const Token& end = expect(Tok::SemiSemi, "';;' to end definition");
     d.span = {lo.lo, end.span.hi};
     return d;
@@ -200,13 +279,25 @@ class Parser {
     }
   }
 
+  // 'a: the same name is the same variable throughout one top-level
+  // definition, so `~x:'a ... : 'a` ties the result to the argument.
+  TypePtr typeVarFor(const std::string& name) {
+    auto it = typeVars_.find(name);
+    if (it != typeVars_.end()) return it->second;
+    TypePtr t = tRigidVar(nextTypeVarSeq_++, name);
+    typeVars_.emplace(name, t);
+    return t;
+  }
+
   TypePtr parseAtomType() {
+    if (at(Tok::TypeVar)) return typeVarFor(advance().text);
     if (at(Tok::UpIdent)) {
       const Token& t = advance();
       if (t.text == "Scalar") return tScalar();
       if (t.text == "Vector") return tVector();
       if (t.text == "Timestamp") return tTimestamp();
       if (t.text == "String") return tString();
+      if (t.text == "Bool") return tBool();
       fail(t.span, "unknown type '" + t.text + "'");
     }
     if (at(Tok::Ident) && peek().text == "unit") {
@@ -237,7 +328,29 @@ class Parser {
   ExprPtr parseExpr() {
     if (at(Tok::Let)) return parseLetIn();
     if (at(Tok::Fun)) return parseLambda();
+    if (at(Tok::If)) return parseIf();
     return parsePipe();
+  }
+
+  // Conditional: if cond then e1 else e2 - a build-time expression, so
+  // both branches are required and must have the same type. Branches
+  // extend maximally right like lambda bodies; parenthesize an `if` used
+  // as an argument or on either side of an operator.
+  ExprPtr parseIf() {
+    Span lo = advance().span;  // 'if'
+    ExprPtr cond = parseExpr();
+    expect(Tok::Then, "'then' after the condition");
+    ExprPtr thenE = parseExpr();
+    expect(Tok::Else,
+           "'else' (if/then/else is an expression: both branches are "
+           "required)");
+    ExprPtr elseE = parseExpr();
+    auto e = std::make_unique<Expr>(Expr::Kind::If,
+                                    Span{lo.lo, elseE->span.hi});
+    e->items.push_back(std::move(cond));
+    e->items.push_back(std::move(thenE));
+    e->items.push_back(std::move(elseE));
+    return e;
   }
 
   // Anonymous function: fun param+ -> body. Params are annotated exactly
@@ -284,7 +397,7 @@ class Parser {
   // (this also lets pipes feed label-curried calls without materializing
   // an intermediate closure).
   ExprPtr parsePipe() {
-    ExprPtr left = parseAdditive();
+    ExprPtr left = parseOr();
     while (at(Tok::PipeGt)) {
       advance();
       if (at(Tok::Fun))
@@ -311,6 +424,47 @@ class Parser {
       }
     }
     return left;
+  }
+
+  // `||`, then `&&`, then the comparisons sit between the pipe and
+  // arithmetic: `a + 1.0 < b && c` parses as `((a + 1.0) < b) && c`.
+  // Comparing a comparison (`a < b < c`) parses left-associatively and is
+  // rejected by the type checker (Bool has no ordering).
+  ExprPtr parseOr() {
+    ExprPtr left = parseAnd();
+    while (at(Tok::OrOr)) {
+      advance();
+      ExprPtr right = parseAnd();
+      left = mkBinOp(BinOpKind::Or, std::move(left), std::move(right));
+    }
+    return left;
+  }
+
+  ExprPtr parseAnd() {
+    ExprPtr left = parseComparison();
+    while (at(Tok::AndAnd)) {
+      advance();
+      ExprPtr right = parseComparison();
+      left = mkBinOp(BinOpKind::And, std::move(left), std::move(right));
+    }
+    return left;
+  }
+
+  ExprPtr parseComparison() {
+    ExprPtr left = parseAdditive();
+    for (;;) {
+      BinOpKind op;
+      if (at(Tok::Lt)) op = BinOpKind::Lt;
+      else if (at(Tok::Le)) op = BinOpKind::Le;
+      else if (at(Tok::Gt)) op = BinOpKind::Gt;
+      else if (at(Tok::Ge)) op = BinOpKind::Ge;
+      else if (at(Tok::EqEq)) op = BinOpKind::Eq;
+      else if (at(Tok::BangEq)) op = BinOpKind::Ne;
+      else return left;
+      advance();
+      ExprPtr right = parseAdditive();
+      left = mkBinOp(op, std::move(left), std::move(right));
+    }
   }
 
   ExprPtr parseAdditive() {
@@ -381,6 +535,7 @@ class Parser {
     switch (peek().kind) {
       case Tok::Number:
       case Tok::Time:
+      case Tok::Bool:
       case Tok::String:
       case Tok::Ident:
       case Tok::UpIdent:
@@ -404,6 +559,12 @@ class Parser {
       case Tok::Time: {
         advance();
         auto e = std::make_unique<Expr>(Expr::Kind::TimeLit, t.span);
+        e->num = t.num;
+        return e;
+      }
+      case Tok::Bool: {
+        advance();
+        auto e = std::make_unique<Expr>(Expr::Kind::BoolLit, t.span);
         e->num = t.num;
         return e;
       }

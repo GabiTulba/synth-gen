@@ -14,6 +14,14 @@
      the image across the field. *)
 
 open Core
+open Core.Osc
+open Core.Fx
+open Core.Arrange
+open Core.Render
+open Core.Io
+open Core.Time
+open Core.Sig
+open Core.Math
 
 let shape rate:Scalar : Scalar Signal =
   pm ~carrier:rate ~modulator:(constant 1.5707963) ;;

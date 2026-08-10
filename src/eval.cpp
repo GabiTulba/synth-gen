@@ -8,7 +8,8 @@
 #include <optional>
 #include <stdexcept>
 
-#include "primitives.hpp"
+#include "core/native.hpp"
+#include "external.hpp"
 #include "wav.hpp"
 
 namespace fs = std::filesystem;
@@ -17,46 +18,19 @@ namespace synth {
 
 namespace {
 
-struct EvalError : std::runtime_error {
-  using std::runtime_error::runtime_error;
-};
-
 class Interp {
  public:
   Interp(const Program& prog, std::vector<RenderTarget>& targets,
-         DiagnosticBag& diags, std::vector<std::string>* loadedFiles)
+         DiagnosticBag& diags, std::vector<std::string>* loadedFiles,
+         std::string extCacheDir)
       : prog_(prog), targets_(targets), diags_(diags),
-        loadedFiles_(loadedFiles) {}
+        loadedFiles_(loadedFiles), extCacheDir_(std::move(extCacheDir)) {}
 
   bool run() {
     bool ok = true;
     for (auto& mod : prog_.modules) {
       currentModule_ = &mod;
-      for (auto& def : mod.parsed.defs) {
-        if (def.kind != TopDef::Kind::Let) continue;
-        // Modules pulled in from dependency libraries evaluate for their
-        // values only: their `let _` render effects belong to the
-        // library's own build, not to every consumer's.
-        if (mod.external && def.name == "_") continue;
-        currentDef_ = &def;
-        try {
-          if (!def.params.empty()) {
-            // Functions are values; the body runs at call time.
-            globals_[mod.parsed.name][def.name] =
-                Value{FunV{&def, &mod, nullptr}};
-          } else {
-            Env empty;
-            Value v = eval(*def.body, empty, mod);
-            if (def.name != "_") globals_[mod.parsed.name][def.name] = v;
-          }
-        } catch (const EvalError& e) {
-          diags_.error(mod.parsed.path, def.span, e.what());
-          ok = false;
-        } catch (const EngineError& e) {
-          diags_.error(mod.parsed.path, def.span, e.what());
-          ok = false;
-        }
-      }
+      if (!evalDefs(mod, mod.parsed.defs, "")) ok = false;
     }
     return ok;
   }
@@ -70,15 +44,75 @@ class Interp {
   const CheckedModule* currentModule_ = nullptr;
   const TopDef* currentDef_ = nullptr;
   std::vector<std::string>* loadedFiles_ = nullptr;
+  std::string extCacheDir_;                        // user external .so cache
   std::map<std::string, Env> globals_;             // module -> name -> value
   std::map<std::string, SigPtr> fileCache_;        // absolute path -> signal
+  // Resolved user externals, one compile+load per definition per build.
+  std::map<const TopDef*, ExternalFn> userExternals_;
+
+  // Definitions inside `module A = struct ... end` live in the enclosing
+  // file module's globals under their dotted names ("A.x"); the checker
+  // rewrote every reference to that form, so lookup needs no new cases.
+  bool evalDefs(const CheckedModule& mod, const std::vector<TopDef>& defs,
+                const std::string& prefix) {
+    bool ok = true;
+    for (auto& def : defs) {
+      if (def.kind == TopDef::Kind::ModuleDef) {
+        if (!evalDefs(mod, def.defs, prefix + def.name + ".")) ok = false;
+        continue;
+      }
+      if (def.kind != TopDef::Kind::Let) continue;
+      // Modules pulled in from dependency libraries evaluate for their
+      // values only: their `let _` render effects belong to the
+      // library's own build, not to every consumer's.
+      if (mod.external && def.name == "_") continue;
+      currentDef_ = &def;
+      try {
+        if (!def.params.empty()) {
+          // Functions are values; the body runs at call time. An
+          // external-bodied function is a FunV like any other - full
+          // application dispatches to its implementation.
+          globals_[mod.parsed.name][prefix + def.name] =
+              Value{FunV{&def, &mod, nullptr}};
+        } else if (def.body->kind == Expr::Kind::External) {
+          // A zero-parameter external (Core's `time`) IS its value.
+          globals_[mod.parsed.name][prefix + def.name] =
+              callExternal(def, mod, mod, {});
+        } else {
+          Env empty;
+          Value v = eval(*def.body, empty, mod);
+          if (def.name != "_")
+            globals_[mod.parsed.name][prefix + def.name] = v;
+        }
+      } catch (const EvalError& e) {
+        diags_.error(mod.parsed.path, def.span, e.what());
+        ok = false;
+      } catch (const EngineError& e) {
+        diags_.error(mod.parsed.path, def.span, e.what());
+        ok = false;
+      }
+    }
+    return ok;
+  }
 
   Value eval(const Expr& e, Env& env, const CheckedModule& mod) {
     switch (e.kind) {
       case Expr::Kind::NumLit: return Value{ScalarV{e.num}};
       case Expr::Kind::TimeLit: return Value{TimeV{e.num}};
+      case Expr::Kind::BoolLit: return Value{BoolV{e.num != 0.0}};
       case Expr::Kind::StrLit: return Value{StringV{e.str}};
       case Expr::Kind::Ident: return lookup(e, env, mod);
+      case Expr::Kind::If: {
+        // Only the taken branch evaluates: the other branch's errors and
+        // render effects never fire.
+        Value cv = eval(*e.items[0], env, mod);
+        const BoolV* c = std::get_if<BoolV>(&cv.v);
+        if (!c)
+          throw EvalError(
+              "'if' condition is not a Bool at build time (a signal has "
+              "no single value to branch on)");
+        return eval(*e.items[c->v ? 1 : 2], env, mod);
+      }
       case Expr::Kind::App: {
         std::vector<std::pair<std::string, Value>> args;  // label, value
         for (size_t i = 1; i < e.items.size(); i++) {
@@ -92,6 +126,20 @@ class Interp {
         return applyValue(fn, std::move(args), mod);
       }
       case Expr::Kind::BinOp: {
+        // `&&` and `||` short-circuit: only the deciding operand runs.
+        if (e.op == BinOpKind::And || e.op == BinOpKind::Or) {
+          Value lv = eval(*e.items[0], env, mod);
+          const BoolV* lb = std::get_if<BoolV>(&lv.v);
+          if (!lb)
+            throw EvalError("'&&'/'||' operand is not a Bool at build time");
+          if (e.op == BinOpKind::And && !lb->v) return Value{BoolV{false}};
+          if (e.op == BinOpKind::Or && lb->v) return Value{BoolV{true}};
+          Value rv = eval(*e.items[1], env, mod);
+          const BoolV* rb = std::get_if<BoolV>(&rv.v);
+          if (!rb)
+            throw EvalError("'&&'/'||' operand is not a Bool at build time");
+          return Value{BoolV{rb->v}};
+        }
         Value l = eval(*e.items[0], env, mod);
         Value r = eval(*e.items[1], env, mod);
         return binop(e.op, std::move(l), std::move(r));
@@ -121,15 +169,11 @@ class Interp {
         // Capture the local environment by value; the AST is owned by the
         // Program for the whole build, so the Expr pointer stays valid.
         return Value{LambdaV{&e, &mod, std::make_shared<Env>(env), nullptr}};
+      case Expr::Kind::External:
+        // evalDefs and applyValue dispatch external bodies before eval.
+        throw EvalError("internal error: external body evaluated directly");
     }
     throw EvalError("internal error: unknown expression kind");
-  }
-
-  // Primitives are first-class values; a nullary primitive (time) IS its
-  // value rather than a function.
-  Value primValue(const PrimSig& p, const CheckedModule& mod) {
-    if (p.paramTypes.empty()) return applyPrim(p, {}, mod);
-    return Value{PrimClosureV{(int)p.id, nullptr}};
   }
 
   Value lookup(const Expr& ident, Env& env, const CheckedModule& mod) {
@@ -139,21 +183,7 @@ class Interp {
       auto& g = globals_[mod.parsed.name];
       auto gt = g.find(ident.name);
       if (gt != g.end()) return gt->second;
-      if (const PrimSig* p = findPrimitive(ident.name))
-        return primValue(*p, mod);
       throw EvalError("unbound name '" + ident.name + "' at build time");
-    }
-    // The built-in Core namespace: primitives as first-class values.
-    if (ident.moduleName == "Core") {
-      if (const PrimSig* p = findCorePrim(ident.name))
-        return primValue(*p, mod);
-      throw EvalError("'Core' has no primitive named '" + ident.name + "'");
-    }
-    if (ident.moduleName == "Core.List") {
-      if (const PrimSig* p = findCoreListPrim(ident.name))
-        return primValue(*p, mod);
-      throw EvalError("'Core.List' has no function named '" + ident.name +
-                      "'");
     }
     auto mt = globals_.find(ident.moduleName);
     if (mt == globals_.end())
@@ -173,10 +203,15 @@ class Interp {
     return applyValue(fn, std::move(labeled), mod);
   }
 
-  // Label-aware application over both user functions and primitives.
-  // Positional values fill the leftmost unbound parameters; labeled ones
-  // bind by name. Incomplete applications yield a closure carrying the
-  // bindings; complete ones evaluate.
+  // Label-aware application over user functions, lambdas, and
+  // external-bodied definitions. Positional values fill the leftmost
+  // unbound parameters; labeled ones bind by name. Incomplete
+  // applications yield a closure carrying the bindings; complete ones
+  // evaluate. `mod` is the module the application happens in: bodies
+  // evaluate in their own defining module, but an external implementation
+  // resolves relative paths (and attributes render targets) against the
+  // *calling* module - `load_mono "kick.wav"` means next to the file
+  // that wrote the string, not next to Core's lib.synth.
   Value applyValue(const Value& fn,
                    std::vector<std::pair<std::string, Value>> args,
                    const CheckedModule& mod) {
@@ -184,17 +219,10 @@ class Interp {
     std::vector<std::string> paramNames;
     const std::map<std::string, Value>* prevBound = nullptr;
     const FunV* f = std::get_if<FunV>(&fn.v);
-    const PrimClosureV* pc = std::get_if<PrimClosureV>(&fn.v);
     const LambdaV* l = std::get_if<LambdaV>(&fn.v);
-    const PrimSig* sig = nullptr;
     if (f) {
       for (auto& p : f->def->params) paramNames.push_back(p.name);
       prevBound = f->bound.get();
-    } else if (pc) {
-      sig = findPrimitiveById((PrimId)pc->primId);
-      if (!sig) throw EvalError("internal error: unknown primitive id");
-      paramNames = sig->paramNames;
-      prevBound = pc->bound.get();
     } else if (l) {
       for (auto& p : l->lam->params) paramNames.push_back(p.name);
       prevBound = l->bound.get();
@@ -224,357 +252,70 @@ class Interp {
 
     if (bound->size() < paramNames.size()) {
       if (f) return Value{FunV{f->def, f->mod, std::move(bound)}};
-      if (l) return Value{LambdaV{l->lam, l->mod, l->captured,
-                                  std::move(bound)}};
-      return Value{PrimClosureV{pc->primId, std::move(bound)}};
+      return Value{LambdaV{l->lam, l->mod, l->captured, std::move(bound)}};
     }
 
     if (f) {
+      // Fully applied. An external body has no expression to evaluate:
+      // its arguments dispatch to the bound implementation instead.
+      if (f->def->body->kind == Expr::Kind::External) {
+        std::vector<Value> ordered;
+        for (auto& name : paramNames) ordered.push_back((*bound)[name]);
+        return callExternal(*f->def, *f->mod, mod, std::move(ordered));
+      }
       Env env;
       for (auto& name : paramNames) env[name] = (*bound)[name];
       return eval(*f->def->body, env, *f->mod);
     }
-    if (l) {
-      // The captured environment plus the bound params (params shadow
-      // captures), evaluated in the lambda's defining module.
-      Env env = *l->captured;
-      for (auto& name : paramNames) env[name] = (*bound)[name];
-      return eval(*l->lam->items[0], env, *l->mod);
+    // The captured environment plus the bound params (params shadow
+    // captures), evaluated in the lambda's defining module.
+    Env env = *l->captured;
+    for (auto& name : paramNames) env[name] = (*bound)[name];
+    return eval(*l->lam->items[0], env, *l->mod);
+  }
+
+  // Dispatch an external-bodied definition. Core library declarations
+  // bind to built-in implementations (src/core/*.cpp); anything else is
+  // user C++, compiled into a cached shared object on first use.
+  // `declMod` is the module that declares the external (decides Core vs
+  // user, anchors the .cpp path); `callerMod` is where this application
+  // happens (anchors audio paths and render-target attribution).
+  Value callExternal(const TopDef& def, const CheckedModule& declMod,
+                     const CheckedModule& callerMod,
+                     std::vector<Value> args) {
+    if (declMod.libName == "Core") {
+      const native::Impl* impl = native::find(def.body->str, def.name);
+      if (!impl)
+        throw EvalError("no built-in implementation for external '" +
+                        def.name + "' (" + def.body->str + ")");
+      native::Ctx ctx;
+      ctx.apply = [this, &callerMod](const Value& fn, std::vector<Value> a) {
+        return apply(fn, std::move(a), callerMod);
+      };
+      ctx.loadAudio = [this, &callerMod](const std::string& p) {
+        return loadFile(p, callerMod);
+      };
+      ctx.targets = &targets_;
+      ctx.mod = &callerMod;
+      ctx.currentModule = currentModule_;
+      ctx.currentDef = currentDef_;
+      return impl->fn(ctx, args);
     }
-    std::vector<Value> ordered;
-    for (auto& name : paramNames) ordered.push_back((*bound)[name]);
-    return applyPrim(*sig, std::move(ordered), mod);
-  }
-
-  // --- Primitive implementations ----------------------------------------
-
-  static double scalarArg(const Value& v) { return std::get<ScalarV>(v.v).v; }
-
-  // Counts are Scalars in the language; here they must be whole,
-  // non-negative, and sane (build-time validation).
-  static int64_t wholeCount(double v, const char* prim) {
-    double rounded = std::round(v);
-    if (std::fabs(v - rounded) > 1e-9 || rounded < 0)
-      throw EvalError(std::string(prim) +
-                      ": count must be a whole non-negative number (got " +
-                      std::to_string(v) + ")");
-    if (rounded > 1e6)
-      throw EvalError(std::string(prim) + ": count " + std::to_string(v) +
-                      " is unreasonably large");
-    return (int64_t)rounded;
-  }
-  static double timeArg(const Value& v) { return std::get<TimeV>(v.v).seconds; }
-  static const std::string& strArg(const Value& v) {
-    return std::get<StringV>(v.v).s;
-  }
-  static SigPtr signalArg(const Value& v) { return std::get<SigPtr>(v.v); }
-
-  Value applyPrim(const PrimSig& p, std::vector<Value> args,
-                  const CheckedModule& mod) {
-    switch (p.id) {
-      case PrimId::Sine:
-        return Value{makeOsc(OscKind::Sine, scalarArg(args[0]))};
-      case PrimId::Saw:
-        return Value{makeOsc(OscKind::Saw, scalarArg(args[0]))};
-      case PrimId::Square:
-        return Value{makeOsc(OscKind::Square, scalarArg(args[0]))};
-      case PrimId::Noise:
-        return Value{makeNoise(scalarArg(args[0]))};
-      case PrimId::Fm:
-        return Value{makeFm(scalarArg(args[0]), signalArg(args[1]))};
-      case PrimId::Pm:
-        return Value{makePm(scalarArg(args[0]), signalArg(args[1]))};
-      case PrimId::Am:
-        return Value{makeAm(signalArg(args[0]), signalArg(args[1]),
-                            scalarArg(args[2]))};
-      case PrimId::Delay:
-        return Value{makeDelay(timeArg(args[0]), signalArg(args[1]))};
-      case PrimId::Resample:
-        return Value{makeResample(signalArg(args[0]),
-                                  fnOfTime(args[1], mod, "resample"))};
-      case PrimId::Reverb:
-        return Value{makeReverb(timeArg(args[0]), scalarArg(args[1]),
-                                scalarArg(args[2]), signalArg(args[3]))};
-      case PrimId::ExpDecay:
-        return Value{makeExpDecay(scalarArg(args[0]))};
-      case PrimId::Adsr:
-        return Value{makeAdsr(timeArg(args[0]), timeArg(args[1]),
-                              scalarArg(args[2]), timeArg(args[3]),
-                              timeArg(args[4]))};
-      case PrimId::Lowpass:
-        return Value{makeFilter(FilterKind::Lowpass, scalarArg(args[0]),
-                                signalArg(args[1]))};
-      case PrimId::Highpass:
-        return Value{makeFilter(FilterKind::Highpass, scalarArg(args[0]),
-                                signalArg(args[1]))};
-      case PrimId::HardClip:
-        return Value{makeClip(ClipKind::Hard, scalarArg(args[0]),
-                              signalArg(args[1]))};
-      case PrimId::SoftClip:
-        return Value{makeClip(ClipKind::Soft, scalarArg(args[0]),
-                              signalArg(args[1]))};
-      case PrimId::MixAll: {
-        std::vector<SigPtr> items;
-        for (auto& x : std::get<ListV>(args[0].v).items)
-          items.push_back(signalArg(x));
-        return Value{makeMix(std::move(items))};
-      }
-      case PrimId::Channels: {
-        std::vector<SigPtr> items;
-        for (auto& x : std::get<ListV>(args[0].v).items)
-          items.push_back(signalArg(x));
-        return Value{makeChannels(std::move(items))};
-      }
-      case PrimId::Sample: {
-        SampleV s;
-        s.sig = signalArg(args[0]);
-        s.from = timeArg(args[1]);
-        s.to = timeArg(args[2]);
-        if (s.from < 0 || s.to < s.from)
-          throw EvalError("sample: invalid window (from=" +
-                          std::to_string(s.from) + "s, to=" +
-                          std::to_string(s.to) + "s)");
-        return Value{std::move(s)};
-      }
-      case PrimId::Place: {
-        const SampleV& s = std::get<SampleV>(args[0].v);
-        double at = timeArg(args[1]);
-        return Value{makePlace(s.sig, s.from, s.to, at)};
-      }
-      case PrimId::PlaceMulti: {
-        const SampleV& s = std::get<SampleV>(args[0].v);
-        std::vector<SigPtr> placed;
-        for (auto& t : std::get<ListV>(args[1].v).items)
-          placed.push_back(makePlace(s.sig, s.from, s.to, timeArg(t)));
-        return Value{makeMix(std::move(placed))};
-      }
-      case PrimId::RenderVisStems: {
-        const std::string& name = strArg(args[0]);
-        double rate = scalarArg(args[1]);
-        if (name.empty())
-          throw EvalError("render_vis_stems: empty artifact name");
-        if (rate <= 0)
-          throw EvalError("render_vis_stems: sample rate must be positive");
-        RenderTarget t;
-        t.kind = RenderTarget::Kind::VisualStems;
-        t.name = name;
-        t.rate = rate;
-        for (auto& item : std::get<ListV>(args[2].v).items) {
-          const TupleV& stem = std::get<TupleV>(item.v);
-          const std::string& label = std::get<StringV>(stem.items[0].v).s;
-          if (label.empty())
-            throw EvalError("render_vis_stems: empty lane label");
-          t.stems.emplace_back(label, std::get<SampleV>(stem.items[1].v));
-        }
-        t.file = mod.parsed.path;
-        t.span = currentDef_ ? currentDef_->span : Span{};
-        t.declModule = currentModule_;
-        t.declDef = currentDef_;
-        targets_.push_back(std::move(t));
-        return Value{UnitV{}};
-      }
-      case PrimId::RenderStems: {
-        const std::string& base = strArg(args[0]);
-        double rate = scalarArg(args[1]);
-        if (base.empty()) throw EvalError("render_stems: empty base name");
-        if (rate <= 0)
-          throw EvalError("render_stems: sample rate must be positive");
-        for (auto& item : std::get<ListV>(args[2].v).items) {
-          const TupleV& stem = std::get<TupleV>(item.v);
-          const std::string& label = std::get<StringV>(stem.items[0].v).s;
-          if (label.empty())
-            throw EvalError("render_stems: empty stem label");
-          RenderTarget t;
-          t.kind = RenderTarget::Kind::Audio;
-          t.name = base + "-" + label;
-          t.rate = rate;
-          t.sample = std::get<SampleV>(stem.items[1].v);
-          t.file = mod.parsed.path;
-          t.span = currentDef_ ? currentDef_->span : Span{};
-          t.declModule = currentModule_;
-          t.declDef = currentDef_;
-          targets_.push_back(std::move(t));
-        }
-        return Value{UnitV{}};
-      }
-      case PrimId::Render:
-      case PrimId::RenderVis: {
-        RenderTarget t;
-        t.kind = p.id == PrimId::RenderVis ? RenderTarget::Kind::Visual
-                                           : RenderTarget::Kind::Audio;
-        t.name = strArg(args[0]);
-        t.rate = scalarArg(args[1]);
-        t.sample = std::get<SampleV>(args[2].v);
-        t.file = mod.parsed.path;
-        t.span = currentDef_ ? currentDef_->span : Span{};
-        t.declModule = currentModule_;
-        t.declDef = currentDef_;
-        if (t.name.empty()) throw EvalError("render: empty artifact name");
-        if (t.rate <= 0)
-          throw EvalError("render: sample rate must be positive");
-        targets_.push_back(std::move(t));
-        return Value{UnitV{}};
-      }
-      case PrimId::LoadMono: {
-        SigPtr sig = loadFile(strArg(args[0]), mod);
-        if (sig->channels() != 1)
-          throw EvalError("load_mono: '" + strArg(args[0]) + "' has " +
-                          std::to_string(sig->channels()) +
-                          " channels (expected 1); use load_multi");
-        return Value{sig};
-      }
-      case PrimId::LoadMulti:
-        return Value{loadFile(strArg(args[0]), mod)};
-      case PrimId::Map: {
-        ListV out;
-        const Value& f = args[0];
-        for (auto& x : std::get<ListV>(args[1].v).items)
-          out.items.push_back(apply(f, {x}, mod));
-        return Value{std::move(out)};
-      }
-      case PrimId::Fold: {
-        const Value& f = args[0];
-        Value acc = args[1];
-        for (auto& x : std::get<ListV>(args[2].v).items)
-          acc = apply(f, {acc, x}, mod);
-        return acc;
-      }
-      case PrimId::ListInit: {
-        int64_t n = wholeCount(scalarArg(args[0]), "list_init");
-        ListV out;
-        for (int64_t i = 0; i < n; i++)
-          out.items.push_back(apply(args[1], {Value{ScalarV{(double)i}}}, mod));
-        return Value{std::move(out)};
-      }
-      case PrimId::Repeat: {
-        int64_t n = wholeCount(scalarArg(args[0]), "repeat");
-        ListV out;
-        for (int64_t i = 0; i < n; i++) out.items.push_back(args[1]);
-        return Value{std::move(out)};
-      }
-      case PrimId::TimeSteps: {
-        double start = timeArg(args[0]);
-        double step = timeArg(args[1]);
-        int64_t n = wholeCount(scalarArg(args[2]), "time_steps");
-        ListV out;
-        for (int64_t i = 0; i < n; i++)
-          out.items.push_back(Value{TimeV{start + step * (double)i}});
-        return Value{std::move(out)};
-      }
-      case PrimId::Jitter: {
-        double seed = scalarArg(args[0]);
-        double spread = timeArg(args[1]);
-        if (spread < 0) throw EvalError("jitter: negative spread");
-        ListV out;
-        int64_t i = 0;
-        for (auto& x : std::get<ListV>(args[2].v).items) {
-          double t = std::get<TimeV>(x.v).seconds;
-          // splitmix64 over (seed bits, index): integer-only, so the
-          // deltas are bit-identical on every platform.
-          uint64_t h;
-          std::memcpy(&h, &seed, sizeof h);
-          h ^= (uint64_t)i * 0x9E3779B97F4A7C15ull;
-          h ^= h >> 30; h *= 0xBF58476D1CE4E5B9ull;
-          h ^= h >> 27; h *= 0x94D049BB133111EBull;
-          h ^= h >> 31;
-          double unit = (double)(h >> 11) / 9007199254740992.0;  // [0,1)
-          double t2 = t + (unit * 2.0 - 1.0) * spread;
-          out.items.push_back(Value{TimeV{std::max(0.0, t2)}});
-          i++;
-        }
-        return Value{std::move(out)};
-      }
-      case PrimId::Constant:
-        return Value{makeConst(scalarArg(args[0]))};
-      case PrimId::ConstantMulti: {
-        std::vector<SigPtr> chans;
-        for (auto& x : std::get<ListV>(args[0].v).items)
-          chans.push_back(makeConst(scalarArg(x)));
-        if (chans.empty())
-          throw EvalError("constant_multi: needs at least one level");
-        return Value{makeChannels(std::move(chans))};
-      }
-      case PrimId::Time:
-        return Value{makeTime()};
-      case PrimId::SignalFn:
-        return Value{fnOfTime(args[0], mod, "signal")};
-      case PrimId::SignalFnMulti: {
-        std::vector<SigPtr> chans;
-        for (auto& f : std::get<ListV>(args[0].v).items)
-          chans.push_back(fnOfTime(f, mod, "signal_multi"));
-        if (chans.empty())
-          throw EvalError("signal_multi: needs at least one function");
-        return Value{makeChannels(std::move(chans))};
-      }
-      // The unit suffixes the lexer accepts on literals, as functions of
-      // a computed Scalar.
-      case PrimId::ToSec:
-        return Value{TimeV{scalarArg(args[0])}};
-      case PrimId::ToMs:
-        return Value{TimeV{scalarArg(args[0]) * 1e-3}};
-      case PrimId::ToMin:
-        return Value{TimeV{scalarArg(args[0]) * 60.0}};
-      case PrimId::Exp:
-        return math1(args[0], SigUnaryOp::Exp, "exp");
-      case PrimId::Sqrt:
-        return math1(args[0], SigUnaryOp::Sqrt, "sqrt");
-      case PrimId::Log:
-        return math1(args[0], SigUnaryOp::Log, "log");
-      case PrimId::Pow: {
-        // y is Scalar-typed, but under `signal ~f` symbolic substitution
-        // the time signal can flow into either side.
-        const Value& x = args[0];
-        const Value& y = args[1];
-        bool xSig = std::holds_alternative<SigPtr>(x.v);
-        bool ySig = std::holds_alternative<SigPtr>(y.v);
-        if (xSig || ySig)
-          return Value{makeBinOp(SigBinOp::Pow, asSignal(x), asSignal(y))};
-        if (auto* vec = std::get_if<VectorV>(&x.v)) {
-          VectorV out = *vec;
-          for (auto& c : out.v) c = std::pow(c, scalarArg(y));
-          return Value{std::move(out)};
-        }
-        if (std::holds_alternative<ScalarV>(x.v))
-          return Value{ScalarV{std::pow(scalarArg(x), scalarArg(y))}};
-        throw EvalError("pow: expected a Scalar, Vector, or Signal");
-      }
+    auto it = userExternals_.find(&def);
+    if (it == userExternals_.end()) {
+      // The C++ file resolves relative to the declaring source file and
+      // is a build input like an audio file: the daemon watches it.
+      fs::path p(def.body->str);
+      if (p.is_relative())
+        p = fs::path(declMod.parsed.path).parent_path() / p;
+      std::string resolved = p.lexically_normal().string();
+      if (loadedFiles_) loadedFiles_->push_back(resolved);
+      it = userExternals_
+               .emplace(&def,
+                        loadUserExternal(resolved, def.name, extCacheDir_))
+               .first;
     }
-    throw EvalError("internal error: unimplemented primitive");
-  }
-
-  // Elementwise math over the numeric kinds ('a in the signatures is
-  // checked here: anything non-numeric is a build-time error).
-  static Value math1(const Value& v, SigUnaryOp op, const char* prim) {
-    auto f = [op](double x) {
-      return op == SigUnaryOp::Exp    ? std::exp(x)
-             : op == SigUnaryOp::Sqrt ? std::sqrt(x)
-                                      : std::log(x);
-    };
-    if (auto* sc = std::get_if<ScalarV>(&v.v)) return Value{ScalarV{f(sc->v)}};
-    if (auto* vec = std::get_if<VectorV>(&v.v)) {
-      VectorV out = *vec;
-      for (auto& c : out.v) c = f(c);
-      return Value{std::move(out)};
-    }
-    if (auto* s = std::get_if<SigPtr>(&v.v))
-      return Value{makeUnaryOp(op, *s)};
-    throw EvalError(std::string(prim) +
-                    ": expected a Scalar, Vector, or Signal");
-  }
-
-  // `signal ~f`: apply the Scalar -> Scalar function symbolically to the
-  // time ramp. Arithmetic and the math primitives lift pointwise, so the
-  // whole body becomes one signal graph; a constant-valued function
-  // degenerates to a constant signal via asSignal.
-  SigPtr fnOfTime(const Value& f, const CheckedModule& mod,
-                  const char* prim) {
-    Value r = apply(f, {Value{makeTime()}}, mod);
-    if (std::holds_alternative<SigPtr>(r.v) ||
-        std::holds_alternative<ScalarV>(r.v))
-      return asSignal(r);
-    throw EvalError(std::string(prim) +
-                    ": the function must produce a Scalar from the time "
-                    "argument");
+    return it->second(args);
   }
 
   // Audio file paths resolve relative to the source file that mentions them;
@@ -613,8 +354,8 @@ class Interp {
       case BinOpKind::Sub: return a - b;
       case BinOpKind::Mul: return a * b;
       case BinOpKind::Div: return a / b;
+      default: return 0;  // comparisons/logic never reach arith
     }
-    return 0;
   }
 
   static SigBinOp toSigOp(BinOpKind op) {
@@ -623,11 +364,52 @@ class Interp {
       case BinOpKind::Sub: return SigBinOp::Sub;
       case BinOpKind::Mul: return SigBinOp::Mul;
       case BinOpKind::Div: return SigBinOp::Div;
+      default: return SigBinOp::Add;  // unreachable (see binop)
     }
-    return SigBinOp::Add;
+  }
+
+  static bool isCmp(BinOpKind op) {
+    switch (op) {
+      case BinOpKind::Lt:
+      case BinOpKind::Le:
+      case BinOpKind::Gt:
+      case BinOpKind::Ge:
+      case BinOpKind::Eq:
+      case BinOpKind::Ne:
+        return true;
+      default:
+        return false;
+    }
+  }
+
+  static bool cmp(BinOpKind op, double a, double b) {
+    switch (op) {
+      case BinOpKind::Lt: return a < b;
+      case BinOpKind::Le: return a <= b;
+      case BinOpKind::Gt: return a > b;
+      case BinOpKind::Ge: return a >= b;
+      case BinOpKind::Eq: return a == b;
+      case BinOpKind::Ne: return a != b;
+      default: return false;
+    }
   }
 
   Value binop(BinOpKind op, Value l, Value r) {
+    if (isCmp(op)) {
+      // Two Scalars or two Timestamps (checker-enforced). Under
+      // `signal ~f` symbolic substitution the time signal can arrive
+      // here instead; that is a build-time error - a signal has no
+      // single value to compare.
+      if (auto* a = std::get_if<ScalarV>(&l.v))
+        if (auto* b = std::get_if<ScalarV>(&r.v))
+          return Value{BoolV{cmp(op, a->v, b->v)}};
+      if (auto* a = std::get_if<TimeV>(&l.v))
+        if (auto* b = std::get_if<TimeV>(&r.v))
+          return Value{BoolV{cmp(op, a->seconds, b->seconds)}};
+      throw EvalError(
+          "comparison needs two Scalars or two Timestamps at build time "
+          "(a signal cannot be compared sample-wise)");
+    }
     bool lSig = std::holds_alternative<SigPtr>(l.v);
     bool rSig = std::holds_alternative<SigPtr>(r.v);
     if (lSig || rSig)
@@ -667,8 +449,9 @@ class Interp {
 
 bool evaluateProgram(const Program& prog, std::vector<RenderTarget>& targets,
                      DiagnosticBag& diags,
-                     std::vector<std::string>* loadedFiles) {
-  return Interp(prog, targets, diags, loadedFiles).run();
+                     std::vector<std::string>* loadedFiles,
+                     const std::string& externalCacheDir) {
+  return Interp(prog, targets, diags, loadedFiles, externalCacheDir).run();
 }
 
 }  // namespace synth

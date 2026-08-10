@@ -11,7 +11,6 @@
 
 #include "lexer.hpp"
 #include "parser.hpp"
-#include "primitives.hpp"
 
 namespace fs = std::filesystem;
 
@@ -43,50 +42,104 @@ class ModuleChecker {
       : mod_(mod), prog_(prog), diags_(diags) {}
 
   void run() {
-    // Walk definitions in order: opens and module aliases are
-    // position-ordered (they affect only later definitions, and later
-    // binders shadow earlier ones); imports are file-scoped and were
-    // wired into moduleScope at load time.
-    for (auto& def : mod_.parsed.defs) {
-      switch (def.kind) {
-        case TopDef::Kind::Import:
-          break;
-        case TopDef::Kind::Open:
-          applyOpen(def);
-          break;
-        case TopDef::Kind::ModuleAlias:
-          applyAlias(def);
-          break;
-        case TopDef::Kind::Let: {
-          checkDef(def);
-          // A definition shadows any previously opened name.
-          auto dt = mod_.defTypes.find(def.name);
-          if (dt != mod_.defTypes.end())
-            topScope_[def.name] = {dt->second, ""};
-          break;
-        }
-      }
-    }
+    frames_.emplace_back();  // the file-level scope
+    checkDefs(mod_.parsed.defs, "");
   }
 
  private:
   CheckedModule& mod_;
   const Program& prog_;
   DiagnosticBag& diags_;
-  // The position-ordered top-level value scope: own definitions and names
-  // brought in by `open File`, later binders shadowing earlier ones. The
-  // string is the canonical module id of an opened name ("" = own def).
-  std::map<std::string, std::pair<TypePtr, std::string>> topScope_;
-  // Whether `open Core` / `open Core.List` appeared (position-ordered):
-  // primitives resolve unqualified only under these; qualified Core.name
-  // and Core.List.name always work.
-  bool coreOpen_ = false;
-  bool coreListOpen_ = false;
-  // Primitive signatures share global var objects (ids 0 and 1); every call
-  // site instantiates them with fresh ids so two polymorphic calls - or a
-  // partial application fed into another polymorphic call - can never
-  // capture each other's variables.
-  int nextFreshVar_ = 2;
+
+  // One lexical scope layer: the file's top level, or one `struct` body.
+  // Lookup runs innermost frame outward; within a frame, later writes
+  // overwrite earlier ones, which is exactly position-ordered shadowing.
+  struct ScopeVal {
+    TypePtr type;
+    std::string moduleId;    // canonical id of the module storing it;
+                             // "" = this module
+    std::string storedName;  // its key there: dotted for inline-module
+                             // members ("A.x"), bare otherwise
+  };
+  // A module name in scope: a whole file module/library (prefix empty),
+  // or an inline module - the dotted path `prefix` inside `moduleId`
+  // ("" = this module).
+  struct ModRef {
+    std::string moduleId;
+    std::string prefix;
+  };
+  struct Frame {
+    std::map<std::string, ScopeVal> values;
+    std::map<std::string, ModRef> modules;
+  };
+  std::vector<Frame> frames_;
+
+  const ScopeVal* lookupValue(const std::string& name) const {
+    for (auto it = frames_.rbegin(); it != frames_.rend(); ++it) {
+      auto v = it->values.find(name);
+      if (v != it->values.end()) return &v->second;
+    }
+    return nullptr;
+  }
+
+  // Walk definitions in order: opens and module aliases are
+  // position-ordered (they affect only later definitions, and later
+  // binders shadow earlier ones); imports are file-scoped and were wired
+  // into moduleScope at load time. An inline module's body checks under a
+  // nested frame, so its opens and sibling bindings end at its `end`.
+  void checkDefs(std::vector<TopDef>& defs, const std::string& prefix) {
+    for (auto& def : defs) {
+      switch (def.kind) {
+        case TopDef::Kind::Import: {
+          // Imports are position-ordered binders like everything else:
+          // re-binding the imported root name at this spot lets
+          // `import Fx` shadow an earlier open's same-named inline
+          // module (say Core.Fx), and later binders shadow the import.
+          std::string first =
+              def.moduleName.substr(0, def.moduleName.find('.'));
+          auto ms = mod_.moduleScope.find(first);
+          if (ms != mod_.moduleScope.end())
+            frames_.back().modules[first] = {ms->second, ""};
+          break;
+        }
+        case TopDef::Kind::Open:
+          applyOpen(def);
+          break;
+        case TopDef::Kind::ModuleAlias:
+          applyAlias(def);
+          break;
+        case TopDef::Kind::ModuleDef: {
+          std::string full = prefix + def.name;
+          if (!mod_.inlineModules.insert(full).second) {
+            diags_.error(mod_.parsed.path, def.span,
+                         "duplicate definition of module '" + full + "'");
+            break;
+          }
+          // The name is visible in the scope that declares the module
+          // (from here on); the body gets its own frame and prefix.
+          frames_.back().modules[def.name] = {"", full};
+          frames_.emplace_back();
+          checkDefs(def.defs, full + ".");
+          frames_.pop_back();
+          break;
+        }
+        case TopDef::Kind::Let: {
+          checkDef(def, prefix);
+          // A definition shadows any previously opened name.
+          auto dt = mod_.defTypes.find(prefix + def.name);
+          if (dt != mod_.defTypes.end())
+            frames_.back().values[def.name] = {dt->second, "", dt->first};
+          break;
+        }
+      }
+    }
+  }
+  // Signature variables ('a) are parser-assigned rigid ids (negative);
+  // every use site instantiates a stored signature with fresh
+  // non-negative ids so two polymorphic calls - or a partial application
+  // fed into another polymorphic call - can never capture each other's
+  // variables.
+  int nextFreshVar_ = 0;
 
   struct Abort {};  // stop checking the current definition
 
@@ -95,13 +148,26 @@ class ModuleChecker {
     throw Abort{};
   }
 
-  void checkDef(TopDef& def) {
+  void checkDef(TopDef& def, const std::string& prefix) {
+    // Inside `module A = struct`, `x` is stored under "A.x": one flat
+    // per-file map, with the dotted path as the canonical name.
+    const std::string stored = prefix + def.name;
     try {
       std::map<std::string, TypePtr> env;
       for (auto& p : def.params) {
         if (env.count(p.name))
           fail(p.span, "duplicate parameter '" + p.name + "'");
         env[p.name] = p.type;
+      }
+      if (def.retType) checkResultVarsAreBound(def);
+      if (def.body->kind == Expr::Kind::External) {
+        // No body to check: the annotation IS the type.
+        checkExternal(def);
+        if (mod_.defTypes.count(stored))
+          fail(def.span, "duplicate definition of '" + stored + "'");
+        mod_.defTypes[stored] =
+            def.params.empty() ? def.retType : defFunType(def);
+        return;
       }
       TypePtr bodyType = check(*def.body, env);
       if (def.name == "_") {
@@ -114,10 +180,12 @@ class ModuleChecker {
         return;
       }
       if (!def.retType) fail(def.span, "missing return type annotation");
-      // A partial application of a polymorphic primitive leaves type
-      // variables in the body type; the declared annotation resolves them.
+      // A partial application of a polymorphic primitive leaves free type
+      // variables in the body type, which the declared annotation resolves;
+      // a body built from this definition's own 'a carries rigid ones,
+      // which unify only against the same variable in the annotation.
       bool matches;
-      if (containsVar(bodyType)) {
+      if (containsAnyVar(bodyType)) {
         Subst subst;
         matches = unify(bodyType, def.retType, subst);
       } else {
@@ -127,17 +195,70 @@ class ModuleChecker {
         fail(def.body->span, "body has type " + typeName(bodyType) +
                                  " but the signature declares " +
                                  typeName(def.retType));
-      if (mod_.defTypes.count(def.name))
-        fail(def.span, "duplicate definition of '" + def.name + "'");
-      mod_.defTypes[def.name] = def.params.empty() ? def.retType
-                                                   : defFunType(def);
+      if (mod_.defTypes.count(stored))
+        fail(def.span, "duplicate definition of '" + stored + "'");
+      mod_.defTypes[stored] = def.params.empty() ? def.retType
+                                                 : defFunType(def);
     } catch (const Abort&) {
       // Diagnostic already recorded; give the binding its declared type so
       // later definitions don't cascade "unknown name" errors.
-      if (def.name != "_" && def.retType && !mod_.defTypes.count(def.name)) {
-        mod_.defTypes[def.name] =
+      if (def.name != "_" && def.retType && !mod_.defTypes.count(stored)) {
+        mod_.defTypes[stored] =
             def.params.empty() ? def.retType : defFunType(def);
       }
+    }
+  }
+
+  // let name ... = external "file.cpp". Inside the bundled Core library
+  // the file names a built-in implementation compiled into synthc;
+  // anywhere else it is user C++ compiled at build time, and only *data*
+  // crosses that boundary - signals, samples, and functions stay inside
+  // the engine - so the signature is restricted here, where the message
+  // can point at the offending annotation.
+  void checkExternal(TopDef& def) {
+    if (def.name == "_")
+      fail(def.span, "'let _' cannot be external (an external binds a "
+                     "named value to an implementation)");
+    if (!def.retType) fail(def.span, "missing return type annotation");
+    def.body->type = def.retType;
+    if (mod_.libName == "Core") return;
+    for (char c : def.name)
+      if (!(std::isalnum((unsigned char)c) || c == '_'))
+        fail(def.span, "external '" + def.name +
+                           "': the name must form a valid C++ symbol "
+                           "(letters, digits and '_' only)");
+    for (auto& p : def.params)
+      if (!extDataType(p.type))
+        fail(p.span, "external '" + def.name + "': parameter '" + p.name +
+                         "' has type " + typeName(p.type) +
+                         ", which cannot cross the external boundary (only "
+                         "Scalar, Timestamp, Bool, String, Vector, and "
+                         "lists/tuples of those can)");
+    if (!extDataType(def.retType))
+      fail(def.span, "external '" + def.name + "': result type " +
+                         typeName(def.retType) +
+                         " cannot cross the external boundary (only Scalar, "
+                         "Timestamp, Bool, String, Vector, and lists/tuples "
+                         "of those can)");
+  }
+
+  static bool extDataType(const TypePtr& t) {
+    switch (t->kind) {
+      case Type::Kind::Scalar:
+      case Type::Kind::Timestamp:
+      case Type::Kind::String:
+      case Type::Kind::Bool:
+      case Type::Kind::Vector:
+      case Type::Kind::Unit:
+        return true;
+      case Type::Kind::List:
+        return extDataType(t->elem);
+      case Type::Kind::Tuple:
+        for (auto& x : t->items)
+          if (!extDataType(x)) return false;
+        return true;
+      default:  // Signal, Sample, Fun, Var
+        return false;
     }
   }
 
@@ -161,10 +282,39 @@ class ModuleChecker {
     switch (e.kind) {
       case Expr::Kind::NumLit: return tScalar();
       case Expr::Kind::TimeLit: return tTimestamp();
+      case Expr::Kind::BoolLit: return tBool();
       case Expr::Kind::StrLit: return tString();
       case Expr::Kind::Ident: return checkIdentIn(e, env);
+      case Expr::Kind::External:
+        // The parser only produces External as a whole definition body,
+        // which checkDef intercepts before reaching here.
+        fail(e.span, "'external' can only be the entire body of a "
+                     "top-level definition");
       case Expr::Kind::App: return checkApp(e, env);
       case Expr::Kind::BinOp: return checkBinOp(e, env);
+      case Expr::Kind::If: {
+        TypePtr condT = check(*e.items[0], env);
+        // The condition is a build-time Bool. A rigid 'a is rejected too:
+        // it stays whatever the caller picks, and the caller never
+        // promised a Bool.
+        if (condT->kind != Type::Kind::Bool)
+          fail(e.items[0]->span,
+               "the condition of 'if' must be a Bool, got " +
+                   typeName(condT));
+        TypePtr thenT = check(*e.items[1], env);
+        TypePtr elseT = check(*e.items[2], env);
+        // Same variable rule as annotations: a var-carrying branch (a
+        // partial application of a polymorphic callee) unifies against
+        // the other branch.
+        if (containsAnyVar(thenT) || containsAnyVar(elseT)) {
+          Subst subst;
+          if (unify(thenT, elseT, subst)) return applySubst(thenT, subst);
+        } else if (typeEquals(thenT, elseT)) {
+          return thenT;
+        }
+        fail(e.span, "the branches of 'if' have different types: " +
+                         typeName(thenT) + " vs " + typeName(elseT));
+      }
       case Expr::Kind::ListLit: {
         if (e.items.empty())
           fail(e.span, "cannot determine the element type of an empty list "
@@ -189,7 +339,7 @@ class ModuleChecker {
         // Same rule as top-level bindings: a var-carrying partial
         // application resolves against the annotation.
         bool ok;
-        if (containsVar(boundT)) {
+        if (containsAnyVar(boundT)) {
           Subst subst;
           ok = unify(boundT, e.declType, subst);
         } else {
@@ -244,171 +394,262 @@ class ModuleChecker {
     fail(e.span, "internal error: unknown expression kind");
   }
 
-  // Resolution order for unqualified names: parameters, then earlier
-  // definitions in this module, then primitives.
+  // Resolution order for unqualified names: parameters, then the scope
+  // frames (own/sibling definitions and opened names). Everything but a
+  // parameter or local is a stored signature, so it is instantiated here.
   TypePtr checkIdentIn(Expr& e, std::map<std::string, TypePtr>& env) {
     if (e.moduleName.empty()) {
       auto it = env.find(e.name);
       if (it != env.end()) return it->second;
-      auto ts = topScope_.find(e.name);
-      if (ts != topScope_.end()) {
-        // An opened name resolves cross-module: rewrite to its canonical
-        // module id so the evaluator and dependency hasher see a
-        // qualified reference. Own definitions stay unqualified.
-        if (!ts->second.second.empty()) e.moduleName = ts->second.second;
-        return ts->second.first;
+      if (const ScopeVal* v = lookupValue(e.name)) {
+        // Resolutions rewrite to canonical form - the module that stores
+        // the definition plus its stored (dotted) name - so the evaluator
+        // and dependency hasher see one stable identity regardless of
+        // surface spelling (open, sibling shorthand inside a struct, ...).
+        if (!v->moduleId.empty()) e.moduleName = v->moduleId;
+        e.name = v->storedName;
+        return instantiate(v->type);
       }
-      // Primitives live in the built-in Core namespace: reachable
-      // unqualified only under `open Core` / `open Core.List`.
-      if (coreOpen_) {
-        if (const PrimSig* p = findCorePrim(e.name))
-          return p->paramTypes.empty()
-                     ? p->retType
-                     : tFun(p->paramTypes, p->paramNames, p->retType);
+      // Not in scope. If the bundled Core library has it (in some
+      // submodule), say exactly how to reach it.
+      if (const CheckedModule* core = prog_.find("Core")) {
+        std::string suffix = "." + e.name;
+        for (auto& [stored, type] : core->defTypes) {
+          if (stored.size() <= suffix.size() ||
+              stored.compare(stored.size() - suffix.size(), suffix.size(),
+                             suffix) != 0)
+            continue;
+          std::string sub = stored.substr(0, stored.size() - suffix.size());
+          fail(e.span, "unknown name '" + e.name + "' (a Core primitive: "
+                           "'open Core." + sub + "', or 'import Core' and "
+                           "write Core." + stored + ")");
+        }
       }
-      if (coreListOpen_) {
-        if (const PrimSig* p = findCoreListPrim(e.name))
-          return p->paramTypes.empty()
-                     ? p->retType
-                     : tFun(p->paramTypes, p->paramNames, p->retType);
-      }
-      if (findCorePrim(e.name))
-        fail(e.span, "unknown name '" + e.name +
-                         "' (a Core primitive: add 'open Core' or write "
-                         "Core." + e.name + ")");
-      if (findCoreListPrim(e.name) || findPrimitive(e.name))
-        fail(e.span, "unknown name '" + e.name +
-                         "' (a Core.List function: 'open Core' + List." +
-                         (e.name == "list_init" ? "init" : e.name) +
-                         ", or 'open Core.List')");
       fail(e.span, "unknown name '" + e.name + "'");
     }
-    std::string canonical = resolveModuleRef(e.moduleName, e.span);
+    ModRef r = resolveModulePath(e.moduleName, e.span);
+    if (!r.prefix.empty()) {
+      // A member of an inline module: stored under its dotted name in
+      // whichever file module hosts it (possibly this one).
+      const CheckedModule* host = &mod_;
+      if (!r.moduleId.empty()) {
+        host = prog_.find(r.moduleId);
+        if (!host)
+          fail(e.span, "module '" + r.moduleId + "' was not checked");
+      }
+      std::string stored = r.prefix + "." + e.name;
+      auto dt = host->defTypes.find(stored);
+      if (dt == host->defTypes.end())
+        fail(e.span, "module '" + e.moduleName +
+                         "' has no definition named '" + e.name + "'");
+      e.moduleName = r.moduleId;  // "" = this module's own globals
+      e.name = stored;
+      return instantiate(dt->second);
+    }
+    std::string canonical = r.moduleId;
     // Rewrite to the canonical id so the evaluator and the incremental
     // dependency hasher see one stable module identity regardless of the
     // surface spelling (short name, library path, open, alias).
     e.moduleName = canonical;
-    if (canonical == "Core") {
-      const PrimSig* p = findCorePrim(e.name);
-      if (!p)
-        fail(e.span, "'Core' has no primitive named '" + e.name + "'");
-      return p->paramTypes.empty()
-                     ? p->retType
-                     : tFun(p->paramTypes, p->paramNames, p->retType);
-    }
-    if (canonical == "Core.List") {
-      const PrimSig* p = findCoreListPrim(e.name);
-      if (!p)
-        fail(e.span, "'Core.List' has no function named '" + e.name + "'");
-      return p->paramTypes.empty()
-                     ? p->retType
-                     : tFun(p->paramTypes, p->paramNames, p->retType);
-    }
     const CheckedModule* m = prog_.find(canonical);
     if (!m) fail(e.span, "module '" + canonical + "' was not checked");
     auto it = m->defTypes.find(e.name);
     if (it == m->defTypes.end())
       fail(e.span, "module '" + canonical + "' has no definition named '" +
                        e.name + "'");
-    return it->second;
+    return instantiate(it->second);
   }
 
-  // open M: bring M's definitions into the unqualified value scope
-  // (shadowing earlier same-named binders) and its public module bindings
-  // into module scope. For a library that is exactly the right thing:
-  // `open Basic` opens Basic's lib.synth, so its re-exported values are
-  // bare and `Keys.strike` works for every module it binds.
+  // open M: bring M's definitions into the unqualified value scope of the
+  // *current frame* (shadowing earlier same-named binders, ending with the
+  // enclosing struct) and its public module bindings into module scope.
+  // For a library that is exactly the right thing: `open Basic` opens
+  // Basic's lib.synth, so its re-exported values are bare and
+  // `Keys.strike` works for every module it binds. Opening an inline
+  // module brings its immediate members and sub-modules into scope.
   void applyOpen(const TopDef& def) {
     try {
-      const std::string& surface = def.moduleName;
-      // The built-in Core namespace: `open Core` makes primitives
-      // callable bare and its List submodule reachable as `List`;
-      // `open Core.List` makes the list functions callable bare.
-      std::string builtin = tryResolveModuleRef(surface, def.span);
-      if (builtin == "Core") {
-        coreOpen_ = true;
-        mod_.moduleScope["List"] = "Core.List";
+      ModRef r =
+          resolveModulePath(def.moduleName, def.span, /*mentionTarget=*/true);
+      // Opening also (re)binds the opened module's own name at this
+      // position: after `open Fx`, `Fx.x` means the module just opened,
+      // whatever earlier binders said.
+      std::vector<std::string> segs = splitPath(def.moduleName);
+      frames_.back().modules[segs.back()] = r;
+      const CheckedModule* host = &mod_;
+      if (!r.moduleId.empty()) {
+        host = prog_.find(r.moduleId);
+        if (!host)
+          fail(def.span, "module '" + r.moduleId + "' was not checked");
+      }
+      Frame& frame = frames_.back();
+      if (!r.prefix.empty()) {
+        // An inline module: its immediate values become bare names, its
+        // immediate sub-modules become bare module names.
+        std::string pre = r.prefix + ".";
+        for (auto& [name, type] : host->defTypes)
+          if (name.rfind(pre, 0) == 0 &&
+              name.find('.', pre.size()) == std::string::npos)
+            frame.values[name.substr(pre.size())] = {type, r.moduleId, name};
+        for (auto& p : host->inlineModules)
+          if (p.rfind(pre, 0) == 0 &&
+              p.find('.', pre.size()) == std::string::npos)
+            frame.modules[p.substr(pre.size())] = {r.moduleId, p};
         return;
       }
-      if (builtin == "Core.List") {
-        coreListOpen_ = true;
-        return;
+      for (auto& [name, type] : host->defTypes) {
+        // Dotted names belong to the module's inline modules; those come
+        // along as module names below, not as bare values.
+        if (name.find('.') != std::string::npos) continue;
+        frame.values[name] = {type, r.moduleId, name};
       }
-      std::string canonical = resolveModuleRef(surface, def.span);
-      const CheckedModule* m = prog_.find(canonical);
-      if (!m) fail(def.span, "module '" + canonical + "' was not checked");
-      for (auto& [name, type] : m->defTypes)
-        topScope_[name] = {type, canonical};
-      for (auto& [name, target] : m->exportedModules)
-        mod_.moduleScope[name] = target;
+      for (auto& p : host->inlineModules)
+        if (p.find('.') == std::string::npos)
+          frame.modules[p] = {r.moduleId, p};
+      for (auto& [name, target] : host->exportedModules)
+        frame.modules[name] = {target, ""};
     } catch (const Abort&) {
       // Diagnostic recorded; later defs check against the scope so far.
     }
   }
 
   // module Alias = Path: bind (or override) a module name. The target may
-  // be a file module, a library, or an earlier alias - anything spelled in
-  // module scope. The binding is also this module's public surface: in a
-  // library's lib.synth, `module Keys = Keys` is what exposes Basic.Keys.
+  // be a file module, a library, an earlier alias, or an inline module
+  // (`module L = C.List`). A whole-module binding is also this module's
+  // public surface: in a library's lib.synth, `module Keys = Keys` is
+  // what exposes Basic.Keys. An inline-module alias stays scope-local -
+  // libraries publish whole modules, and inline members travel with them
+  // under their dotted names.
   void applyAlias(const TopDef& def) {
     try {
-      std::string canonical = resolveModuleRef(def.moduleName, def.span);
-      mod_.moduleScope[def.name] = canonical;
-      mod_.exportedModules[def.name] = canonical;
+      ModRef r =
+          resolveModulePath(def.moduleName, def.span, /*mentionTarget=*/true);
+      frames_.back().modules[def.name] = r;
+      if (r.prefix.empty()) {
+        mod_.moduleScope[def.name] = r.moduleId;
+        mod_.exportedModules[def.name] = r.moduleId;
+      }
     } catch (const Abort&) {
       // Diagnostic recorded.
     }
   }
 
-  // Resolve a surface module qualifier ("Keys", "Basic.Keys", "Core",
-  // an alias...) to a canonical module id, or "" when nothing matches.
-  std::string tryResolveModuleRef(const std::string& surface, Span span) {
-    auto ms = mod_.moduleScope.find(surface);
-    if (ms != mod_.moduleScope.end()) return ms->second;
-    // The built-in Core namespace is always in scope (unless shadowed by
-    // an alias above).
-    if (surface == "Core") return "Core";
-    if (surface == "Core.List") return "Core.List";
-    size_t dot = surface.find('.');
-    if (dot != std::string::npos) {
-      std::string first = surface.substr(0, dot);
-      std::string rest = surface.substr(dot + 1);
-      if (rest.find('.') != std::string::npos) return {};
-      // An alias of Core composes with its List submodule (C.List).
-      auto cs = mod_.moduleScope.find(first);
-      if (cs != mod_.moduleScope.end() && cs->second == "Core" &&
-          rest == "List")
-        return "Core.List";
-      // "Lib.File": the qualifier names a module in scope (a library, via
-      // its lib.synth, or an alias of one) and `rest` must be one of the
-      // module bindings it publishes.
-      if (cs != mod_.moduleScope.end()) {
-        const std::string& qualifier = cs->second;
-        if (const CheckedModule* m = prog_.find(qualifier)) {
-          auto ex = m->exportedModules.find(rest);
-          if (ex != m->exportedModules.end()) return ex->second;
-          // A library's interface module carries the library's own name;
-          // a missing binding there is an exposure problem, not a typo.
-          if (m->libName == qualifier)
-            fail(span, "module '" + qualifier + "." + rest +
-                           "' is not exposed by library '" + qualifier +
-                           "' (add 'module " + rest + " = " + rest +
-                           " ;;' to its " + kLibraryInterfaceFile + ")");
-          fail(span, "module '" + qualifier + "' has no module named '" +
-                         rest + "'");
-        }
+  static std::vector<std::string> splitPath(const std::string& s) {
+    std::vector<std::string> segs;
+    size_t start = 0;
+    for (size_t i = 0; i <= s.size(); i++)
+      if (i == s.size() || s[i] == '.') {
+        segs.push_back(s.substr(start, i - start));
+        start = i + 1;
       }
-    }
-    return {};
+    return segs;
   }
 
-  // As tryResolveModuleRef, but unresolved references fail with a
+  // Resolve a surface module path ("Keys", "Basic.Keys", "A.B", an
+  // alias, "Core", ...) to what it names: a whole file module/library
+  // (prefix empty) or an inline module inside one. The first segment
+  // resolves lexically - scope frames innermost-out, then load-time
+  // moduleScope, then the built-in Core - and each further segment
+  // descends through exported module bindings and inline modules.
+  // Returns nullopt when the first segment names nothing; hard-fails
+  // (with the most specific message) when a later segment does not
+  // resolve, since by then the user clearly meant this path.
+  std::optional<ModRef> tryResolveModulePath(const std::string& surface,
+                                             Span span,
+                                             bool mentionTarget = false) {
+    std::vector<std::string> segs = splitPath(surface);
+    ModRef cur;
+    bool found = false;
+    // The first segment resolves lexically: scope frames innermost-out
+    // (position-ordered binders - opens, aliases, inline modules,
+    // imports), then the load-time module scope. There is no fallback
+    // for "Core": the bundled library must be brought into scope like
+    // any other (`import Core` / `open Core` / `open Core.X`).
+    //
+    // Exception: when resolving an open/alias *target* (mentionTarget),
+    // the load-time binding this very mention created takes effect at
+    // the mention's own position, so it wins over earlier frame binders
+    // - `open Core ;; open Fx` must open the Fx *library*, not Core's
+    // inline Fx module brought in one line earlier.
+    if (mentionTarget) {
+      auto ms = mod_.moduleScope.find(surface);
+      if (ms != mod_.moduleScope.end()) return ModRef{ms->second, ""};
+      auto s0 = mod_.moduleScope.find(segs[0]);
+      if (s0 != mod_.moduleScope.end()) {
+        cur = {s0->second, ""};
+        found = true;
+      }
+    }
+    for (auto it = frames_.rbegin(); !found && it != frames_.rend(); ++it) {
+      auto m = it->modules.find(segs[0]);
+      if (m != it->modules.end()) {
+        cur = m->second;
+        found = true;
+      }
+    }
+    if (!found) {
+      // Dotted *surface* keys bound at load time ("Basic.Keys") match
+      // as a whole, as before inline modules existed.
+      auto ms = mod_.moduleScope.find(surface);
+      if (ms != mod_.moduleScope.end()) return ModRef{ms->second, ""};
+      auto s0 = mod_.moduleScope.find(segs[0]);
+      if (s0 != mod_.moduleScope.end()) {
+        cur = {s0->second, ""};
+        found = true;
+      }
+    }
+    if (!found) return std::nullopt;
+
+    for (size_t i = 1; i < segs.size(); i++) {
+      const std::string& s = segs[i];
+      if (cur.prefix.empty()) {
+        const CheckedModule* m = prog_.find(cur.moduleId);
+        if (!m) return std::nullopt;
+        auto ex = m->exportedModules.find(s);
+        if (ex != m->exportedModules.end()) {
+          cur.moduleId = ex->second;
+          continue;
+        }
+        if (m->inlineModules.count(s)) {
+          cur.prefix = s;
+          continue;
+        }
+        // A library's interface module carries the library's own name;
+        // a missing binding there is an exposure problem, not a typo.
+        if (m->libName == cur.moduleId)
+          fail(span, "module '" + cur.moduleId + "." + s +
+                         "' is not exposed by library '" + cur.moduleId +
+                         "' (add 'module " + s + " = " + s +
+                         " ;;' to its " + kLibraryInterfaceFile + ")");
+        fail(span, "module '" + cur.moduleId + "' has no module named '" +
+                       s + "'");
+      }
+      // Inside an inline module only nested inline modules remain.
+      const CheckedModule* host =
+          cur.moduleId.empty() ? &mod_ : prog_.find(cur.moduleId);
+      if (!host) return std::nullopt;
+      std::string next = cur.prefix + "." + s;
+      if (!host->inlineModules.count(next))
+        fail(span, "module '" + cur.prefix + "' has no module named '" + s +
+                       "'");
+      cur.prefix = next;
+    }
+    return cur;
+  }
+
+  // As tryResolveModulePath, but an unresolved first segment fails with a
   // diagnostic.
-  std::string resolveModuleRef(const std::string& surface, Span span) {
-    std::string canonical = tryResolveModuleRef(surface, span);
-    if (!canonical.empty()) return canonical;
-    fail(span,
-         "module '" + surface + "' is not imported by this module");
+  ModRef resolveModulePath(const std::string& surface, Span span,
+                           bool mentionTarget = false) {
+    auto r = tryResolveModulePath(surface, span, mentionTarget);
+    if (r) return *r;
+    std::string msg =
+        "module '" + surface + "' is not imported by this module";
+    // The standard library is not ambient; say how to get it.
+    if (splitPath(surface)[0] == "Core")
+      msg += " (Core must be brought into scope: 'import Core', "
+             "'open Core', or 'open Core.<Module>')";
+    fail(span, msg);
   }
 
   // Application with labels. Positional arguments fill the leftmost
@@ -427,9 +668,9 @@ class ModuleChecker {
   TypePtr checkApp(Expr& e, std::map<std::string, TypePtr>& env) {
     Expr& callee = *e.items[0];
 
-    // Check arguments first; user code is monomorphic so they are concrete
-    // (a nested partial application of a polymorphic primitive is the one
-    // exception and surfaces as a leftover-variable error below).
+    // Check arguments first. Most are concrete; the ones that are not - a
+    // nested partial application of a polymorphic callee, or a value of
+    // this definition's own 'a - carry variables that unify below.
     std::vector<TypePtr> argTypes;
     for (size_t i = 1; i < e.items.size(); i++)
       argTypes.push_back(check(*e.items[i], env));
@@ -438,53 +679,24 @@ class ModuleChecker {
                                          : std::string{};
     };
 
-    // Resolve the callee to parameter types + labels + return type.
-    // Primitive parameters are all labeled with their signature names.
+    // Resolve the callee to parameter types + labels + return type. Any
+    // Fun-typed expression can be applied: a name (including Core
+    // externals, which resolve like every other stored signature), a
+    // nested partial application, a function-typed parameter, a
+    // lambda, ...
     std::vector<TypePtr> paramTypes;
     std::vector<std::string> paramLabels;
     TypePtr retType;
-    const PrimSig* prim = nullptr;
-    if (callee.kind == Expr::Kind::Ident) {
-      if (callee.moduleName.empty()) {
-        // Bare primitive names resolve only under open Core /
-        // open Core.List, and any explicit binder shadows them.
-        if (!env.count(callee.name) && !topScope_.count(callee.name)) {
-          if (coreOpen_) prim = findCorePrim(callee.name);
-          if (!prim && coreListOpen_) prim = findCoreListPrim(callee.name);
-        }
-      } else {
-        std::string canonical =
-            tryResolveModuleRef(callee.moduleName, callee.span);
-        if (canonical == "Core") {
-          prim = findCorePrim(callee.name);
-        } else if (canonical == "Core.List") {
-          prim = findCoreListPrim(callee.name);
-        }
-        // Rewrite so the evaluator's qualified lookup hits the Core
-        // fast path regardless of alias spelling.
-        if (prim) callee.moduleName = canonical;
-      }
-    }
-    if (prim) {
-      paramTypes = prim->paramTypes;
-      paramLabels = prim->paramNames;
-      retType = prim->retType;
-      freshenVars(paramTypes, retType);
-      callee.type = tFun(paramTypes, paramLabels, retType);
-    } else {
-      // Any Fun-typed expression can be applied: a name, a nested partial
-      // application, a function-typed parameter, a lambda, ...
-      TypePtr fnType = check(callee, env);
-      if (fnType->kind != Type::Kind::Fun)
-        fail(callee.span,
-             (callee.kind == Expr::Kind::Ident ? "'" + callee.name + "'"
-                                               : "this expression") +
-                 " has type " + typeName(fnType) + " and cannot be applied");
-      paramTypes = fnType->items;
-      for (size_t i = 0; i < paramTypes.size(); i++)
-        paramLabels.push_back(fnType->labelAt(i));
-      retType = fnType->ret;
-    }
+    TypePtr fnType = check(callee, env);
+    if (fnType->kind != Type::Kind::Fun)
+      fail(callee.span,
+           (callee.kind == Expr::Kind::Ident ? "'" + callee.name + "'"
+                                             : "this expression") +
+               " has type " + typeName(fnType) + " and cannot be applied");
+    paramTypes = fnType->items;
+    for (size_t i = 0; i < paramTypes.size(); i++)
+      paramLabels.push_back(fnType->labelAt(i));
+    retType = fnType->ret;
 
     // Match arguments to parameters.
     std::vector<int> argForParam(paramTypes.size(), -1);
@@ -543,7 +755,10 @@ class ModuleChecker {
       if (argForParam[i] < 0) unfilled.push_back(i);
     if (unfilled.empty()) {
       TypePtr ret = applySubst(retType, subst);
-      if (containsVar(ret))
+      // A rigid variable left in the result is fine - it is this
+      // definition's own 'a, still standing for whatever the caller picks.
+      // A *free* one is a genuine gap: nothing in the call determined it.
+      if (containsFreeVar(ret))
         fail(e.span, "cannot determine the result type of this call to " +
                          calleeDesc(callee));
       return ret;
@@ -561,62 +776,144 @@ class ModuleChecker {
                 applySubst(retType, subst));
   }
 
-  // Instantiate a primitive signature: rename every var id occurring in the
-  // parameter/return types to a fresh id (see nextFreshVar_).
-  void freshenVars(std::vector<TypePtr>& paramTypes, TypePtr& retType) {
-    Subst renaming;
-    std::function<void(const TypePtr&)> collect = [&](const TypePtr& t) {
-      switch (t->kind) {
-        case Type::Kind::Var:
-          if (!renaming.count(t->var))
-            renaming[t->var] = tVar(nextFreshVar_++);
-          break;
-        case Type::Kind::Signal:
-        case Type::Kind::Sample:
-        case Type::Kind::List:
-          collect(t->elem);
-          break;
-        case Type::Kind::Tuple:
-        case Type::Kind::Fun: {
-          for (auto& x : t->items) collect(x);
-          if (t->ret) collect(t->ret);
-          break;
-        }
-        default:
-          break;
-      }
-    };
-    for (auto& p : paramTypes) collect(p);
-    collect(retType);
-    if (renaming.empty()) return;
-    for (auto& p : paramTypes) p = applySubst(p, renaming);
-    retType = applySubst(retType, renaming);
-  }
-
-  static bool containsVar(const TypePtr& t) {
-    switch (t->kind) {
-      case Type::Kind::Var: return true;
-      case Type::Kind::Signal:
-      case Type::Kind::Sample:
-      case Type::Kind::List:
-        return containsVar(t->elem);
-      case Type::Kind::Tuple:
-      case Type::Kind::Fun: {
-        for (auto& x : t->items)
-          if (containsVar(x)) return true;
-        return t->ret && containsVar(t->ret);
-      }
-      default:
-        return false;
+  // A type variable in the result has to be pinned down by an argument -
+  // that is what lets the caller choose it. One that appears only in the
+  // result could never be produced (the body would have to conjure a value
+  // of a type it is not given), so the signature is rejected up front
+  // rather than as a confusing mismatch against whatever the body returns.
+  void checkResultVarsAreBound(const TopDef& def) {
+    if (!containsRigidVar(def.retType)) return;
+    std::set<int> bound;
+    for (auto& p : def.params) collectVarIds(p.type, bound);
+    // A binding with no declared parameters can still be a function by
+    // annotation (`let damp : 'a Signal -> 'a Signal = lowpass ~cutoff:...`);
+    // those arrow parameters bind variables just as declared ones do, so
+    // peel them off before looking at what is left over.
+    TypePtr result = def.retType;
+    while (result->kind == Type::Kind::Fun) {
+      for (auto& p : result->items) collectVarIds(p, bound);
+      result = result->ret;
+    }
+    if (!containsRigidVar(result)) return;
+    std::set<int> used;
+    collectVarIds(result, used);
+    for (int id : used) {
+      if (id >= 0 || bound.count(id)) continue;
+      // Recover the name for the message from the annotation itself.
+      fail(def.span, "type variable " + varNameById(def.retType, id) +
+                         " appears in the result type of '" + def.name +
+                         "' but in no parameter, so nothing can determine "
+                         "it at a call site");
     }
   }
 
-  // Pointwise lifting with Scalar broadcasting (design doc §4.4).
+  static void collectVarIds(const TypePtr& t, std::set<int>& out) {
+    switch (t->kind) {
+      case Type::Kind::Var: out.insert(t->var); break;
+      case Type::Kind::Signal:
+      case Type::Kind::Sample:
+      case Type::Kind::List:
+        collectVarIds(t->elem, out);
+        break;
+      case Type::Kind::Tuple:
+      case Type::Kind::Fun:
+        for (auto& x : t->items) collectVarIds(x, out);
+        if (t->ret) collectVarIds(t->ret, out);
+        break;
+      default:
+        break;
+    }
+  }
+
+  static std::string varNameById(const TypePtr& t, int id) {
+    switch (t->kind) {
+      case Type::Kind::Var:
+        return t->var == id ? typeName(t) : std::string{};
+      case Type::Kind::Signal:
+      case Type::Kind::Sample:
+      case Type::Kind::List:
+        return varNameById(t->elem, id);
+      case Type::Kind::Tuple:
+      case Type::Kind::Fun: {
+        for (auto& x : t->items)
+          if (std::string s = varNameById(x, id); !s.empty()) return s;
+        return t->ret ? varNameById(t->ret, id) : std::string{};
+      }
+      default:
+        return {};
+    }
+  }
+
+  // Maps every var id in `t` to a fresh free id, accumulating into
+  // `renaming` so one signature's variables stay linked across its
+  // parameters and result.
+  void collectFreshening(const TypePtr& t, Subst& renaming) {
+    switch (t->kind) {
+      case Type::Kind::Var:
+        if (!renaming.count(t->var))
+          renaming[t->var] = tVar(nextFreshVar_++, t->varName);
+        break;
+      case Type::Kind::Signal:
+      case Type::Kind::Sample:
+      case Type::Kind::List:
+        collectFreshening(t->elem, renaming);
+        break;
+      case Type::Kind::Tuple:
+      case Type::Kind::Fun: {
+        for (auto& x : t->items) collectFreshening(x, renaming);
+        if (t->ret) collectFreshening(t->ret, renaming);
+        break;
+      }
+      default:
+        break;
+    }
+  }
+
+  // Instantiate a *stored* signature at a use site. Both a Core
+  // external's 'a and a user definition's own rigid 'a become fresh free
+  // variables, so
+  // each reference is solved on its own: `List.map dampen sigs` and
+  // `dampen (sine 440.0)` in the same file pick different element types.
+  // Parameters and locals are deliberately NOT run through this - inside
+  // the body that declares it, 'a is one fixed type, not a fresh unknown.
+  TypePtr instantiate(const TypePtr& t) {
+    if (!containsAnyVar(t)) return t;
+    Subst renaming;
+    collectFreshening(t, renaming);
+    return applySubst(t, renaming);
+  }
+
+
+  // Arithmetic: pointwise lifting with Scalar broadcasting (design doc
+  // §4.4). Comparisons and Bool combinators are build-time only: signals
+  // are lazy per-sample streams, and a sample-wise select would be a
+  // different (signal-producing) operation, deliberately absent in v1.
   TypePtr checkBinOp(Expr& e, std::map<std::string, TypePtr>& env) {
     TypePtr l = check(*e.items[0], env);
     TypePtr r = check(*e.items[1], env);
     auto is = [](const TypePtr& t, Type::Kind k) { return t->kind == k; };
     using K = Type::Kind;
+    switch (e.op) {
+      case BinOpKind::Lt:
+      case BinOpKind::Le:
+      case BinOpKind::Gt:
+      case BinOpKind::Ge:
+      case BinOpKind::Eq:
+      case BinOpKind::Ne:
+        if ((is(l, K::Scalar) && is(r, K::Scalar)) ||
+            (is(l, K::Timestamp) && is(r, K::Timestamp)))
+          return tBool();
+        fail(e.span, "comparison is not defined for " + typeName(l) +
+                         " and " + typeName(r) +
+                         " (compare two Scalars or two Timestamps)");
+      case BinOpKind::And:
+      case BinOpKind::Or:
+        if (is(l, K::Bool) && is(r, K::Bool)) return tBool();
+        fail(e.span, "'&&' and '||' need Bool operands, got " +
+                         typeName(l) + " and " + typeName(r));
+      default:
+        break;
+    }
     if (is(l, K::Scalar) && is(r, K::Scalar)) return tScalar();
     if (is(l, K::Vector) && is(r, K::Vector)) return tVector();
     if ((is(l, K::Vector) && is(r, K::Scalar)) ||
@@ -666,11 +963,26 @@ Program checkProject(const std::vector<std::string>& rootFiles,
       Span span;
     };
     std::vector<Mention> mentions;
+    // Names of inline modules defined anywhere in this file: mentions
+    // whose first segment matches resolve inside the checker, never on
+    // disk.
+    std::set<std::string> inlineNames;
   };
   std::map<std::string, Loaded> byName;  // canonical module id -> module
   std::vector<std::string> queue;
 
+  // The bundled Core library: stdlib declarations whose `external`
+  // bodies bind to implementations compiled into synthc. Always
+  // discoverable (shadowing any user library named Core), always an
+  // allowed dependency, and loaded eagerly below so `Core.sine` and
+  // `open Core` work with no import and no manifest entry.
+  LibraryInfo coreLib;
+  coreLib.name = "Core";
+  coreLib.dir = (fs::path(bundledStdlibDir()) / "core").string();
+  coreLib.hasInterface = true;
+
   auto libByName = [&](const std::string& n) -> const LibraryInfo* {
+    if (n == "Core") return &coreLib;
     if (currentLib && currentLib->name == n) return currentLib;
     return registry ? registry->find(n) : nullptr;
   };
@@ -680,6 +992,7 @@ Program checkProject(const std::vector<std::string>& rootFiles,
   // files consult that library's own manifest deps.
   auto depAllowed = [&](const std::string& libName,
                         const std::string& fromLib) -> bool {
+    if (libName == "Core") return true;  // the bundled library is free
     if (fromLib.empty()) {
       if (currentLib && libName == currentLib->name) return true;
       if (!ctx) return false;
@@ -714,11 +1027,25 @@ Program checkProject(const std::vector<std::string>& rootFiles,
     l.parsed.source = std::move(source);
     l.libName = libName;
     l.external = external;
+    // Everything may reference Core with no import; this edge puts the
+    // bundled library first in the topological order.
+    if (libName != "Core") l.loadDeps.push_back("Core");
     std::vector<Token> toks = lex(l.parsed.source, l.parsed.path, diags);
     l.parsed.defs = parse(toks, l.parsed.path, diags);
-    for (auto& d : l.parsed.defs)
-      if (d.kind != TopDef::Kind::Let)
-        l.mentions.push_back({d.kind, d.moduleName, d.span});
+    // Mentions live at any depth: an `open` inside a struct body still
+    // has to load its target file before checking starts.
+    std::function<void(const std::vector<TopDef>&)> collect =
+        [&](const std::vector<TopDef>& ds) {
+          for (auto& d : ds) {
+            if (d.kind == TopDef::Kind::ModuleDef) {
+              l.inlineNames.insert(d.name);
+              collect(d.defs);
+            } else if (d.kind != TopDef::Kind::Let) {
+              l.mentions.push_back({d.kind, d.moduleName, d.span});
+            }
+          }
+        };
+    collect(l.parsed.defs);
     byName.emplace(canonical, std::move(l));
     queue.push_back(canonical);
     return true;
@@ -764,6 +1091,10 @@ Program checkProject(const std::vector<std::string>& rootFiles,
                     lib->name, external, span, fromFile);
   };
 
+  // Core loads unconditionally: its declarations back every hint and
+  // every `Core.`-qualified reference, import or no import.
+  loadLibraryInterface(&coreLib, /*external=*/true, {}, {}, /*quiet=*/false);
+
   // What a library's lib.synth publishes, read straight off its parse
   // tree: `module X = Path` -> the surface path X names. Resolving a
   // `Lib.File` reference needs this before anything is type-checked, so
@@ -800,9 +1131,12 @@ Program checkProject(const std::vector<std::string>& rootFiles,
       const std::string file = byName.at(name).parsed.path;
       const std::string fromLib = byName.at(name).libName;
       const bool fromExternal = byName.at(name).external;
-      // The built-in Core namespace never loads from disk; the checker
-      // resolves it.
-      if (surface == "Core" || surface.rfind("Core.", 0) == 0) continue;
+      // A mention whose first segment names an inline module of this same
+      // file (`open A` after `module A = struct ... end`) resolves inside
+      // the checker, never on disk.
+      if (byName.at(name).inlineNames.count(
+              surface.substr(0, surface.find('.'))))
+        continue;
       // A `module X = Path` target may name an earlier alias, which only
       // the checker can resolve (aliases are position-ordered). The
       // loader resolves alias targets opportunistically - creating load
@@ -879,17 +1213,48 @@ Program checkProject(const std::vector<std::string>& rootFiles,
           bind(surface, surface);
         continue;
       }
-      // Dotted: Lib.File - a module the library's lib.synth binds.
+      // Dotted: Lib.File - a module the library's lib.synth binds. Deeper
+      // segments ("Lib.File.A") name inline modules inside that file;
+      // loading needs only the two-segment prefix, the checker resolves
+      // the rest.
       std::string libName = surface.substr(0, dot);
       std::string modName = surface.substr(dot + 1);
-      if (modName.find('.') != std::string::npos) {
-        diags.error(file, span,
-                    "module paths have at most two segments "
-                    "(Library.File): '" + surface + "'");
-        continue;
+      std::string bindSurface = surface;
+      size_t dot2 = modName.find('.');
+      if (dot2 != std::string::npos) {
+        modName = modName.substr(0, dot2);
+        bindSurface = libName + "." + modName;
       }
       const LibraryInfo* lib = libByName(libName);
       if (!lib) {
+        // Not a library: the first segment can still be a file module -
+        // already loaded, a same-directory sibling, or a library member
+        // next to this file - whose inline module the rest of the path
+        // reaches. Load and bind the file; the checker walks into it.
+        if (byName.count(libName)) {
+          bind(libName, libName);
+          continue;
+        }
+        if (fromLib.empty()) {
+          fs::path target =
+              fs::path(file).parent_path() / (lowercase(libName) + ".synth");
+          std::error_code ec;
+          if (fs::exists(target, ec)) {
+            if (loadFile(target, libName, "", fromExternal, span, file))
+              bind(libName, libName);
+            continue;
+          }
+        } else {
+          const LibraryInfo* own = libByName(fromLib);
+          std::string rel = own ? own->fileForModule(libName) : std::string{};
+          if (!rel.empty()) {
+            std::string canonical = fromLib + "." + libName;
+            if (loadFile(fs::path(own->dir) / rel, canonical, fromLib,
+                         fromExternal, span, file))
+              bind(libName, canonical);
+            continue;
+          }
+        }
         if (quiet) continue;
         diags.error(file, span, "unknown library '" + libName + "'");
         continue;
@@ -913,6 +1278,21 @@ Program checkProject(const std::vector<std::string>& rootFiles,
       bool external = !(currentLib && libName == currentLib->name);
       if (!loadLibraryInterface(lib, external, span, file, quiet)) continue;
       resolveMentions(libName);
+      // A dotted path may reach an *inline* module of the interface
+      // (`open Core.Osc`, `open Core.List`): binding the library is
+      // enough - the checker walks the rest of the path.
+      {
+        auto iface = byName.find(libName);
+        bool inlineTarget = false;
+        if (iface != byName.end())
+          for (auto& d : iface->second.parsed.defs)
+            if (d.kind == TopDef::Kind::ModuleDef && d.name == modName)
+              inlineTarget = true;
+        if (inlineTarget) {
+          bind(libName, libName);
+          continue;
+        }
+      }
       // The interface binds the exposed name; follow it (through an alias
       // chain, if the interface renames in steps) to a canonical id.
       std::string target = aliasTargetIn(libName, modName);
@@ -942,7 +1322,7 @@ Program checkProject(const std::vector<std::string>& rootFiles,
                                       "' but its target does not resolve");
         continue;
       }
-      bind(surface, canonical);
+      bind(bindSurface, canonical);
       // Reaching `Lib.File` goes through `Lib`'s interface, so the
       // library module is in scope (and checked first) as well.
       bind(libName, libName);

@@ -7,6 +7,14 @@
    sustain/release side), then hard_clip flat-tops the sum for grit. *)
 
 open Core
+open Core.Osc
+open Core.Fx
+open Core.Arrange
+open Core.Render
+open Core.Io
+open Core.Time
+open Core.Sig
+open Core.Math
 
 let bass_drum_harsh : Scalar Signal =
   let env : Scalar Signal =

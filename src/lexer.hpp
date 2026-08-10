@@ -13,10 +13,15 @@ enum class Tok {
   Import,
   Open,
   Module,
+  If,
+  Then,
+  Else,
   Ident,      // lowercase-initial identifier or `_`
   UpIdent,    // uppercase-initial identifier (types, module names)
+  TypeVar,    // 'a — a type variable in an annotation; text is the name
   Number,     // numeric literal (Scalar)
   Time,       // numeric literal with unit suffix (Timestamp); value in seconds
+  Bool,       // `true` / `false`; num is 1.0 / 0.0
   String,     // "..." literal
   Colon,
   SemiSemi,   // ;;
@@ -35,6 +40,14 @@ enum class Tok {
   Minus,
   Star,
   Slash,
+  Lt,         // <
+  Le,         // <=
+  Gt,         // >
+  Ge,         // >=
+  EqEq,       // ==
+  BangEq,     // !=
+  AndAnd,     // &&
+  OrOr,       // ||
   Eof,
 };
 

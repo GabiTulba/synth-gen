@@ -2,6 +2,14 @@
    (`pattern`) or with humanizing timing jitter (`humanized`). *)
 
 open Core
+open Core.Osc
+open Core.Fx
+open Core.Arrange
+open Core.Render
+open Core.Io
+open Core.Time
+open Core.Sig
+open Core.Math
 
 let pattern hit:Scalar Sample ~start:Timestamp ~step:Timestamp ~count:Scalar
     : Scalar Signal =

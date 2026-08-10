@@ -31,10 +31,15 @@ const char* tokenName(Tok t) {
     case Tok::Import: return "'import'";
     case Tok::Open: return "'open'";
     case Tok::Module: return "'module'";
+    case Tok::If: return "'if'";
+    case Tok::Then: return "'then'";
+    case Tok::Else: return "'else'";
     case Tok::Ident: return "identifier";
     case Tok::UpIdent: return "capitalized identifier";
+    case Tok::TypeVar: return "type variable";
     case Tok::Number: return "number";
     case Tok::Time: return "timestamp literal";
+    case Tok::Bool: return "boolean literal";
     case Tok::String: return "string literal";
     case Tok::Colon: return "':'";
     case Tok::SemiSemi: return "';;'";
@@ -53,6 +58,14 @@ const char* tokenName(Tok t) {
     case Tok::Minus: return "'-'";
     case Tok::Star: return "'*'";
     case Tok::Slash: return "'/'";
+    case Tok::Lt: return "'<'";
+    case Tok::Le: return "'<='";
+    case Tok::Gt: return "'>'";
+    case Tok::Ge: return "'>='";
+    case Tok::EqEq: return "'=='";
+    case Tok::BangEq: return "'!='";
+    case Tok::AndAnd: return "'&&'";
+    case Tok::OrOr: return "'||'";
     case Tok::Eof: return "end of file";
   }
   return "?";
@@ -96,6 +109,16 @@ std::vector<Token> lex(const std::string& src, const std::string& file,
       continue;
     }
     uint32_t lo = i;
+    // A quote only ever *starts* a token as a type variable: it is an
+    // identifier continuation character (x'), never an identifier start,
+    // and the language has no character literals.
+    if (c == '\'' && i + 1 < n && isIdentStart(src[i + 1])) {
+      i++;  // the quote
+      uint32_t nameLo = i;
+      while (i < n && isIdentCont(src[i])) i++;
+      push(Tok::TypeVar, lo, i, src.substr(nameLo, i - nameLo));
+      continue;
+    }
     if (isIdentStart(c)) {
       while (i < n && isIdentCont(src[i])) i++;
       std::string word = src.substr(lo, i - lo);
@@ -111,6 +134,16 @@ std::vector<Token> lex(const std::string& src, const std::string& file,
         push(Tok::Open, lo, i);
       else if (word == "module")
         push(Tok::Module, lo, i);
+      else if (word == "if")
+        push(Tok::If, lo, i);
+      else if (word == "then")
+        push(Tok::Then, lo, i);
+      else if (word == "else")
+        push(Tok::Else, lo, i);
+      else if (word == "true")
+        push(Tok::Bool, lo, i, {}, 1.0);
+      else if (word == "false")
+        push(Tok::Bool, lo, i, {}, 0.0);
       else if (std::isupper((unsigned char)word[0]))
         push(Tok::UpIdent, lo, i, word);
       else
@@ -190,6 +223,36 @@ std::vector<Token> lex(const std::string& src, const std::string& file,
       push(Tok::PipeGt, lo, i);
       continue;
     }
+    if (c == '|' && i + 1 < n && src[i + 1] == '|') {
+      i += 2;
+      push(Tok::OrOr, lo, i);
+      continue;
+    }
+    if (c == '&' && i + 1 < n && src[i + 1] == '&') {
+      i += 2;
+      push(Tok::AndAnd, lo, i);
+      continue;
+    }
+    if (c == '<' && i + 1 < n && src[i + 1] == '=') {
+      i += 2;
+      push(Tok::Le, lo, i);
+      continue;
+    }
+    if (c == '>' && i + 1 < n && src[i + 1] == '=') {
+      i += 2;
+      push(Tok::Ge, lo, i);
+      continue;
+    }
+    if (c == '=' && i + 1 < n && src[i + 1] == '=') {
+      i += 2;
+      push(Tok::EqEq, lo, i);
+      continue;
+    }
+    if (c == '!' && i + 1 < n && src[i + 1] == '=') {
+      i += 2;
+      push(Tok::BangEq, lo, i);
+      continue;
+    }
     i++;
     switch (c) {
       case ':': push(Tok::Colon, lo, i); break;
@@ -206,6 +269,8 @@ std::vector<Token> lex(const std::string& src, const std::string& file,
       case '-': push(Tok::Minus, lo, i); break;
       case '*': push(Tok::Star, lo, i); break;
       case '/': push(Tok::Slash, lo, i); break;
+      case '<': push(Tok::Lt, lo, i); break;
+      case '>': push(Tok::Gt, lo, i); break;
       default:
         diags.error(file, {lo, i},
                     std::string("unexpected character '") + c + "'");

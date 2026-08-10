@@ -4,6 +4,14 @@
    voices (the guitar pluck stacks it on exact harmonics). *)
 
 open Core
+open Core.Osc
+open Core.Fx
+open Core.Arrange
+open Core.Render
+open Core.Io
+open Core.Time
+open Core.Sig
+open Core.Math
 
 let partial ~freq:Scalar ~amp:Scalar ~decay:Scalar : Scalar Signal =
   sine freq * exp_decay decay * amp

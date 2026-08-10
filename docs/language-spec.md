@@ -13,7 +13,16 @@ accepts and how it is typed and evaluated. The design document
   identifiers name bindings and parameters; uppercase-initial identifiers
   name modules and types. `_` is a valid binding name with special
   meaning (see §4).
-- **Keywords**: `let`, `in`, `fun`, `import`, `open`, `module`.
+- **Type variables**: `'` immediately followed by an identifier: `'a`,
+  `'elem`. They appear only in type annotations (§3). A `'` *starts* a
+  token only here — inside an identifier it is an ordinary continuation
+  character, so `x'` remains one name.
+- **Keywords**: `let`, `in`, `fun`, `import`, `open`, `module`, `if`,
+  `then`, `else`, `true`, `false`. The words `struct`, `end` and
+  `external` are *contextual*: they matter only inside a
+  `module N = struct … end` definition (resp. as a definition's whole
+  `external "file"` body) and lex as ordinary identifiers everywhere
+  else (a binding named `end` or `external` keeps working).
 - **Number literals**: `[0-9]+(\.[0-9]+)?` — always `Scalar`.
 - **Timestamp literals**: a number literal immediately followed by a unit
   suffix: `ns` (1e-9 s), `us` (1e-6 s), `ms` (1e-3 s), `s` (1 s),
@@ -22,9 +31,10 @@ accepts and how it is typed and evaluated. The design document
   lexical error. A suffix only attaches to a *literal*; to carry a
   computed Scalar into the time domain use `to_sec`/`to_ms`/`to_min`
   (§5.4).
+- **Boolean literals**: `true`, `false` — always `Bool`.
 - **String literals**: `"..."` with escapes `\n`, `\t`, `\\`, `\"`.
 - **Punctuation**: `;;` `;` `:` `=` `(` `)` `[` `]` `,` `.` `->` `~`
-  `|>` `+` `-` `*` `/`.
+  `|>` `+` `-` `*` `/` `<` `<=` `>` `>=` `==` `!=` `&&` `||`.
 
 ## 2. Grammar
 
@@ -32,24 +42,39 @@ EBNF; `{x}` is repetition, `[x]` is optionality.
 
 ```
 module      ::= { top-def }
-top-def     ::= import-def | open-def | alias-def | let-def
-module-path ::= UpIdent { "." UpIdent }             (Lib or Lib.File)
+top-def     ::= import-def | open-def | alias-def | module-def | let-def
+module-path ::= UpIdent { "." UpIdent }             (may end inside an
+                                                     inline module:
+                                                     Lib.File.A)
 import-def  ::= "import" module-path [ ";;" ]
 open-def    ::= "open" module-path [ ";;" ]
 alias-def   ::= "module" UpIdent "=" module-path [ ";;" ]
-let-def     ::= "let" (Ident | "_") { param } [ ":" type ] "=" expr ";;"
+module-def  ::= "module" UpIdent "=" "struct" { struct-def } "end" [ ";;" ]
+struct-def  ::= open-def | module-def | let-def
+let-def     ::= "let" (Ident | "_") { param } [ ":" type ] "="
+                (expr | external-body) ";;"
+external-body ::= "external" String                 (C++ file; §5)
 param       ::= [ "~" ] Ident ":" param-type      (~ marks a labeled param)
 
 type        ::= postfix-type [ "->" type ]          (right-associative)
 param-type  ::= postfix-type                        (arrows need parens)
 postfix-type::= atom-type { "Signal" | "Sample" | "list" }
-atom-type   ::= "Scalar" | "Vector" | "Timestamp" | "String" | "unit"
+atom-type   ::= "Scalar" | "Vector" | "Timestamp" | "String" | "Bool"
+              | "unit"
+              | TypeVar                             ('a - see §3)
               | "(" type { "," type } ")"           (tuple if >1 element)
 
-expr        ::= let-in | lambda | pipe
+expr        ::= let-in | lambda | if-expr | pipe
 let-in      ::= "let" Ident ":" type "=" expr "in" expr
 lambda      ::= "fun" param { param } "->" expr
-pipe        ::= additive { "|>" additive }          (lowest, left-assoc)
+if-expr     ::= "if" expr "then" expr "else" expr   (both branches
+                                                     required; extends
+                                                     maximally right)
+pipe        ::= or-expr { "|>" additive }           (lowest, left-assoc)
+or-expr     ::= and-expr { "||" and-expr }
+and-expr    ::= comparison { "&&" comparison }
+comparison  ::= additive { cmp-op additive }
+cmp-op      ::= "<" | "<=" | ">" | ">=" | "==" | "!="
 additive    ::= multiplicative { ("+" | "-") multiplicative }
 multiplicative ::= unary { ("*" | "/") unary }
 unary       ::= "-" unary | app
@@ -101,47 +126,61 @@ Notes:
 
 ## 3. Type system
 
-Types: `Scalar`, `Vector`, `Timestamp`, `String`, `unit`, `t Signal`,
-`t Sample`, `t list`, tuples `(t1, ..., tn)`, and function types
-`t1 -> ... -> tn -> r` (in signatures only). `Signal`/`Sample` element
+Types: `Scalar`, `Vector`, `Timestamp`, `String`, `Bool`, `unit`,
+`t Signal`, `t Sample`, `t list`, tuples `(t1, ..., tn)`, and function
+types `t1 -> ... -> tn -> r` (in signatures only). `Signal`/`Sample` element
 types are in practice `Scalar` (mono) or `Vector` (N-channel).
 
 Rules:
 
 - **Fully annotated, no inference.** Every parameter and every return
   type is written; the checker verifies and never guesses.
-- **Monomorphic user code.** Type variables occur only in built-in
-  primitive signatures and are instantiated (by unification) at each call
-  site. Users cannot write polymorphic definitions. The math primitives
-  (`exp`, `sqrt`, `log`, `pow`) use an unconstrained `'a`, so the checker
-  admits any argument type; passing anything but a Scalar, Vector, or
-  Scalar Signal is reported as a build (evaluation) error. `time` is the
-  one nullary primitive: it is a `Scalar Signal` value, not a function.
+- **Polymorphism is written, never inferred.** A signature may name type
+  variables (`'a`, `'elem`); they are instantiated (by unification) at
+  each use site, exactly as a primitive's are. All occurrences of one
+  name within a single top-level definition — parameters, return type,
+  lambda parameters, `let ... in` annotations — are the same variable,
+  and the name is scoped to that definition, so the `'a` of the next
+  definition is unrelated. See "Polymorphic definitions" below.
+  The math primitives (`exp`, `sqrt`, `log`, `pow`) use an unconstrained
+  `'a`, so the checker admits any argument type; passing anything but a
+  Scalar, Vector, or Scalar Signal is reported as a build (evaluation)
+  error. `time` is the one nullary primitive: it is a `Scalar Signal`
+  value, not a function.
 - **Definition before use, no recursion.** A definition may reference
   only parameters, *earlier* definitions of its module, imported modules'
   definitions (qualified), names brought in by an *earlier* `open`, and
   Core primitives (see below). Name resolution order for unqualified
   names: local binding/parameter (innermost first) → the latest earlier
-  top-level binder (an own definition or an `open`ed name —
-  position-ordered, so an `open` shadows earlier same-named binders and
-  a later definition shadows the open) → a Core primitive, but only
-  under an earlier `open Core` (or `open Core.List` for the list
-  functions). Re-defining one of the module's *own* names is still a
-  duplicate-definition error.
-- **The Core namespace.** All primitives live in the built-in `Core`
-  module — except the list functions, which live in its `Core.List`
-  submodule under OCaml-style names: `List.map`, `List.fold`,
-  `List.init` (= the doc's `list_init`), `List.repeat`. Files start
-  with `open Core`, which makes primitives callable bare and binds
-  `List` (so `List.map f xs` works); `open Core.List` additionally
-  makes the list functions bare. Qualified access (`Core.sine`,
-  `Core.List.map`) always works, with no open or import. `Core`
-  aliases like any module (`module C = Core` then `C.sine`,
-  `C.List.map`); the name `Core` is reserved — a user file or library
-  named Core is not reachable.
+  binder of the innermost enclosing scope outward (each `struct` body is
+  a scope over the file's top level; binders are own/sibling definitions
+  and `open`ed names, position-ordered, so an `open` shadows earlier
+  same-named binders and a later definition shadows the open) → a Core
+  primitive, but only under an earlier, still-enclosing `open Core` (or
+  `open Core.List` for the list functions). Re-defining one of a
+  scope's *own* names is still a duplicate-definition error.
+- **The Core library.** All primitives live in `Core` — a *real
+  library* bundled with the compiler (`stdlib/core/lib.synth`), whose
+  every definition is an `external` binding to an implementation
+  compiled into synthc (§5), organized into functional submodules:
+  `Osc` (oscillators & modulation), `Fx` (effects, filters,
+  envelopes), `Arrange` (sample/place/mix), `Render` (the render
+  effects), `Io` (audio import), `List`, `Time` (conversions &
+  Timestamp sequences), `Sig` (signal constructors), and `Math`
+  (see §6 for the roster). Core is **not ambient**: like any library
+  it must be brought into scope — `import Core` for qualified access
+  (`Core.Osc.sine`), `open Core` for module-qualified access
+  (`Osc.sine`, `List.map`), or `open Core.Osc` for bare names
+  (`sine`). It is always discoverable and always an allowed dependency
+  (no manifest entry needed), and it aliases like any module
+  (`module C = Core` then `C.Osc.sine`; `module L = Core.List` then
+  `L.map`). The name `Core` is reserved — a user file or library named
+  Core is shadowed by the bundled one. Code fragments elsewhere in
+  this document assume the relevant submodules are open.
 - **Module references** (`import`/`open`/alias targets and qualified
-  names) resolve their first segment as: module alias bound earlier in
-  the file (later aliases override) → a *sibling* file module — any
+  names) resolve their first segment as: an inline module or module
+  alias bound earlier in an enclosing scope (innermost first, later
+  binders override) → a *sibling* file module — any
   `.synth` file in the same directory, which inside a library is
   exactly its member set (a sibling wins over a library of the same
   name) → a discovered library (which must be `dep`-declared). A
@@ -150,7 +189,9 @@ Rules:
   sibling and naming it (or a `Lib.Member` path into one's own
   library) is an error. From outside, only what `lib.synth` binds is
   reachable: `Lib.X` resolves through the `module X = …` bindings
-  there, under the name the interface gives it.
+  there, under the name the interface gives it. Any further segments
+  descend into inline modules of the module reached so far
+  (`Lib.X.A.def`, see §4).
 - **Local bindings** type-check like top-level ones: the bound expression
   must match the annotation (a var-carrying partial application of a
   polymorphic primitive resolves against it), and the name is visible
@@ -185,6 +226,47 @@ Rules:
 - **Duplicate definitions** in a module and **duplicate parameters** in a
   signature are errors.
 
+### Polymorphic definitions
+
+A definition is polymorphic when its annotation names type variables. The
+effect is instantiation, not inference: the definition is checked once,
+and every use picks its own types.
+
+```
+let dampen ~input:'a Signal : 'a Signal =
+  lowpass ~cutoff:600.0 (soft_clip ~threshold:0.8 input)
+;;
+
+let mono : Scalar Signal = dampen (saw 220.0) ;;
+let wide : Vector Signal = dampen (channels [saw 220.0; saw 221.0]) ;;
+```
+
+Two rules make one check stand for every instantiation:
+
+- **Inside the body a variable is rigid.** It denotes one fixed but
+  unknown type, chosen by the caller, so the body may only pass such a
+  value along — never assume it is a Scalar, a Signal, or another
+  variable. `let f ~x:'a : Scalar = x` and
+  `let f ~x:'a : 'a = lowpass ~cutoff:1.0 x` are both rejected: each
+  would decide something that is the caller's to decide. Operators are
+  included: `x * 2.0` on an `'a` is not defined (on an `'a Signal` it is,
+  by the Signal/Scalar row of the table below).
+- **Every variable in the result must occur in a parameter**, so the call
+  site can determine it. `let bad ~x:Scalar : 'a Signal = sine x` is
+  rejected up front — nothing at a call site could ever fix `'a`. The
+  parameters of a function-typed annotation count:
+  `let damp : 'a Signal -> 'a Signal = lowpass ~cutoff:600.0` is fine.
+
+Otherwise polymorphic definitions behave like any other. They can be
+higher-order (`let twice ~f:('a -> 'a) ~x:'a : 'a = f (f x)`), partially
+applied, passed to polymorphic primitives
+(`List.map dampen [sine 330.0; square 220.0]`), and published by a
+library's `lib.synth` like any other value.
+
+Nothing about a definition's *evaluation* depends on its types: a
+polymorphic definition renders bit-identically to the monomorphic one it
+generalizes.
+
 ### Operators (pointwise lifting + Scalar broadcasting)
 
 For `+ - * /` with operand types L and R:
@@ -201,6 +283,35 @@ Anything else (e.g. `Timestamp + Signal`) is a type error. Channel-count
 mismatches between Vector Signals are detected when the signal graph is
 built — before any audio is computed — and signals are capped at 16
 channels in v1.
+
+### Booleans & conditionals
+
+Everything here happens at *build time* — a `Bool` is one value decided
+while the graph is assembled, never a per-sample stream.
+
+- **`Bool`** is an atomic type with literals `true`/`false`. It works
+  everywhere a type does: parameters (`~crisp:Bool`), lists, tuples,
+  `'a` instantiation.
+- **Comparisons** `<` `<=` `>` `>=` `==` `!=` take two Scalars or two
+  Timestamps and produce a `Bool`. Signals are *not* comparable: a lazy
+  signal has no single value, and a sample-wise select would be a
+  different, signal-producing operation (deliberately absent in v1 —
+  see §7). Comparing under `signal ~f`'s symbolic substitution is
+  likewise a build-time error. Chained comparisons (`a < b < c`) parse
+  left-associatively and are rejected by typing (Bool has no ordering).
+- **`&&` / `||`** combine Bools and short-circuit: only the deciding
+  operand is evaluated. `not` is a Core primitive (`b:Bool -> Bool`).
+  Precedence, loosest to tightest: `|>`, `||`, `&&`, comparisons,
+  `+ -`, `* /`, application.
+- **`if c then a else b`** is an expression: `c` must be `Bool` (a rigid
+  `'a` does not qualify — the caller never promised a Bool), both
+  branches are required and must have the same type, which is the
+  result type; a var-carrying branch (a partial application of a
+  polymorphic callee) unifies against the other. Only the taken branch
+  is evaluated, so the untaken branch's errors and render effects never
+  fire — `if loud then render "a" … else render "b" …` renders exactly
+  one target. Branches extend maximally right; parenthesize an `if`
+  used as an argument or operand.
 
 ## 4. Modules, libraries & projects
 
@@ -221,9 +332,45 @@ channels in v1.
   file level); `open File` / `open Lib.X` injects that module's
   definitions directly. An `open` implies the corresponding import.
 - **`module K = Path`** binds (or overrides) a module name: the target
-  may be a file module by any spelling in scope, an earlier alias, or a
-  whole library (`module B = Basic` then `B.Keys.def`). At a library
-  interface's top level it also *publishes* `K` (see below).
+  may be a file module by any spelling in scope, an earlier alias, a
+  whole library (`module B = Basic` then `B.Keys.def`), or an inline
+  module (`module L = Core.List` then `L.map`). A whole-module binding
+  at a library interface's top level also *publishes* `K` (see below);
+  an inline-module alias stays scope-local — libraries publish whole
+  modules, and inline members travel with them under their dotted
+  paths.
+- **Inline modules.** `module A = struct … end ;;` defines a module
+  inside a file. The body holds `let` definitions, `open`s, and nested
+  `module … = struct` definitions (imports and aliases stay at the top
+  level); everything is position-ordered exactly as at the file's top
+  level, and the body sees the enclosing scope's earlier binders.
+
+  ```
+  module Voices = struct
+    open Core                              (* scoped: ends at `end` *)
+    let base : Scalar = 220.0 ;;
+    module Fx = struct
+      let damp ~input:'a Signal : 'a Signal =
+        lowpass ~cutoff:600.0 input ;;
+    end
+    let lead : Scalar Signal = Fx.damp (sine base) ;;
+  end ;;
+
+  let mono : Scalar Signal = Voices.Fx.damp (Core.sine Voices.base) ;;
+  ```
+
+  Members are referenced by dotted path (`Voices.base`,
+  `Voices.Fx.damp`; from another file, `File.Voices.base`), or brought
+  into scope with `open Voices`, which injects the module's immediate
+  values and sub-module names. An `open` (of anything) inside a
+  `struct` ends at that module's `end`. Inline modules of an imported
+  or opened module come along automatically; a definition inside an
+  inline module shadows same-named outer binders for the rest of its
+  body, and an inline module shadows a same-named file module or
+  library from its point of definition. Semantically an inline module
+  is pure namespacing: a member is a top-level definition whose full
+  name is its dotted path — same typing (including polymorphic
+  signatures), same evaluation, same incremental hashing.
 - **Library**: a directory whose `build.json` declares
   `"library": "<Name>"` and, optionally, `"dependencies"`. It lists no
   files: every `.synth` file in the directory is a member, and members
@@ -302,82 +449,131 @@ channels in v1.
   linearly resampled to the render rate.
 - Renders are deterministic; incremental rebuilds and caching rely on it.
 
+### External functions
+
+`let name params : Type = external "file.cpp" ;;` binds a definition to
+a C++ implementation instead of a synth body. The annotation is the
+complete type (params and result are always written; result variables
+must still be bound by parameters). Externals are ordinary values: they
+curry, take labels, and are published by libraries like anything else.
+
+Two kinds exist, split by where the declaration lives:
+
+- **Core externals.** Every definition in the bundled
+  `stdlib/core/lib.synth` is external; the file string names the
+  `src/core/*.cpp` translation unit compiled into synthc that implements
+  it. This is what the primitives *are* now: their signatures live in
+  synth source, their bodies in the engine, and `open Core` is a plain
+  library open.
+- **User externals.** Anywhere else, the string names a C++ file
+  resolved relative to the declaring `.synth` file. At build time synthc
+  compiles it once into a shared object cached under
+  `_build/externals/` (keyed by file content — edits recompile, rebuilds
+  reuse), loads it, and binds the exported entry point. The C++ file is
+  a build input: the watch daemon rebuilds when it changes. The
+  compiler is `$CXX` (default `c++`).
+
+A user implementation includes the generated `<synth/external.hpp>` and
+defines one entry point per external, named after the definition:
+
+```cpp
+#include <synth/external.hpp>
+
+SYNTH_EXTERNAL(succ) {
+  *result = synth::ext::Value::scalar(args[0].asScalar() + 1.0);
+  return true;
+}
+```
+
+Arguments arrive fully applied, in declaration order; return `true` with
+`*result` set, or report failure (fill `*error` and return `false`, or
+throw) — failures become build diagnostics on the declaring definition.
+One `.cpp` may implement several externals.
+
+**Only data crosses the boundary**: Scalar, Timestamp, Bool, String,
+Vector, unit, and lists/tuples of those. Signals, Samples, functions and
+type variables cannot appear in a user external's signature (checked at
+type time) — signals are lazy engine graphs, not values, and stay on the
+host side. Core externals are exempt (their implementations *are* the
+engine). External names must form C++ symbols (letters, digits, `_`).
+
 ## 6. Primitive signatures (v1 roster)
 
-Everything below lives in the built-in `Core` module (`open Core` for
-bare names, or `Core.sine`), except the four `Core.List` functions
-listed with their `List.` names.
+Everything below lives in the bundled `Core` library, organized into
+functional submodules and listed here under its full path. Bring what
+you need into scope explicitly: `import Core` (then `Core.Osc.sine`),
+`open Core` (then `Osc.sine`), or `open Core.Osc` (then `sine`).
 
 ```
 (* generators *)
-val sine      : freq:Scalar -> Scalar Signal
-val saw       : freq:Scalar -> Scalar Signal
-val square    : freq:Scalar -> Scalar Signal
-val noise     : freq:Scalar -> Scalar Signal          (* two-step FM; deterministic *)
+val Osc.sine: freq:Scalar -> Scalar Signal
+val Osc.saw: freq:Scalar -> Scalar Signal
+val Osc.square: freq:Scalar -> Scalar Signal
+val Osc.noise: freq:Scalar -> Scalar Signal          (* two-step FM; deterministic *)
 
 (* envelopes *)
-val exp_decay : rate:Scalar -> Scalar Signal          (* e^(-rate*t) *)
-val adsr      : attack:Timestamp -> decay:Timestamp -> sustain:Scalar
+val Fx.exp_decay: rate:Scalar -> Scalar Signal          (* e^(-rate*t) *)
+val Fx.adsr: attack:Timestamp -> decay:Timestamp -> sustain:Scalar
              -> release:Timestamp -> hold:Timestamp -> Scalar Signal
 
 (* filters *)
-val lowpass   : cutoff:Scalar -> input:'a Signal -> 'a Signal
-val highpass  : cutoff:Scalar -> input:'a Signal -> 'a Signal
+val Fx.lowpass: cutoff:Scalar -> input:'a Signal -> 'a Signal
+val Fx.highpass: cutoff:Scalar -> input:'a Signal -> 'a Signal
 
 (* distortion *)
-val hard_clip : threshold:Scalar -> input:'a Signal -> 'a Signal  (* clamp at +/-threshold *)
-val soft_clip : threshold:Scalar -> input:'a Signal -> 'a Signal  (* threshold*tanh(x/threshold) *)
+val Fx.hard_clip: threshold:Scalar -> input:'a Signal -> 'a Signal  (* clamp at +/-threshold *)
+val Fx.soft_clip: threshold:Scalar -> input:'a Signal -> 'a Signal  (* threshold*tanh(x/threshold) *)
 
 (* modulation *)
-val fm        : carrier:Scalar -> modulator:Scalar Signal -> Scalar Signal
-val pm        : carrier:Scalar -> modulator:Scalar Signal -> Scalar Signal
-val am        : carrier:'a Signal -> modulator:Scalar Signal -> depth:Scalar -> 'a Signal
+val Osc.fm: carrier:Scalar -> modulator:Scalar Signal -> Scalar Signal
+val Osc.pm: carrier:Scalar -> modulator:Scalar Signal -> Scalar Signal
+val Osc.am: carrier:'a Signal -> modulator:Scalar Signal -> depth:Scalar -> 'a Signal
 
 (* time effects *)
-val delay     : by:Timestamp -> signal:'a Signal -> 'a Signal
-val resample  : input:'a Signal -> f:(Scalar -> Scalar) -> 'a Signal  (* f is a playback-rate multiplier *)
-val reverb    : decay:Timestamp -> damping:Scalar -> mix:Scalar
+val Fx.delay: by:Timestamp -> signal:'a Signal -> 'a Signal
+val Fx.resample: input:'a Signal -> f:(Scalar -> Scalar) -> 'a Signal  (* f is a playback-rate multiplier *)
+val Fx.reverb: decay:Timestamp -> damping:Scalar -> mix:Scalar
              -> input:'a Signal -> 'a Signal
 
 (* combination *)
-val mix_all   : signals:'a Signal list -> 'a Signal
-val channels  : chans:Scalar Signal list -> Vector Signal
+val Arrange.mix_all: signals:'a Signal list -> 'a Signal
+val Arrange.channels: chans:Scalar Signal list -> Vector Signal
 
 (* slicing & arrangement *)
-val sample    : signal:'a Signal -> from:Timestamp -> to:Timestamp -> 'a Sample
-val place     : sample:'a Sample -> at:Timestamp -> 'a Signal
-val place_multi : sample:'a Sample -> ats:Timestamp list -> 'a Signal  (* mix of placements; overlaps sum *)
+val Arrange.sample: signal:'a Signal -> from:Timestamp -> to:Timestamp -> 'a Sample
+val Arrange.place: sample:'a Sample -> at:Timestamp -> 'a Signal
+val Arrange.place_multi: sample:'a Sample -> ats:Timestamp list -> 'a Signal  (* mix of placements; overlaps sum *)
 
 (* the effects *)
-val render    : name:String -> rate:Scalar -> sample:'a Sample -> unit
-val render_vis: name:String -> rate:Scalar -> sample:'a Sample -> unit  (* waveform SVG *)
-val render_stems : name:String -> rate:Scalar
+val Render.render: name:String -> rate:Scalar -> sample:'a Sample -> unit
+val Render.render_vis: name:String -> rate:Scalar -> sample:'a Sample -> unit  (* waveform SVG *)
+val Render.render_stems: name:String -> rate:Scalar
                 -> stems:(String, 'a Sample) list -> unit
   (* one audio target per stem, named "<name>-<label>" *)
-val render_vis_stems : name:String -> rate:Scalar
+val Render.render_vis_stems: name:String -> rate:Scalar
                     -> stems:(String, 'a Sample) list -> unit
   (* ONE svg artifact: a labeled waveform lane per stem, shared time axis *)
 
 (* file import *)
-val load_mono : path:String -> Scalar Signal
-val load_multi: path:String -> Vector Signal
+val Io.load_mono: path:String -> Scalar Signal
+val Io.load_multi: path:String -> Vector Signal
 
 (* signal constructors *)
-val constant  : value:Scalar -> Scalar Signal
-val constant_multi : levels:Scalar list -> Vector Signal  (* one level per channel *)
-val time      : Scalar Signal          (* nullary: the ramp t, in seconds *)
-val signal    : f:(Scalar -> Scalar) -> Scalar Signal
+val Sig.constant: value:Scalar -> Scalar Signal
+val Sig.constant_multi: levels:Scalar list -> Vector Signal  (* one level per channel *)
+val Sig.time: Scalar Signal          (* nullary: the ramp t, in seconds *)
+val Sig.signal: f:(Scalar -> Scalar) -> Scalar Signal
   (* samples f over time; the body is limited to arithmetic and the math
      primitives - nothing else maps a Scalar to a Scalar *)
-val signal_multi : fs:(Scalar -> Scalar) list -> Vector Signal
+val Sig.signal_multi: fs:(Scalar -> Scalar) list -> Vector Signal
 
 (* math: polymorphic over Scalars and (elementwise) Signals; anything
    else is a build-time error. Domain follows IEEE: log of a
    non-positive value or sqrt of a negative one yield -inf/NaN samples. *)
-val exp       : x:'a -> 'a
-val sqrt      : x:'a -> 'a
-val log       : x:'a -> 'a             (* natural *)
-val pow       : x:'a -> y:Scalar -> 'a
+val Math.exp: x:'a -> 'a
+val Math.sqrt: x:'a -> 'a
+val Math.log: x:'a -> 'a             (* natural *)
+val Math.pow: x:'a -> y:Scalar -> 'a
 
 (* Core.List: list combinators & builders *)
 val List.map    : f:('a -> 'b) -> xs:'a list -> 'b list
@@ -385,12 +581,13 @@ val List.fold   : f:('a -> 'b -> 'a) -> init:'a -> xs:'b list -> 'a
 val List.init   : n:Scalar -> f:(Scalar -> 'a) -> 'a list   (* [f 0.0; ...; f (n-1)] *)
 val List.repeat : n:Scalar -> x:'a -> 'a list
 
-(* timestamp construction & list utilities (Core proper) *)
-val to_sec    : x:Scalar -> Timestamp
-val to_ms     : x:Scalar -> Timestamp
-val to_min    : x:Scalar -> Timestamp
-val time_steps: start:Timestamp -> step:Timestamp -> count:Scalar -> Timestamp list
-val jitter    : seed:Scalar -> spread:Timestamp -> steps:(Timestamp list) -> Timestamp list
+(* Core.Time: timestamp construction & sequences *)
+val Time.to_sec: x:Scalar -> Timestamp
+val Time.to_ms: x:Scalar -> Timestamp
+val Time.to_min: x:Scalar -> Timestamp
+val Math.not: b:Bool -> Bool
+val Time.time_steps: start:Timestamp -> step:Timestamp -> count:Scalar -> Timestamp list
+val Time.jitter: seed:Scalar -> spread:Timestamp -> steps:(Timestamp list) -> Timestamp list
 ```
 
 Counts and indices are Scalars (the language's single numeric type);
@@ -411,6 +608,7 @@ reproducible and cacheable; give each layer its own seed so they drift
 independently:
 
 ```
+(* with open Core.Arrange and open Core.Time *)
 place_multi hat (time_steps ~start:0s ~step:250ms ~count:32.0
                    |> jitter ~seed:7.0 ~spread:8ms)
 ```
@@ -429,13 +627,17 @@ manage headroom deliberately.
 
 ## 7. Out of scope in v1
 
-Booleans and control flow, pattern matching, user-defined types,
-recursion and feedback (IIR-style signal cycles), user polymorphism,
-per-definition visibility control (a library's `lib.synth` publishes
-whole modules or re-exported values, but a published module exposes all
-of its definitions), reverse playback (`resample` reads its source only
-forward, so a negative rate clamps to zero rather than rewinding),
-cache tuning knobs, native extensions. See design
-doc §13. (Lambdas, general partial application, and cross-directory
-imports/packaging — via libraries, `open` and module aliases — were
-listed here originally and are now in the language; see §2, §3 and §4.)
+Signal-level branching (comparisons and `if` are build-time only; a
+sample-wise select/gate over signals would be a new signal-producing
+primitive), pattern matching, user-defined types, recursion and feedback
+(IIR-style signal cycles), type *inference* (every binding is still
+annotated; polymorphism is written out, §3), per-definition visibility
+control (a library's `lib.synth` publishes whole modules or re-exported
+values, but a published module exposes all of its definitions), reverse
+playback (`resample` reads its source only forward, so a negative rate
+clamps to zero rather than rewinding), cache tuning knobs, native
+extensions. See design doc §13. (Lambdas, general partial application,
+cross-directory imports/packaging — via libraries, `open` and module
+aliases — user-written polymorphism, inline modules, and build-time
+Booleans with `if`/`else` were listed here originally and are now in the
+language; see §2, §3 and §4.)

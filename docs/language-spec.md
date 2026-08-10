@@ -69,7 +69,7 @@ atom-type   ::= "Scalar" | "Int" | "Vector" | "Timestamp" | "String"
               | "(" type { "," type } ")"           (tuple if >1 element)
 
 expr        ::= let-in | lambda | if-expr | pipe
-let-in      ::= "let" Ident ":" type "=" expr "in" expr
+let-in      ::= "let" Ident { param } ":" type "=" expr "in" expr
 lambda      ::= "fun" param { param } "->" expr
 if-expr     ::= "if" expr "then" expr "else" expr   (both branches
                                                      required; extends
@@ -105,10 +105,9 @@ Notes:
 - Function-typed parameters require parentheses:
   `f:(Timestamp -> Scalar Signal)`.
 - **Local bindings**: `let name : Type = e in body` is an expression;
-  the binding is annotated like every other binding, binds a *value*
-  (no parameters in v1), scopes over `body` only, and may shadow
-  parameters, module definitions, or outer locals. Chained sub-lets nest
-  naturally:
+  the binding is annotated like every other binding, scopes over `body`
+  only, and may shadow parameters, module definitions, or outer locals.
+  Chained sub-lets nest naturally:
 
   ```
   let song : Scalar Signal =
@@ -117,6 +116,24 @@ Notes:
     place_multi hit beats
   ;;
   ```
+
+  With parameters a local binding defines a *local function*; the
+  annotation after the parameters is the return type, exactly as at the
+  top level:
+
+  ```
+  let chord : Scalar Signal =
+    let tone freq:Scalar ~gain:Scalar : Scalar Signal = sine freq * gain in
+    mix_all [tone 220.0 ~gain:0.5; tone 275.0 ~gain:0.3; tone 330.0 ~gain:0.3]
+  ;;
+  ```
+
+  A local function is sugar for binding a lambda —
+  `let f x:T : R = e in body` is exactly
+  `let f : T -> R = fun x:T -> e in body` — so it captures earlier
+  locals and enclosing parameters by value, its labeled parameters
+  (`~gain`) fill by name at call sites, and it partially applies like
+  any other function.
 - **Lambdas**: `fun x:Scalar ~y:Timestamp -> body` is an anonymous
   function expression. Parameters are annotated exactly like `let`
   parameters (function-typed ones parenthesized, `~` marks a label); the
@@ -210,7 +227,11 @@ Rules:
 - **Local bindings** type-check like top-level ones: the bound expression
   must match the annotation (a var-carrying partial application of a
   polymorphic primitive resolves against it), and the name is visible
-  only in the body of the `in`.
+  only in the body of the `in`. A parameterized local binding checks as
+  the lambda it desugars to: its parameters scope over the bound
+  expression only, and type variables in its annotation are the
+  enclosing top-level definition's (see above), rigid like everywhere
+  else in the body.
 - **Labeled arguments & partial application.** A parameter declared
   `~name:Type` is *labeled*; primitive parameters are all labeled with
   their signature names. At a call site, positional arguments fill the

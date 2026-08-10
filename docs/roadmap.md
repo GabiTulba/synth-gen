@@ -19,9 +19,6 @@ the documentation describes only what is.
   written out. Local inference (return types, `let ... in` annotations,
   lambda parameters) would remove most annotation weight without
   changing the checked language.
-- **Parameters on local bindings.** `let name : Type = e in body` binds
-  a value only; local *function* definitions currently require a
-  top-level `let` or a lambda.
 - **Per-definition visibility control.** A library's `lib.synth`
   publishes whole modules or re-exported values, but a published module
   exposes all of its definitions — there is no `private` below module

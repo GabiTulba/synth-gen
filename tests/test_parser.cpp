@@ -342,6 +342,46 @@ TEST(parser_let_in_requires_annotation_and_in) {
   CHECK(d2.hasErrors());
 }
 
+TEST(parser_let_in_with_params) {
+  // A local binding with parameters is a local function definition: it
+  // desugars to a lambda bound under a function-typed annotation, labels
+  // included.
+  DiagnosticBag diags;
+  auto defs = parseSrc(R"(
+let song : Scalar Signal =
+  let pluck freq:Scalar ~gain:Scalar : Scalar Signal = (sine freq) * gain in
+  pluck 440.0 ~gain:0.5
+;;
+)",
+                       diags);
+  CHECK(!diags.hasErrors());
+  const Expr& let = *defs[0].body;
+  CHECK(let.kind == Expr::Kind::Let);
+  CHECK(let.name == "pluck");
+  CHECK(let.declType->kind == Type::Kind::Fun);
+  CHECK(let.declType->items.size() == 2);
+  CHECK(let.declType->items[0]->kind == Type::Kind::Scalar);
+  CHECK(let.declType->labelAt(0) == "");
+  CHECK(let.declType->labelAt(1) == "gain");
+  CHECK(let.declType->ret->kind == Type::Kind::Signal);
+  const Expr& lam = *let.items[0];
+  CHECK(lam.kind == Expr::Kind::Lambda);
+  CHECK(lam.params.size() == 2);
+  CHECK(lam.params[0].name == "freq");
+  CHECK(!lam.params[0].labeled);
+  CHECK(lam.params[1].name == "gain");
+  CHECK(lam.params[1].labeled);
+  CHECK(lam.items[0]->kind == Expr::Kind::BinOp);
+  CHECK(let.items[1]->kind == Expr::Kind::App);
+}
+
+TEST(parser_let_in_params_still_require_annotation) {
+  // The return type stays mandatory when parameters are present.
+  DiagnosticBag d1;
+  parseSrc("let x : Scalar = let f y:Scalar = y in f 1.0 ;;", d1);
+  CHECK(d1.hasErrors());
+}
+
 TEST(parser_type_variables) {
   DiagnosticBag diags;
   auto defs = parseSrc(

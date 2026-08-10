@@ -1227,6 +1227,76 @@ let _ = voice |> sample ~from:0s ~to:50ms |> render ~name:"out" ~rate:8000.0 ;;
   CHECK(r.targets[0].cached);  // the edit touched only the shadowed def
 }
 
+TEST(build_let_in_function_matches_flat_version) {
+  // A local function definition and the same function written as a
+  // top-level `let` must produce byte-identical artifacts.
+  TempDir nested, flat;
+  nested.write("p.synth", R"(
+open Core open Core.Osc open Core.Fx open Core.Arrange open Core.Render open Core.Io open Core.Time open Core.Sig open Core.Math
+let song : Scalar Signal =
+  let pluck freq:Scalar ~gain:Scalar : Scalar Signal =
+    (sine freq) * (exp_decay 12.0) * gain in
+  let hit : Scalar -> Scalar Sample =
+    fun f:Scalar -> pluck f ~gain:0.8 |> sample ~from:0s ~to:150ms in
+  mix_all [place (hit 440.0) 0s; place (hit 660.0) 300ms]
+;;
+let _ = song |> sample ~from:0s ~to:600ms |> render ~name:"out" ~rate:8000.0 ;;
+)");
+  nested.write("build.json", projectManifest("n", {"p.synth"}));
+  flat.write("p.synth", R"(
+open Core open Core.Osc open Core.Fx open Core.Arrange open Core.Render open Core.Io open Core.Time open Core.Sig open Core.Math
+let pluck freq:Scalar ~gain:Scalar : Scalar Signal =
+  (sine freq) * (exp_decay 12.0) * gain ;;
+let hit f:Scalar : Scalar Sample =
+  pluck f ~gain:0.8 |> sample ~from:0s ~to:150ms ;;
+let song : Scalar Signal =
+  mix_all [place (hit 440.0) 0s; place (hit 660.0) 300ms] ;;
+let _ = song |> sample ~from:0s ~to:600ms |> render ~name:"out" ~rate:8000.0 ;;
+)");
+  flat.write("build.json", projectManifest("f", {"p.synth"}));
+  BuildResult rn = buildProject(nested.dir.string());
+  BuildResult rf = buildProject(flat.dir.string());
+  for (auto& d : rn.diags.items) std::cerr << d.message << "\n";
+  CHECK(rn.ok);
+  CHECK(rf.ok);
+  std::string a = slurp(nested.dir / "_build" / "artifacts" / "out.wav");
+  std::string b = slurp(flat.dir / "_build" / "artifacts" / "out.wav");
+  CHECK(!a.empty());
+  CHECK(a == b);
+}
+
+TEST(build_let_in_function_captures_enclosing_locals) {
+  // A local function's body captures earlier locals and the enclosing
+  // definition's parameters, like the lambda it desugars to.
+  TempDir captured, inlined;
+  captured.write("p.synth", R"(
+open Core open Core.Osc open Core.Fx open Core.Arrange open Core.Render open Core.Io open Core.Time open Core.Sig open Core.Math
+let stack detune:Scalar : Scalar Signal =
+  let base : Scalar = 220.0 in
+  let partial i:Scalar : Scalar Signal = sine (base + i * detune) in
+  mix_all (List.map partial [0.0; 1.0; 2.0]) ;;
+let _ = stack 3.0 |> sample ~from:0s ~to:200ms
+        |> render ~name:"out" ~rate:8000.0 ;;
+)");
+  captured.write("build.json", projectManifest("cap", {"p.synth"}));
+  inlined.write("p.synth", R"(
+open Core open Core.Osc open Core.Fx open Core.Arrange open Core.Render open Core.Io open Core.Time open Core.Sig open Core.Math
+let stack : Scalar Signal =
+  mix_all [sine 220.0; sine 223.0; sine 226.0] ;;
+let _ = stack |> sample ~from:0s ~to:200ms
+        |> render ~name:"out" ~rate:8000.0 ;;
+)");
+  inlined.write("build.json", projectManifest("inl", {"p.synth"}));
+  BuildResult rc = buildProject(captured.dir.string());
+  for (auto& d : rc.diags.items) std::cerr << d.message << "\n";
+  CHECK(rc.ok);
+  CHECK(buildProject(inlined.dir.string()).ok);
+  std::string a = slurp(captured.dir / "_build" / "artifacts" / "out.wav");
+  std::string b = slurp(inlined.dir / "_build" / "artifacts" / "out.wav");
+  CHECK(!a.empty());
+  CHECK(a == b);
+}
+
 TEST(build_lambda_place_equivalence) {
   // place_multi, an explicit lambda, and a positionally-curried `place`
   // must all render byte-identical artifacts.

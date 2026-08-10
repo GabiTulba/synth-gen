@@ -87,7 +87,7 @@
       "patterns": [
         {
           "name": "support.type.primitive.synth",
-          "match": "\\b(Scalar|Vector|Timestamp|String|Bool|Signal|Sample)\\b"
+          "match": "\\b(Scalar|Int|Vector|Timestamp|String|Bool|Signal|Sample)\\b"
         },
         {
           "name": "support.type.synth",

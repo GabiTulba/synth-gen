@@ -1,6 +1,7 @@
 #include "lexer.hpp"
 
 #include <cctype>
+#include <cerrno>
 #include <cstdlib>
 #include <map>
 
@@ -38,6 +39,7 @@ const char* tokenName(Tok t) {
     case Tok::UpIdent: return "capitalized identifier";
     case Tok::TypeVar: return "type variable";
     case Tok::Number: return "number";
+    case Tok::IntNum: return "integer literal";
     case Tok::Time: return "timestamp literal";
     case Tok::Bool: return "boolean literal";
     case Tok::String: return "string literal";
@@ -152,12 +154,15 @@ std::vector<Token> lex(const std::string& src, const std::string& file,
     }
     if (std::isdigit((unsigned char)c)) {
       while (i < n && std::isdigit((unsigned char)src[i])) i++;
+      bool sawDot = false;
       if (i < n && src[i] == '.' && i + 1 < n &&
           std::isdigit((unsigned char)src[i + 1])) {
+        sawDot = true;
         i++;
         while (i < n && std::isdigit((unsigned char)src[i])) i++;
       }
-      double value = std::strtod(src.substr(lo, i - lo).c_str(), nullptr);
+      std::string digits = src.substr(lo, i - lo);
+      double value = std::strtod(digits.c_str(), nullptr);
       // Unit suffix => Timestamp literal.
       bool isTime = false;
       for (auto& [suffix, mult] : unitTable()) {
@@ -178,6 +183,17 @@ std::vector<Token> lex(const std::string& src, const std::string& file,
         diags.error(file, {bad, i},
                     "unknown unit suffix '" + src.substr(bad, i - bad) +
                         "' (expected ns, us, ms, s or m)");
+        continue;
+      }
+      // Without a decimal point the literal is an Int; with one, a Scalar.
+      if (!sawDot) {
+        errno = 0;
+        long long iv = std::strtoll(digits.c_str(), nullptr, 10);
+        if (errno == ERANGE) {
+          diags.error(file, {lo, i}, "integer literal is too large");
+          iv = 0;
+        }
+        out.push_back({Tok::IntNum, {lo, i}, {}, value, (int64_t)iv});
         continue;
       }
       push(Tok::Number, lo, i, {}, value);

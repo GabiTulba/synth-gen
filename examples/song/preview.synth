@@ -23,6 +23,6 @@ open Basic.Kick
 let _ =
   mix_all [place_multi (sample (P.strike 261.63) 0s 900ms) [0s; 600ms];
            place_multi (sample kick 0s 250ms)
-                       (time_steps ~start:0s ~step:300ms ~count:4.0)]
+                       (time_steps ~start:0s ~step:300ms ~count:4)]
   |> sample ~from:0s ~to:1200ms
   |> render ~name:"library-preview" ~rate:48000.0 ;;

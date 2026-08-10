@@ -540,3 +540,32 @@ TEST(parser_external_is_contextual) {
   CHECK(defs[0].name == "external");
   CHECK(defs[1].body->kind == Expr::Kind::Ident);
 }
+
+TEST(parser_int_type_and_literal) {
+  DiagnosticBag diags;
+  auto defs = parseSrc("let n : Int = 42 ;;", diags);
+  CHECK(!diags.hasErrors());
+  CHECK(defs[0].retType->kind == Type::Kind::Int);
+  CHECK(defs[0].body->kind == Expr::Kind::IntLit);
+  CHECK(defs[0].body->inum == 42);
+}
+
+TEST(parser_unary_minus_is_neg_node) {
+  DiagnosticBag diags;
+  auto defs = parseSrc("let n : Int = -5 ;;", diags);
+  CHECK(!diags.hasErrors());
+  const Expr& b = *defs[0].body;
+  CHECK(b.kind == Expr::Kind::Neg);
+  CHECK(b.items[0]->kind == Expr::Kind::IntLit);
+  CHECK(b.items[0]->inum == 5);
+}
+
+TEST(parser_unary_minus_binds_tighter_than_mul) {
+  DiagnosticBag diags;
+  auto defs = parseSrc("let x : Scalar = -a * 2.0 ;;", diags);
+  CHECK(!diags.hasErrors());
+  const Expr& b = *defs[0].body;
+  CHECK(b.kind == Expr::Kind::BinOp);
+  CHECK(b.op == BinOpKind::Mul);
+  CHECK(b.items[0]->kind == Expr::Kind::Neg);
+}

@@ -44,45 +44,45 @@ module Seq = Voices.Seq
 
 (* ---------- drums ---------- *)
 let kick_line : Scalar Signal =
-  mix_all [Seq.humanized Drums.kick_hit ~start:16s ~step:500ms ~count:31.0
+  mix_all [Seq.humanized Drums.kick_hit ~start:16s ~step:500ms ~count:31
              ~seed:41.0 ~spread:3ms;
-           Seq.humanized Drums.kick_hit ~start:32s ~step:500ms ~count:32.0
+           Seq.humanized Drums.kick_hit ~start:32s ~step:500ms ~count:32
              ~seed:42.0 ~spread:3ms;
-           Seq.humanized Drums.kick_hit ~start:56s ~step:500ms ~count:15.0
+           Seq.humanized Drums.kick_hit ~start:56s ~step:500ms ~count:15
              ~seed:43.0 ~spread:3ms;
-           Seq.humanized Drums.kick_hit ~start:64s ~step:500ms ~count:48.0
+           Seq.humanized Drums.kick_hit ~start:64s ~step:500ms ~count:48
              ~seed:44.0 ~spread:3ms;
-           Seq.humanized Drums.kick_hit ~start:92s ~step:500ms ~count:7.0
+           Seq.humanized Drums.kick_hit ~start:92s ~step:500ms ~count:7
              ~seed:45.0 ~spread:3ms;
-           Seq.humanized Drums.kick_hit ~start:96s ~step:500ms ~count:32.0
+           Seq.humanized Drums.kick_hit ~start:96s ~step:500ms ~count:32
              ~seed:46.0 ~spread:3ms;
-           Seq.humanized Drums.kick_hit ~start:108250ms ~step:250ms ~count:15.0
+           Seq.humanized Drums.kick_hit ~start:108250ms ~step:250ms ~count:15
              ~seed:47.0 ~spread:3ms]
 ;;
 
 let snare_line : Scalar Signal =
-  mix_all [Seq.humanized Drums.snare_hit ~start:30s ~step:250ms ~count:6.0
+  mix_all [Seq.humanized Drums.snare_hit ~start:30s ~step:250ms ~count:6
              ~seed:31.0 ~spread:4ms;
-           Seq.humanized Drums.snare_hit ~start:32500ms ~step:1s ~count:16.0
+           Seq.humanized Drums.snare_hit ~start:32500ms ~step:1s ~count:16
              ~seed:32.0 ~spread:5ms;
-           Seq.humanized Drums.snare_hit ~start:62s ~step:250ms ~count:6.0
+           Seq.humanized Drums.snare_hit ~start:62s ~step:250ms ~count:6
              ~seed:33.0 ~spread:4ms;
-           Seq.humanized Drums.snare_hit ~start:64500ms ~step:1s ~count:24.0
+           Seq.humanized Drums.snare_hit ~start:64500ms ~step:1s ~count:24
              ~seed:34.0 ~spread:5ms;
-           Seq.humanized Drums.snare_hit ~start:94s ~step:250ms ~count:6.0
+           Seq.humanized Drums.snare_hit ~start:94s ~step:250ms ~count:6
              ~seed:35.0 ~spread:4ms;
-           Seq.humanized Drums.snare_hit ~start:96500ms ~step:1s ~count:16.0
+           Seq.humanized Drums.snare_hit ~start:96500ms ~step:1s ~count:16
              ~seed:36.0 ~spread:5ms]
 ;;
 
 let hat_line : Scalar Signal =
-  mix_all [Seq.humanized Drums.hat_hit ~start:16s ~step:250ms ~count:62.0
+  mix_all [Seq.humanized Drums.hat_hit ~start:16s ~step:250ms ~count:62
              ~seed:21.0 ~spread:8ms;
-           Seq.humanized Drums.hat_hit ~start:32250ms ~step:500ms ~count:32.0
+           Seq.humanized Drums.hat_hit ~start:32250ms ~step:500ms ~count:32
              ~seed:22.0 ~spread:8ms;
-           Seq.humanized Drums.hat_hit ~start:64250ms ~step:250ms ~count:94.0
+           Seq.humanized Drums.hat_hit ~start:64250ms ~step:250ms ~count:94
              ~seed:23.0 ~spread:8ms;
-           Seq.humanized Drums.hat_hit ~start:96250ms ~step:250ms ~count:62.0
+           Seq.humanized Drums.hat_hit ~start:96250ms ~step:250ms ~count:62
              ~seed:24.0 ~spread:8ms]
 ;;
 
@@ -93,15 +93,15 @@ let drum_line : Scalar Signal =
 (* ---------- alarm: blinking pluck through the intro ---------- *)
 let alarm_line : Scalar Signal =
   let strong : Scalar Signal =
-    Seq.pattern Fx.alarm_hit ~start:0s ~step:1s ~count:14.0 in
+    Seq.pattern Fx.alarm_hit ~start:0s ~step:1s ~count:14 in
   let weak : Scalar Signal =
-    Seq.pattern Fx.alarm_hit ~start:500ms ~step:1s ~count:14.0 in
+    Seq.pattern Fx.alarm_hit ~start:500ms ~step:1s ~count:14 in
   let dry : Scalar Signal = strong + weak * 0.45 in
   dry + (dry |> delay ~by:250ms) * 0.3
 ;;
 
 (* ---------- bass (roots: A1, F1, D2, E1) ---------- *)
-let eighths ~freq:Scalar ~start:Timestamp ~count:Scalar ~seed:Scalar
+let eighths ~freq:Scalar ~start:Timestamp ~count:Int ~seed:Scalar
     : Scalar Signal =
   Seq.humanized (Bass.pulse freq) ~start:start ~step:250ms ~count:count
     ~seed:seed ~spread:5ms
@@ -113,14 +113,14 @@ let eighths ~freq:Scalar ~start:Timestamp ~count:Scalar ~seed:Scalar
    on the offbeat, which keeps the low end moving instead of looping. *)
 let grind_sixteenths ~freq:Scalar ~start:Timestamp ~seed:Scalar
     : Scalar Signal =
-  Seq.humanized (Bass.grind freq) ~start:start ~step:125ms ~count:32.0
+  Seq.humanized (Bass.grind freq) ~start:start ~step:125ms ~count:32
     ~seed:seed ~spread:4ms
 ;;
 let grind_pump ~freq:Scalar ~start:Timestamp ~offstart:Timestamp ~seed:Scalar
     : Scalar Signal =
-  Seq.humanized (Bass.grind freq) ~start:start ~step:500ms ~count:8.0
+  Seq.humanized (Bass.grind freq) ~start:start ~step:500ms ~count:8
     ~seed:seed ~spread:5ms
-  + Seq.humanized (Bass.grind (freq * 2.0)) ~start:offstart ~step:500ms ~count:8.0
+  + Seq.humanized (Bass.grind (freq * 2.0)) ~start:offstart ~step:500ms ~count:8
       ~seed:(seed + 0.5) ~spread:5ms
 ;;
 
@@ -131,10 +131,10 @@ let bass_line : Scalar Signal =
              place_multi (Bass.held 73.42) [8s; 10s];
              place_multi (Bass.held 41.2) [12s; 14s]] in
   let build : Scalar Signal =
-    mix_all [eighths ~freq:55.0 ~start:16s ~count:16.0 ~seed:1.0;
-             eighths ~freq:43.65 ~start:20s ~count:16.0 ~seed:2.0;
-             eighths ~freq:73.42 ~start:24s ~count:16.0 ~seed:3.0;
-             eighths ~freq:41.2 ~start:28s ~count:14.0 ~seed:4.0] in
+    mix_all [eighths ~freq:55.0 ~start:16s ~count:16 ~seed:1.0;
+             eighths ~freq:43.65 ~start:20s ~count:16 ~seed:2.0;
+             eighths ~freq:73.42 ~start:24s ~count:16 ~seed:3.0;
+             eighths ~freq:41.2 ~start:28s ~count:14 ~seed:4.0] in
   let drop1 : Scalar Signal =
     mix_all [grind_pump ~freq:55.0 ~start:32s ~offstart:32250ms ~seed:5.0;
              grind_pump ~freq:43.65 ~start:36s ~offstart:36250ms ~seed:6.0;
@@ -176,7 +176,7 @@ let pad_line detune:Scalar : Scalar Signal =
 ;;
 
 (* ---------- distorted guitar (drops only) ---------- *)
-let chugs ~freq:Scalar ~start:Timestamp ~count:Scalar ~seed:Scalar
+let chugs ~freq:Scalar ~start:Timestamp ~count:Int ~seed:Scalar
     : Scalar Signal =
   Seq.humanized (Guitar.chug freq) ~start:start ~step:250ms ~count:count
     ~seed:seed ~spread:7ms
@@ -185,16 +185,16 @@ let chugs ~freq:Scalar ~start:Timestamp ~count:Scalar ~seed:Scalar
 (* Guitar is a drop-2 weapon: drop 1 stays drums-and-bass so the second
    drop lands harder. *)
 let chug_part : Scalar Signal =
-  mix_all [chugs ~freq:110.0 ~start:64s ~count:12.0 ~seed:61.0;
-           chugs ~freq:87.31 ~start:68s ~count:12.0 ~seed:62.0;
-           chugs ~freq:73.42 ~start:72s ~count:12.0 ~seed:63.0;
-           chugs ~freq:82.41 ~start:76s ~count:12.0 ~seed:64.0;
-           chugs ~freq:110.0 ~start:80s ~count:12.0 ~seed:65.0;
-           chugs ~freq:87.31 ~start:84s ~count:12.0 ~seed:66.0;
-           chugs ~freq:110.0 ~start:96s ~count:12.0 ~seed:67.0;
-           chugs ~freq:87.31 ~start:100s ~count:12.0 ~seed:68.0;
-           chugs ~freq:73.42 ~start:104s ~count:12.0 ~seed:69.0;
-           chugs ~freq:82.41 ~start:108s ~count:12.0 ~seed:70.0]
+  mix_all [chugs ~freq:110.0 ~start:64s ~count:12 ~seed:61.0;
+           chugs ~freq:87.31 ~start:68s ~count:12 ~seed:62.0;
+           chugs ~freq:73.42 ~start:72s ~count:12 ~seed:63.0;
+           chugs ~freq:82.41 ~start:76s ~count:12 ~seed:64.0;
+           chugs ~freq:110.0 ~start:80s ~count:12 ~seed:65.0;
+           chugs ~freq:87.31 ~start:84s ~count:12 ~seed:66.0;
+           chugs ~freq:110.0 ~start:96s ~count:12 ~seed:67.0;
+           chugs ~freq:87.31 ~start:100s ~count:12 ~seed:68.0;
+           chugs ~freq:73.42 ~start:104s ~count:12 ~seed:69.0;
+           chugs ~freq:82.41 ~start:108s ~count:12 ~seed:70.0]
 ;;
 
 (* Lead runs: four syncopated notes at the tail of each chord segment
@@ -265,7 +265,7 @@ let chain_part : Scalar Signal =
   let tolling : Scalar Signal =
     place_multi Fx.chain_shake [89s; 91s; 93500ms; 95s] in
   let drop3 : Scalar Signal =
-    Seq.pattern Fx.chain_shake ~start:96250ms ~step:2s ~count:8.0 in
+    Seq.pattern Fx.chain_shake ~start:96250ms ~step:2s ~count:8 in
   let outro : Scalar Signal =
     let dying : Scalar Signal = Fx.chain_shake |> place ~at:112500ms in
     dying + (dying |> delay ~by:700ms) * 0.5

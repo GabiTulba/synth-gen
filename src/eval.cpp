@@ -98,6 +98,7 @@ class Interp {
   Value eval(const Expr& e, Env& env, const CheckedModule& mod) {
     switch (e.kind) {
       case Expr::Kind::NumLit: return Value{ScalarV{e.num}};
+      case Expr::Kind::IntLit: return Value{IntV{e.inum}};
       case Expr::Kind::TimeLit: return Value{TimeV{e.num}};
       case Expr::Kind::BoolLit: return Value{BoolV{e.num != 0.0}};
       case Expr::Kind::StrLit: return Value{StringV{e.str}};
@@ -143,6 +144,20 @@ class Interp {
         Value l = eval(*e.items[0], env, mod);
         Value r = eval(*e.items[1], env, mod);
         return binop(e.op, std::move(l), std::move(r));
+      }
+      case Expr::Kind::Neg: {
+        Value v = eval(*e.items[0], env, mod);
+        if (auto* iv = std::get_if<IntV>(&v.v)) return Value{IntV{-iv->v}};
+        if (auto* s = std::get_if<ScalarV>(&v.v))
+          return Value{ScalarV{-s->v}};
+        if (auto* vec = std::get_if<VectorV>(&v.v)) {
+          VectorV out = *vec;
+          for (double& x : out.v) x = -x;
+          return Value{std::move(out)};
+        }
+        if (auto* sig = std::get_if<SigPtr>(&v.v))
+          return Value{makeBinOp(SigBinOp::Sub, makeConst(0.0), *sig)};
+        throw EvalError("unary '-' applied to a non-numeric value");
       }
       case Expr::Kind::ListLit: {
         ListV out;
@@ -358,6 +373,23 @@ class Interp {
     }
   }
 
+  // Int arithmetic wraps like two's complement (add/sub/mul run on the
+  // unsigned representation, so overflow is defined); division truncates
+  // towards zero and its two undefined cases are build errors.
+  static int64_t intArith(BinOpKind op, int64_t a, int64_t b) {
+    switch (op) {
+      case BinOpKind::Add: return (int64_t)((uint64_t)a + (uint64_t)b);
+      case BinOpKind::Sub: return (int64_t)((uint64_t)a - (uint64_t)b);
+      case BinOpKind::Mul: return (int64_t)((uint64_t)a * (uint64_t)b);
+      case BinOpKind::Div:
+        if (b == 0) throw EvalError("integer division by zero");
+        if (a == INT64_MIN && b == -1)
+          throw EvalError("integer division overflow");
+        return a / b;
+      default: return 0;  // comparisons/logic never reach intArith
+    }
+  }
+
   static SigBinOp toSigOp(BinOpKind op) {
     switch (op) {
       case BinOpKind::Add: return SigBinOp::Add;
@@ -403,18 +435,33 @@ class Interp {
       if (auto* a = std::get_if<ScalarV>(&l.v))
         if (auto* b = std::get_if<ScalarV>(&r.v))
           return Value{BoolV{cmp(op, a->v, b->v)}};
+      if (auto* a = std::get_if<IntV>(&l.v))
+        if (auto* b = std::get_if<IntV>(&r.v)) {
+          switch (op) {
+            case BinOpKind::Lt: return Value{BoolV{a->v < b->v}};
+            case BinOpKind::Le: return Value{BoolV{a->v <= b->v}};
+            case BinOpKind::Gt: return Value{BoolV{a->v > b->v}};
+            case BinOpKind::Ge: return Value{BoolV{a->v >= b->v}};
+            case BinOpKind::Eq: return Value{BoolV{a->v == b->v}};
+            case BinOpKind::Ne: return Value{BoolV{a->v != b->v}};
+            default: break;
+          }
+        }
       if (auto* a = std::get_if<TimeV>(&l.v))
         if (auto* b = std::get_if<TimeV>(&r.v))
           return Value{BoolV{cmp(op, a->seconds, b->seconds)}};
       throw EvalError(
-          "comparison needs two Scalars or two Timestamps at build time "
-          "(a signal cannot be compared sample-wise)");
+          "comparison needs two Ints, two Scalars or two Timestamps at "
+          "build time (a signal cannot be compared sample-wise)");
     }
     bool lSig = std::holds_alternative<SigPtr>(l.v);
     bool rSig = std::holds_alternative<SigPtr>(r.v);
     if (lSig || rSig)
       return Value{makeBinOp(toSigOp(op), asSignal(l), asSignal(r))};
 
+    if (auto* a = std::get_if<IntV>(&l.v))
+      if (auto* b = std::get_if<IntV>(&r.v))
+        return Value{IntV{intArith(op, a->v, b->v)}};
     if (auto* a = std::get_if<ScalarV>(&l.v)) {
       if (auto* b = std::get_if<ScalarV>(&r.v))
         return Value{ScalarV{arith(op, a->v, b->v)}};

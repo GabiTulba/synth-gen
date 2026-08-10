@@ -53,19 +53,24 @@ submodules are open.
 ## Types, annotations, and time
 
 Everything is fully annotated — the checker verifies, it never guesses.
-The value types are `Scalar`, `Vector` (N-channel), `Timestamp`,
+The value types are `Scalar`, `Int`, `Vector` (N-channel), `Timestamp`,
 `String`, `Bool`, `unit`, plus `t Signal`, `t Sample`, `t list`, and
-tuples. Number literals are always `Scalar`; a literal with a unit
-suffix (`100ns`, `800ms`, `1.5s`, `1m`) is a `Timestamp`. A *computed*
-Scalar enters the time domain through `to_sec`/`to_ms`/`to_min`
-(`to_min (1.0 / bpm)` is one beat) — and there is deliberately no
-conversion back, because a Timestamp that decays into a bare number is
-how unit confusion gets in.
+tuples. A number literal with a decimal point is a `Scalar` (`440.0`);
+without one it is an `Int` (`8`) — the whole-number kind that counts
+and indexes. A literal with a unit suffix (`100ns`, `800ms`, `1.5s`,
+`1m`) is a `Timestamp`. A *computed* Scalar enters the time domain
+through `to_sec`/`to_ms`/`to_min` (`to_min (1.0 / bpm)` is one beat) —
+and there is deliberately no conversion back, because a Timestamp that
+decays into a bare number is how unit confusion gets in. Ints convert
+only explicitly: `to_scalar` exactly, and `round`/`floor`/`ceil` back
+from the continuous side.
 
 Arithmetic (`+ - * /`) lifts pointwise and broadcasts Scalars:
 `Signal * Signal` is pointwise, `Signal * Scalar` scales, `Vector`
 arithmetic is element-wise with channel counts checked when the graph is
-built. See spec §3 for the full operator table.
+built. `Int` arithmetic stays whole (`/` divides towards zero) and
+never mixes with the continuous kinds implicitly. See spec §3 for the
+full operator table.
 
 ## Labeled arguments, currying, pipes, lambdas
 
@@ -81,7 +86,7 @@ let warm : Scalar Signal =
 
 let pattern : Scalar Signal =
   let hit : Scalar Sample = warm |> sample ~from:0s ~to:100ms in
-  let beats : Timestamp list = time_steps ~start:0s ~step:200ms ~count:5.0 in
+  let beats : Timestamp list = time_steps ~start:0s ~step:200ms ~count:5 in
   mix_all (List.map (place hit) beats) ;;   (* or: place_multi hit beats *)
 
 let echoes : Scalar Signal =
@@ -227,11 +232,12 @@ per-channel forms). The math primitives `exp`, `sqrt`, `log`, and
 
 `time_steps ~start ~step ~count` builds arithmetic timestamp sequences —
 the natural feed for `place_multi`
-(`place_multi kick (time_steps ~start:0s ~step:500ms ~count:8.0)`);
+(`place_multi kick (time_steps ~start:0s ~step:500ms ~count:8)`);
 `jitter ~seed ~spread` humanizes such a list with hash-derived (pure,
 reproducible) per-note timing deltas. `List.init` / `List.repeat` build
-generated lists; counts and indices are Scalars, validated at build time
-to be whole and non-negative (there is no Integer type in v1).
+generated lists; counts and indices are `Int`s, so wholeness is the
+type system's business (`List.init 6 (fun i:Int -> ...)`), and the
+index reaches Scalar arithmetic through `to_scalar`.
 
 `place_multi` sums its placements without normalization, so overlapping
 or dense patterns can exceed full scale — rendering works in doubles and

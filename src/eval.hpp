@@ -1,4 +1,5 @@
 #pragma once
+#include <cstdint>
 #include <stdexcept>
 #include <string>
 #include <variant>
@@ -23,6 +24,7 @@ struct Value;
 
 struct UnitV {};
 struct ScalarV { double v = 0; };
+struct IntV { int64_t v = 0; };
 struct TimeV { double seconds = 0; };
 struct BoolV { bool v = false; };
 struct StringV { std::string s; };
@@ -52,7 +54,7 @@ struct ListV { std::vector<Value> items; };
 struct TupleV { std::vector<Value> items; };
 
 struct Value {
-  std::variant<UnitV, ScalarV, TimeV, BoolV, StringV, VectorV, SigPtr,
+  std::variant<UnitV, ScalarV, IntV, TimeV, BoolV, StringV, VectorV, SigPtr,
                SampleV, ListV, TupleV, FunV, LambdaV>
       v;
 };

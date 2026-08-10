@@ -23,15 +23,15 @@ Value foldImpl(Ctx& ctx, std::vector<Value>& args) {
 }
 
 Value listInitImpl(Ctx& ctx, std::vector<Value>& args) {
-  int64_t n = wholeCount(scalarArg(args[0]), "List.init");
+  int64_t n = countArg(args[0], "List.init");
   ListV out;
   for (int64_t i = 0; i < n; i++)
-    out.items.push_back(ctx.apply(args[1], {Value{ScalarV{(double)i}}}));
+    out.items.push_back(ctx.apply(args[1], {Value{IntV{i}}}));
   return Value{std::move(out)};
 }
 
 Value repeatImpl(Ctx&, std::vector<Value>& args) {
-  int64_t n = wholeCount(scalarArg(args[0]), "List.repeat");
+  int64_t n = countArg(args[0], "List.repeat");
   ListV out;
   for (int64_t i = 0; i < n; i++) out.items.push_back(args[1]);
   return Value{std::move(out)};
@@ -40,7 +40,7 @@ Value repeatImpl(Ctx&, std::vector<Value>& args) {
 Value timeStepsImpl(Ctx&, std::vector<Value>& args) {
   double start = timeArg(args[0]);
   double step = timeArg(args[1]);
-  int64_t n = wholeCount(scalarArg(args[2]), "time_steps");
+  int64_t n = countArg(args[2], "time_steps");
   ListV out;
   for (int64_t i = 0; i < n; i++)
     out.items.push_back(Value{TimeV{start + step * (double)i}});

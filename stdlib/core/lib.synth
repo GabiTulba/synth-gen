@@ -93,10 +93,10 @@ module List = struct
   let map ~f:('a -> 'b) ~xs:'a list : 'b list = external "lists.cpp" ;;
   let fold ~f:('a -> 'b -> 'a) ~init:'a ~xs:'b list : 'a =
     external "lists.cpp" ;;
-  (* init builds [f 0.0; f 1.0; ...; f (n-1)]; counts must be whole and
-     non-negative, checked at build time. *)
-  let init ~n:Scalar ~f:(Scalar -> 'a) : 'a list = external "lists.cpp" ;;
-  let repeat ~n:Scalar ~x:'a : 'a list = external "lists.cpp" ;;
+  (* init builds [f 0; f 1; ...; f (n-1)]; counts are Ints, so the type
+     system guarantees they are whole (negatives are a build error). *)
+  let init ~n:Int ~f:(Int -> 'a) : 'a list = external "lists.cpp" ;;
+  let repeat ~n:Int ~x:'a : 'a list = external "lists.cpp" ;;
 end ;;
 
 (* --- Time: conversions and Timestamp sequences ------------------------
@@ -109,7 +109,7 @@ module Time = struct
   let to_sec ~x:Scalar : Timestamp = external "math.cpp" ;;
   let to_ms ~x:Scalar : Timestamp = external "math.cpp" ;;
   let to_min ~x:Scalar : Timestamp = external "math.cpp" ;;
-  let time_steps ~start:Timestamp ~step:Timestamp ~count:Scalar
+  let time_steps ~start:Timestamp ~step:Timestamp ~count:Int
       : Timestamp list = external "lists.cpp" ;;
   (* Humanization: hash-derived deltas in [-spread, +spread], a pure
      function of (seed, index) - deterministic and cacheable. *)
@@ -140,6 +140,13 @@ module Math = struct
   let sqrt ~x:'a : 'a = external "math.cpp" ;;
   let log ~x:'a : 'a = external "math.cpp" ;;
   let pow ~x:'a ~y:Scalar : 'a = external "math.cpp" ;;
+  (* Int <-> Scalar conversions. Ints never decay implicitly; going to
+     the continuous side is exact (to_scalar), coming back says how the
+     fraction is dropped (round / floor / ceil). *)
+  let to_scalar ~n:Int : Scalar = external "math.cpp" ;;
+  let round ~x:Scalar : Int = external "math.cpp" ;;
+  let floor ~x:Scalar : Int = external "math.cpp" ;;
+  let ceil ~x:Scalar : Int = external "math.cpp" ;;
   (* Boolean negation; && and || are (short-circuiting) operators. *)
   let not ~b:Bool : Bool = external "math.cpp" ;;
 end ;;

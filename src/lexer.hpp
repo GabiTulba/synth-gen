@@ -1,4 +1,5 @@
 #pragma once
+#include <cstdint>
 #include <string>
 #include <vector>
 
@@ -19,7 +20,8 @@ enum class Tok {
   Ident,      // lowercase-initial identifier or `_`
   UpIdent,    // uppercase-initial identifier (types, module names)
   TypeVar,    // 'a — a type variable in an annotation; text is the name
-  Number,     // numeric literal (Scalar)
+  Number,     // numeric literal with a decimal point (Scalar)
+  IntNum,     // numeric literal without a decimal point (Int); value in inum
   Time,       // numeric literal with unit suffix (Timestamp); value in seconds
   Bool,       // `true` / `false`; num is 1.0 / 0.0
   String,     // "..." literal
@@ -56,6 +58,7 @@ struct Token {
   Span span;
   std::string text;   // identifier / string contents
   double num = 0.0;   // Number value, or Time value in seconds
+  int64_t inum = 0;   // IntNum value
 };
 
 // Tokenizes `source`. Lexical errors are reported into `diags` (with `file`

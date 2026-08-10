@@ -873,14 +873,14 @@ TEST(build_timestamp_conversions_match_literals) {
 open Core open Core.Osc open Core.Fx open Core.Arrange open Core.Render open Core.Io open Core.Time open Core.Sig open Core.Math
 let hit : Scalar Sample = sample (sine 660.0 * exp_decay 20.0) 0s (to_ms 200.0) ;;
 let _ = place_multi hit (time_steps ~start:(to_ms 250.0)
-                                    ~step:(to_min (1.0 / 120.0)) ~count:3.0)
+                                    ~step:(to_min (1.0 / 120.0)) ~count:3)
   |> sample ~from:(to_sec 0.0) ~to:(to_sec 2.0)
   |> render ~name:"out" ~rate:8000.0 ;;
 )");
   write(literal, R"(
 open Core open Core.Osc open Core.Fx open Core.Arrange open Core.Render open Core.Io open Core.Time open Core.Sig open Core.Math
 let hit : Scalar Sample = sample (sine 660.0 * exp_decay 20.0) 0s 200ms ;;
-let _ = place_multi hit (time_steps ~start:250ms ~step:500ms ~count:3.0)
+let _ = place_multi hit (time_steps ~start:250ms ~step:500ms ~count:3)
   |> sample ~from:0s ~to:2s
   |> render ~name:"out" ~rate:8000.0 ;;
 )");
@@ -1066,9 +1066,9 @@ TEST(build_list_init_harmonic_stack) {
   TempDir tp;
   tp.write("p.synth", R"(
 open Core open Core.Osc open Core.Fx open Core.Arrange open Core.Render open Core.Io open Core.Time open Core.Sig open Core.Math
-let harmonic i:Scalar : Scalar Signal =
-  sine (110.0 * (i + 1.0)) * (1.0 / (i + 1.0)) ;;
-let stack : Scalar Signal = mix_all (List.init 5.0 harmonic) * 0.3 ;;
+let harmonic i:Int : Scalar Signal =
+  sine (110.0 * (to_scalar i + 1.0)) * (1.0 / (to_scalar i + 1.0)) ;;
+let stack : Scalar Signal = mix_all (List.init 5 harmonic) * 0.3 ;;
 let _ = stack |> sample ~from:0s ~to:200ms |> render ~name:"out" ~rate:8000.0 ;;
 )");
   tp.write("build.json", projectManifest("li", {"p.synth"}));
@@ -1098,7 +1098,7 @@ TEST(build_time_steps_matches_manual_list) {
   stepped.write("p.synth", R"(
 open Core open Core.Osc open Core.Fx open Core.Arrange open Core.Render open Core.Io open Core.Time open Core.Sig open Core.Math
 let hit : Scalar Sample = sine 660.0 * exp_decay 20.0 |> sample ~from:0s ~to:100ms ;;
-let _ = place_multi hit (time_steps ~start:0s ~step:150ms ~count:4.0)
+let _ = place_multi hit (time_steps ~start:0s ~step:150ms ~count:4)
         |> sample ~from:0s ~to:600ms |> render ~name:"out" ~rate:8000.0 ;;
 )");
   stepped.write("build.json", projectManifest("ts", {"p.synth"}));
@@ -1121,7 +1121,7 @@ TEST(build_repeat_and_count_validation) {
   TempDir tp;
   tp.write("p.synth", R"(
 open Core open Core.Osc open Core.Fx open Core.Arrange open Core.Render open Core.Io open Core.Time open Core.Sig open Core.Math
-let layers : Scalar Signal = mix_all (List.repeat 3.0 (sine 220.0)) * 0.2 ;;
+let layers : Scalar Signal = mix_all (List.repeat 3 (sine 220.0)) * 0.2 ;;
 let _ = layers |> sample ~from:0s ~to:100ms |> render ~name:"out" ~rate:8000.0 ;;
 )");
   tp.write("build.json", projectManifest("rep", {"p.synth"}));
@@ -1133,18 +1133,32 @@ let _ = layers |> sample ~from:0s ~to:100ms |> render ~name:"out" ~rate:8000.0 ;
   for (double v : w.channels[0]) peak = std::max(peak, std::fabs(v));
   CHECK_NEAR(peak, 0.6, 0.01);
 
-  // Fractional and negative counts are build errors.
+  // A fractional count no longer needs a build-time check: counts are
+  // Ints, so 2.5 is a *type* error now.
   TempDir bad;
   bad.write("p.synth", R"(
 open Core open Core.Osc open Core.Fx open Core.Arrange open Core.Render open Core.Io open Core.Time open Core.Sig open Core.Math
 let xs : Scalar list = List.repeat 2.5 1.0 ;;
-let _ = mix_all (List.repeat 1.0 (sine 1.0)) |> sample ~from:0s ~to:10ms
+let _ = mix_all (List.repeat 1 (sine 1.0)) |> sample ~from:0s ~to:10ms
         |> render ~name:"x" ~rate:8000.0 ;;
 )");
   bad.write("build.json", projectManifest("badrep", {"p.synth"}));
   BuildResult rb = buildProject(bad.dir.string());
   CHECK(!rb.ok);
   CHECK(rb.diags.hasErrors());
+
+  // A negative count types fine and is still a build (evaluation) error.
+  TempDir neg;
+  neg.write("p.synth", R"(
+open Core open Core.Osc open Core.Fx open Core.Arrange open Core.Render open Core.Io open Core.Time open Core.Sig open Core.Math
+let xs : Scalar list = List.repeat (0 - 2) 1.0 ;;
+let _ = mix_all (List.repeat 1 (sine 1.0)) |> sample ~from:0s ~to:10ms
+        |> render ~name:"x" ~rate:8000.0 ;;
+)");
+  neg.write("build.json", projectManifest("negrep", {"p.synth"}));
+  BuildResult rn = buildProject(neg.dir.string());
+  CHECK(!rn.ok);
+  CHECK(rn.diags.hasErrors());
 }
 
 TEST(build_let_in_matches_flat_version) {
@@ -1156,7 +1170,7 @@ open Core open Core.Osc open Core.Fx open Core.Arrange open Core.Render open Cor
 let song : Scalar Signal =
   let hit : Scalar Sample = sine 440.0 * exp_decay 12.0
                             |> sample ~from:0s ~to:150ms in
-  let beats : Timestamp list = time_steps ~start:0s ~step:200ms ~count:5.0 in
+  let beats : Timestamp list = time_steps ~start:0s ~step:200ms ~count:5 in
   place_multi hit beats
 ;;
 let _ = song |> sample ~from:0s ~to:1s |> render ~name:"out" ~rate:8000.0 ;;
@@ -1166,7 +1180,7 @@ let _ = song |> sample ~from:0s ~to:1s |> render ~name:"out" ~rate:8000.0 ;;
 open Core open Core.Osc open Core.Fx open Core.Arrange open Core.Render open Core.Io open Core.Time open Core.Sig open Core.Math
 let hit : Scalar Sample = sine 440.0 * exp_decay 12.0
                           |> sample ~from:0s ~to:150ms ;;
-let beats : Timestamp list = time_steps ~start:0s ~step:200ms ~count:5.0 ;;
+let beats : Timestamp list = time_steps ~start:0s ~step:200ms ~count:5 ;;
 let song : Scalar Signal = place_multi hit beats ;;
 let _ = song |> sample ~from:0s ~to:1s |> render ~name:"out" ~rate:8000.0 ;;
 )");
@@ -1629,15 +1643,15 @@ TEST(build_core_qualified_end_to_end) {
   qualified.write("q.synth",
                   "import Core\n"
                   "let _ = Core.Render.render \"out\" 8000.0\n"
-                  "  (Core.Arrange.sample (Core.Arrange.mix_all (Core.List.init ~n:3.0\n"
-                  "     ~f:(fun i:Scalar -> Core.Osc.sine (110.0 * (i + 1.0)))))\n"
+                  "  (Core.Arrange.sample (Core.Arrange.mix_all (Core.List.init ~n:3\n"
+                  "     ~f:(fun i:Int -> Core.Osc.sine (110.0 * (Core.Math.to_scalar i + 1.0)))))\n"
                   "   0s 300ms) ;;\n");
   qualified.write("build.json", projectManifest("cq", {"q.synth"}));
   opened.write("o.synth",
                "open Core open Core.Osc open Core.Fx open Core.Arrange open Core.Render open Core.Io open Core.Time open Core.Sig open Core.Math\n"
                "let _ = render \"out\" 8000.0\n"
-               "  (sample (mix_all (List.init ~n:3.0\n"
-               "     ~f:(fun i:Scalar -> sine (110.0 * (i + 1.0)))))\n"
+               "  (sample (mix_all (List.init ~n:3\n"
+               "     ~f:(fun i:Int -> sine (110.0 * (to_scalar i + 1.0)))))\n"
                "   0s 300ms) ;;\n");
   opened.write("build.json", projectManifest("co", {"o.synth"}));
   BuildResult rq = buildProject(qualified.dir.string());
@@ -1861,7 +1875,7 @@ TEST(build_jitter_deterministic_and_distinct) {
 open Core open Core.Osc open Core.Fx open Core.Arrange open Core.Render open Core.Io open Core.Time open Core.Sig open Core.Math
 let hit : Scalar Sample = sine 660.0 * exp_decay 20.0 |> sample ~from:0s ~to:100ms ;;
 let beats : Timestamp list =
-  time_steps ~start:100ms ~step:200ms ~count:5.0 |> jitter ~seed:7.0 ~spread:10ms ;;
+  time_steps ~start:100ms ~step:200ms ~count:5 |> jitter ~seed:7.0 ~spread:10ms ;;
 let _ = place_multi hit beats |> sample ~from:0s ~to:1200ms
         |> render ~name:"out" ~rate:8000.0 ;;
 )";
@@ -1874,7 +1888,7 @@ let _ = place_multi hit beats |> sample ~from:0s ~to:1200ms
 open Core open Core.Osc open Core.Fx open Core.Arrange open Core.Render open Core.Io open Core.Time open Core.Sig open Core.Math
 let hit : Scalar Sample = sine 660.0 * exp_decay 20.0 |> sample ~from:0s ~to:100ms ;;
 let beats : Timestamp list =
-  time_steps ~start:100ms ~step:200ms ~count:5.0 |> jitter ~seed:8.0 ~spread:10ms ;;
+  time_steps ~start:100ms ~step:200ms ~count:5 |> jitter ~seed:8.0 ~spread:10ms ;;
 let _ = place_multi hit beats |> sample ~from:0s ~to:1200ms
         |> render ~name:"out" ~rate:8000.0 ;;
 )");
@@ -1882,7 +1896,7 @@ let _ = place_multi hit beats |> sample ~from:0s ~to:1200ms
   d.write("p.synth", R"(
 open Core open Core.Osc open Core.Fx open Core.Arrange open Core.Render open Core.Io open Core.Time open Core.Sig open Core.Math
 let hit : Scalar Sample = sine 660.0 * exp_decay 20.0 |> sample ~from:0s ~to:100ms ;;
-let beats : Timestamp list = time_steps ~start:100ms ~step:200ms ~count:5.0 ;;
+let beats : Timestamp list = time_steps ~start:100ms ~step:200ms ~count:5 ;;
 let _ = place_multi hit beats |> sample ~from:0s ~to:1200ms
         |> render ~name:"out" ~rate:8000.0 ;;
 )");
@@ -2055,10 +2069,10 @@ let fast : Bool = tempo >= 120.0 ;;
 let s : Scalar Signal = (sine (if fast then 440.0 else 220.0)) * 0.5 ;;
 let xs : Scalar list =
   if true then [1.0]
-  else List.init (0.0 - 1.0) (fun i:Scalar -> i) ;;
+  else List.init (0 - 1) (fun i:Int -> to_scalar i) ;;
 let guard : Bool =
   false && (List.fold (fun a:Bool x:Scalar -> a) true
-              (List.init (0.0 - 1.0) (fun i:Scalar -> i))) ;;
+              (List.init (0 - 1) (fun i:Int -> to_scalar i))) ;;
 let _ =
   if fast && not guard then render "fast" 8000.0 (sample s 0s 100ms)
   else render "slow" 8000.0 (sample s 0s 100ms) ;;
@@ -2180,4 +2194,139 @@ SYNTH_EXTERNAL(wrong_name) {
     if (d.message.find("SYNTH_EXTERNAL(f)") != std::string::npos)
       mentioned = true;
   CHECK(mentioned);
+}
+
+TEST(build_int_arithmetic_matches_literals) {
+  // Int expressions feeding to_scalar land on exactly the value the
+  // equivalent Scalar literal spells; / truncates towards zero.
+  TempDir computed, literal;
+  computed.write("p.synth", R"(
+open Core open Core.Osc open Core.Fx open Core.Arrange open Core.Render open Core.Io open Core.Time open Core.Sig open Core.Math
+let n : Int = 110 * (7 / 2 + 1) ;;
+let toward_zero : Int = (0 - 7) / 2 ;;
+let freq : Scalar = to_scalar n - to_scalar (toward_zero + 3) ;;
+let _ = sine freq |> sample ~from:0s ~to:100ms
+        |> render ~name:"out" ~rate:8000.0 ;;
+)");
+  computed.write("build.json", projectManifest("ia", {"p.synth"}));
+  literal.write("p.synth", R"(
+open Core open Core.Osc open Core.Fx open Core.Arrange open Core.Render open Core.Io open Core.Time open Core.Sig open Core.Math
+let _ = sine 440.0 |> sample ~from:0s ~to:100ms
+        |> render ~name:"out" ~rate:8000.0 ;;
+)");
+  literal.write("build.json", projectManifest("ib", {"p.synth"}));
+  BuildResult rc = buildProject(computed.dir.string());
+  for (auto& d : rc.diags.items) std::cerr << d.message << "\n";
+  CHECK(rc.ok);
+  CHECK(buildProject(literal.dir.string()).ok);
+  std::string a = slurp(computed.dir / "_build" / "artifacts" / "out.wav");
+  std::string b = slurp(literal.dir / "_build" / "artifacts" / "out.wav");
+  CHECK(!a.empty());
+  CHECK(a == b);
+}
+
+TEST(build_int_division_by_zero_is_build_error) {
+  TempDir tp;
+  tp.write("p.synth", R"(
+open Core open Core.Osc open Core.Fx open Core.Arrange open Core.Render open Core.Io open Core.Time open Core.Sig open Core.Math
+let zero : Int = 0 ;;
+let n : Int = 1 / zero ;;
+let _ = sine 440.0 |> sample ~from:0s ~to:10ms
+        |> render ~name:"out" ~rate:8000.0 ;;
+)");
+  tp.write("build.json", projectManifest("idz", {"p.synth"}));
+  BuildResult r = buildProject(tp.dir.string());
+  CHECK(!r.ok);
+  bool found = false;
+  for (auto& d : r.diags.items)
+    if (d.message.find("division by zero") != std::string::npos) found = true;
+  CHECK(found);
+}
+
+TEST(build_int_conversions_round_floor_ceil) {
+  // round/floor/ceil all land on 440 here, byte-identical to the
+  // literal render.
+  TempDir computed, literal;
+  computed.write("p.synth", R"(
+open Core open Core.Osc open Core.Fx open Core.Arrange open Core.Render open Core.Io open Core.Time open Core.Sig open Core.Math
+let _ = sine (to_scalar (round 439.6)) |> sample ~from:0s ~to:50ms
+        |> render ~name:"r" ~rate:8000.0 ;;
+let _ = sine (to_scalar (floor 440.9)) |> sample ~from:0s ~to:50ms
+        |> render ~name:"f" ~rate:8000.0 ;;
+let _ = sine (to_scalar (ceil 439.1)) |> sample ~from:0s ~to:50ms
+        |> render ~name:"c" ~rate:8000.0 ;;
+)");
+  computed.write("build.json", projectManifest("ca", {"p.synth"}));
+  literal.write("p.synth", R"(
+open Core open Core.Osc open Core.Fx open Core.Arrange open Core.Render open Core.Io open Core.Time open Core.Sig open Core.Math
+let _ = sine 440.0 |> sample ~from:0s ~to:50ms
+        |> render ~name:"out" ~rate:8000.0 ;;
+)");
+  literal.write("build.json", projectManifest("cb", {"p.synth"}));
+  BuildResult rc = buildProject(computed.dir.string());
+  for (auto& d : rc.diags.items) std::cerr << d.message << "\n";
+  CHECK(rc.ok);
+  CHECK(buildProject(literal.dir.string()).ok);
+  std::string want = slurp(literal.dir / "_build" / "artifacts" / "out.wav");
+  CHECK(!want.empty());
+  for (const char* name : {"r.wav", "f.wav", "c.wav"})
+    CHECK(slurp(computed.dir / "_build" / "artifacts" / name) == want);
+}
+
+TEST(build_list_init_int_indices_match_manual) {
+  TempDir built, manual;
+  built.write("p.synth", R"(
+open Core open Core.Osc open Core.Fx open Core.Arrange open Core.Render open Core.Io open Core.Time open Core.Sig open Core.Math
+let stack : Scalar Signal =
+  mix_all (List.init 3 (fun i:Int -> sine (110.0 * to_scalar (i + 1)))) ;;
+let _ = stack * 0.3 |> sample ~from:0s ~to:100ms
+        |> render ~name:"out" ~rate:8000.0 ;;
+)");
+  built.write("build.json", projectManifest("ii", {"p.synth"}));
+  manual.write("p.synth", R"(
+open Core open Core.Osc open Core.Fx open Core.Arrange open Core.Render open Core.Io open Core.Time open Core.Sig open Core.Math
+let stack : Scalar Signal = mix_all [sine 110.0; sine 220.0; sine 330.0] ;;
+let _ = stack * 0.3 |> sample ~from:0s ~to:100ms
+        |> render ~name:"out" ~rate:8000.0 ;;
+)");
+  manual.write("build.json", projectManifest("im", {"p.synth"}));
+  BuildResult rb = buildProject(built.dir.string());
+  for (auto& d : rb.diags.items) std::cerr << d.message << "\n";
+  CHECK(rb.ok);
+  CHECK(buildProject(manual.dir.string()).ok);
+  std::string a = slurp(built.dir / "_build" / "artifacts" / "out.wav");
+  std::string b = slurp(manual.dir / "_build" / "artifacts" / "out.wav");
+  CHECK(!a.empty());
+  CHECK(a == b);
+}
+
+TEST(build_user_external_int_roundtrip) {
+  // Ints cross the user-external boundary in both directions.
+  TempDir tp;
+  tp.write("twice.cpp", R"(
+#include <synth/external.hpp>
+
+SYNTH_EXTERNAL(twice) {
+  (void)argc; (void)error;
+  *result = synth::ext::Value::integer(args[0].asInt() * 2);
+  return true;
+}
+)");
+  tp.write("song.synth", R"(
+open Core open Core.Osc open Core.Fx open Core.Arrange open Core.Render open Core.Io open Core.Time open Core.Sig open Core.Math
+let twice n:Int : Int = external "twice.cpp" ;;
+let layers : Scalar Signal =
+  mix_all (List.repeat (twice 2) (sine 220.0)) * 0.1 ;;
+let _ = layers |> sample ~from:0s ~to:100ms
+        |> render ~name:"out" ~rate:8000.0 ;;
+)");
+  tp.write("build.json", projectManifest("extint", {"song.synth"}));
+  BuildResult r = buildProject(tp.dir.string());
+  for (auto& d : r.diags.items) std::cerr << d.message << "\n";
+  CHECK(r.ok);
+  // Four identical layers at 0.1 gain -> amplitude 0.4.
+  WavData w = readWav((tp.dir / "_build" / "artifacts" / "out.wav").string());
+  double peak = 0;
+  for (double v : w.channels[0]) peak = std::max(peak, std::fabs(v));
+  CHECK_NEAR(peak, 0.4, 0.01);
 }

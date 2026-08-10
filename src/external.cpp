@@ -17,10 +17,10 @@ namespace synth {
 // The API header user externals compile against. Bump kExternalApiVersion
 // whenever this text changes incompatibly - it salts the cache key, so
 // stale objects are recompiled rather than loaded.
-static constexpr int kExternalApiVersion = 1;
+static constexpr int kExternalApiVersion = 2;
 
 const char* externalApiHeader() {
-  return R"HDR(// synth external API v1 (generated - do not edit).
+  return R"HDR(// synth external API v2 (generated - do not edit).
 //
 // Implement a synth `external "this_file.cpp"` binding by defining, for a
 // declaration `let name ... = external "this_file.cpp"`:
@@ -34,9 +34,10 @@ const char* externalApiHeader() {
 // `args`/`argc` are the fully-applied arguments in declaration order.
 // Return true on success; on failure either fill *error and return
 // false, or throw std::exception. Only build-time data crosses this
-// boundary: scalars, timestamps, bools, strings, vectors, and
+// boundary: scalars, ints, timestamps, bools, strings, vectors, and
 // lists/tuples of those. Signals never do.
 #pragma once
+#include <cstdint>
 #include <stdexcept>
 #include <string>
 #include <vector>
@@ -44,14 +45,17 @@ const char* externalApiHeader() {
 namespace synth::ext {
 
 struct Value {
-  enum class Kind { Unit, Scalar, Time, Bool, String, List, Tuple, Vector };
+  enum class Kind { Unit, Scalar, Time, Bool, String, List, Tuple, Vector,
+                    Int };
   Kind kind = Kind::Unit;
   double num = 0.0;          // Scalar / Time (seconds) / Bool (0 or 1)
+  std::int64_t inum = 0;     // Int
   std::string str;           // String
   std::vector<Value> items;  // List / Tuple / Vector (scalar items)
 
   static Value unit() { return {}; }
   static Value scalar(double v) { Value x; x.kind = Kind::Scalar; x.num = v; return x; }
+  static Value integer(std::int64_t v) { Value x; x.kind = Kind::Int; x.inum = v; return x; }
   static Value time(double seconds) { Value x; x.kind = Kind::Time; x.num = seconds; return x; }
   static Value boolean(bool v) { Value x; x.kind = Kind::Bool; x.num = v ? 1.0 : 0.0; return x; }
   static Value string(std::string s) { Value x; x.kind = Kind::String; x.str = std::move(s); return x; }
@@ -59,6 +63,7 @@ struct Value {
   static Value tuple(std::vector<Value> xs) { Value x; x.kind = Kind::Tuple; x.items = std::move(xs); return x; }
 
   double asScalar() const { require(Kind::Scalar, "Scalar"); return num; }
+  std::int64_t asInt() const { require(Kind::Int, "Int"); return inum; }
   double asTime() const { require(Kind::Time, "Timestamp"); return num; }
   bool asBool() const { require(Kind::Bool, "Bool"); return num != 0.0; }
   const std::string& asString() const { require(Kind::String, "String"); return str; }
@@ -91,9 +96,11 @@ using ExtValue = struct ExtValueMirror;  // never dereferenced by name here
 // library on both sides), which is what lets values cross the dlopen
 // boundary directly.
 struct ExtVal {
-  enum class Kind { Unit, Scalar, Time, Bool, String, List, Tuple, Vector };
+  enum class Kind { Unit, Scalar, Time, Bool, String, List, Tuple, Vector,
+                    Int };
   Kind kind = Kind::Unit;
   double num = 0.0;
+  int64_t inum = 0;
   std::string str;
   std::vector<ExtVal> items;
 };
@@ -114,6 +121,9 @@ ExtVal toExt(const Value& v) {
   } else if (auto* s = std::get_if<ScalarV>(&v.v)) {
     out.kind = ExtVal::Kind::Scalar;
     out.num = s->v;
+  } else if (auto* iv = std::get_if<IntV>(&v.v)) {
+    out.kind = ExtVal::Kind::Int;
+    out.inum = iv->v;
   } else if (auto* t = std::get_if<TimeV>(&v.v)) {
     out.kind = ExtVal::Kind::Time;
     out.num = t->seconds;
@@ -139,8 +149,8 @@ ExtVal toExt(const Value& v) {
     for (auto& x : tup->items) out.items.push_back(toExt(x));
   } else {
     throw EvalError(
-        "external: only build-time data (Scalar, Timestamp, Bool, String, "
-        "Vector, lists, tuples) can cross an external boundary");
+        "external: only build-time data (Scalar, Int, Timestamp, Bool, "
+        "String, Vector, lists, tuples) can cross an external boundary");
   }
   return out;
 }
@@ -149,6 +159,7 @@ Value fromExt(const ExtVal& v) {
   switch (v.kind) {
     case ExtVal::Kind::Unit: return Value{UnitV{}};
     case ExtVal::Kind::Scalar: return Value{ScalarV{v.num}};
+    case ExtVal::Kind::Int: return Value{IntV{v.inum}};
     case ExtVal::Kind::Time: return Value{TimeV{v.num}};
     case ExtVal::Kind::Bool: return Value{BoolV{v.num != 0.0}};
     case ExtVal::Kind::String: return Value{StringV{v.str}};

@@ -2,23 +2,36 @@
 
 #include <SDL.h>
 
+#include <algorithm>
 #include <cmath>
 
 namespace synth::devapp {
 
 std::vector<float> interleaveToFloat(const WavData& w) {
+  return interleaveToFloat(w, 0, w.frames());
+}
+
+std::vector<float> interleaveToFloat(const WavData& w, int64_t fromFrame,
+                                     int64_t toFrame) {
   size_t channelCount = w.channels.size();
-  size_t frames = (size_t)w.frames();
+  fromFrame = std::clamp<int64_t>(fromFrame, 0, w.frames());
+  toFrame = std::clamp<int64_t>(toFrame, fromFrame, w.frames());
+  size_t frames = (size_t)(toFrame - fromFrame);
   std::vector<float> out(frames * channelCount);
   for (size_t f = 0; f < frames; f++)
     for (size_t c = 0; c < channelCount; c++)
-      out[f * channelCount + c] = (float)w.channels[c][f];
+      out[f * channelCount + c] = (float)w.channels[c][fromFrame + f];
   return out;
 }
 
 AudioPlayer::~AudioPlayer() { stop(); }
 
 bool AudioPlayer::play(const std::string& wavPath, std::string& error) {
+  return playRange(wavPath, 0, -1, error);
+}
+
+bool AudioPlayer::playRange(const std::string& wavPath, int64_t fromFrame,
+                            int64_t toFrame, std::string& error) {
   stop();
   WavData w;
   try {
@@ -27,8 +40,10 @@ bool AudioPlayer::play(const std::string& wavPath, std::string& error) {
     error = e.what();
     return false;
   }
-  if (w.channels.empty() || w.frames() == 0) {
-    error = "artifact is empty";
+  if (toFrame < 0 || toFrame > w.frames()) toFrame = w.frames();
+  fromFrame = std::clamp<int64_t>(fromFrame, 0, toFrame);
+  if (w.channels.empty() || toFrame <= fromFrame) {
+    error = "artifact range is empty";
     return false;
   }
   if (!SDL_WasInit(SDL_INIT_AUDIO) && SDL_InitSubSystem(SDL_INIT_AUDIO) != 0) {
@@ -46,7 +61,7 @@ bool AudioPlayer::play(const std::string& wavPath, std::string& error) {
     error = SDL_GetError();
     return false;
   }
-  std::vector<float> data = interleaveToFloat(w);
+  std::vector<float> data = interleaveToFloat(w, fromFrame, toFrame);
   if (SDL_QueueAudio(dev, data.data(),
                      (Uint32)(data.size() * sizeof(float))) != 0) {
     error = SDL_GetError();
@@ -57,6 +72,8 @@ bool AudioPlayer::play(const std::string& wavPath, std::string& error) {
   dev_ = dev;
   totalBytes_ = data.size() * sizeof(float);
   path_ = wavPath;
+  rangeStartSec_ = w.rate > 0 ? (double)fromFrame / w.rate : 0;
+  rangeEndSec_ = w.rate > 0 ? (double)toFrame / w.rate : 0;
   return true;
 }
 
@@ -67,6 +84,7 @@ void AudioPlayer::stop() {
   }
   totalBytes_ = 0;
   path_.clear();
+  rangeStartSec_ = rangeEndSec_ = 0;
 }
 
 void AudioPlayer::update() {

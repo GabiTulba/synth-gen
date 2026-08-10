@@ -4,7 +4,9 @@
 #include <fstream>
 #include <sstream>
 
+#include "build.hpp"
 #include "json.hpp"
+#include "library.hpp"
 
 namespace fs = std::filesystem;
 
@@ -63,6 +65,55 @@ MetadataLoadResult loadProjectMetadata(const std::string& path) {
   }
   r.ok = true;
   return r;
+}
+
+MetadataLayout resolveMetadataLayout(const std::string& projectDir) {
+  MetadataLayout layout;
+  // Outputs live under the enclosing root's _build/, mirroring the source
+  // tree; a project with no enclosing root is its own root.
+  std::string root = findEnclosingRoot(projectDir);
+  fs::path base = root.empty() ? fs::path(projectDir) : fs::path(root);
+  fs::path rel;
+  if (!root.empty()) {
+    std::error_code ec;
+    rel = fs::relative(fs::absolute(projectDir), base, ec).lexically_normal();
+    if (ec || rel == ".") rel = "";
+  }
+  layout.rootDir = base.string();
+  layout.manifestPath = (base / kManifestFileName).string();
+
+  // The root dir itself: one unit per build rule, mirroring buildRoot's
+  // output layout.
+  if (!root.empty() && rel.empty()) {
+    Manifest m;
+    DiagnosticBag diags;
+    std::ifstream in(layout.manifestPath, std::ios::binary);
+    std::ostringstream ss;
+    ss << in.rdbuf();
+    if (parseManifest(ss.str(), layout.manifestPath, m, diags) &&
+        m.isRoot()) {
+      for (auto& rule : m.buildRules) {
+        fs::path rp(rule);
+        std::error_code ec;
+        if (!fs::is_directory(base / rp, ec) && rp.extension() == ".synth")
+          rp = rp.parent_path() / rp.stem();
+        MetadataUnit u;
+        u.label = rule;
+        u.metadataPath = (base / "_build" / rp.lexically_normal() /
+                          "metadata.json")
+                             .lexically_normal()
+                             .string();
+        layout.units.push_back(std::move(u));
+      }
+      return layout;
+    }
+  }
+
+  MetadataUnit u;
+  u.metadataPath =
+      (base / "_build" / rel / "metadata.json").lexically_normal().string();
+  layout.units.push_back(std::move(u));
+  return layout;
 }
 
 FileStamp stampFile(const std::string& path) {

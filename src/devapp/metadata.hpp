@@ -44,6 +44,27 @@ struct MetadataLoadResult {
 // Reads and parses a build metadata.json file (under the root's _build/).
 MetadataLoadResult loadProjectMetadata(const std::string& path);
 
+// One buildable unit whose metadata the app shows. A standalone project
+// (or a project inside a root) is a single unit; a root is one unit per
+// `build` rule.
+struct MetadataUnit {
+  std::string label;         // the rule path for root units, else empty
+  std::string metadataPath;  // where the build writes this unit's metadata
+};
+
+struct MetadataLayout {
+  std::string rootDir;  // artifact paths in metadata are relative to this
+  std::string manifestPath;  // re-resolve the layout when this changes
+  std::vector<MetadataUnit> units;
+};
+
+// Maps a project directory to the metadata file(s) its builds write,
+// mirroring the build system's output layout (build.hpp §8.2): a project
+// builds to <root>/_build/<rel>/metadata.json; a root manifest builds one
+// _build/<rule>/metadata.json per rule, file rules dropping their
+// extension.
+MetadataLayout resolveMetadataLayout(const std::string& projectDir);
+
 // Change detection for live refresh (§9): the v1 mechanism is watching the
 // metadata file, per the design doc's "simplest v1" note.
 struct FileStamp {

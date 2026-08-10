@@ -71,6 +71,7 @@ if(SYNTHGRAPH_BUILD_DEVAPP)
     add_library(synthdev_core
       src/devapp/metadata.cpp
       src/devapp/player.cpp
+      src/devapp/waveform.cpp
     )
     target_include_directories(synthdev_core PUBLIC src/devapp)
     target_link_libraries(synthdev_core PUBLIC synthgraph_core SDL2::SDL2)

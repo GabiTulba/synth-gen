@@ -32,7 +32,7 @@ semantics of the less obvious primitives.
 | `Core.List` | List combinators & builders: `map`, `fold`, `init`, `repeat` | `src/core/lists.cpp` |
 | `Core.Time` | Timestamp construction & sequences: `to_sec`/`to_ms`/`to_min`, `time_steps`, `jitter` | `src/core/lists.cpp` |
 | `Core.Sig` | Signal constructors: `constant`, `constant_multi`, `time`, `signal`, `signal_multi` | `src/core/signals.cpp` |
-| `Core.Math` | `exp`, `sqrt`, `log`, `pow`, `not` — polymorphic over Scalars and (elementwise) Signals | `src/core/math.cpp` |
+| `Core.Math` | `exp`, `sqrt`, `log`, `pow` — polymorphic over Scalars and (elementwise) Signals — plus the Int conversions `to_scalar`, `round`, `floor`, `ceil`, and `not` | `src/core/math.cpp` |
 
 ## Primitive semantics
 
@@ -131,8 +131,11 @@ the whole story:
   the source file that mentions them; channel counts are validated at
   build time.
 - **Counts and indices** (`List.init`, `List.repeat`, `time_steps`) are
-  Scalars — the language's single numeric type — validated at build time
-  to be whole and non-negative.
+  `Int`s: wholeness is guaranteed by the type system, and `List.init`
+  hands its function an Int index (`fun i:Int -> ...`). A negative
+  *computed* count is still a build error. `Math.to_scalar` takes an
+  Int into Scalar arithmetic exactly; `Math.round`/`floor`/`ceil` come
+  back from a Scalar with an explicit fraction policy.
 
 ## External functions in C++
 
@@ -169,8 +172,8 @@ Arguments arrive fully applied, in declaration order; return `true` with
 throw) — failures become build diagnostics on the declaring definition.
 One `.cpp` may implement several externals.
 
-**Only data crosses the boundary**: Scalar, Timestamp, Bool, String,
-Vector, unit, and lists/tuples of those. Signals, Samples, functions and
+**Only data crosses the boundary**: Scalar, Int, Timestamp, Bool,
+String, Vector, unit, and lists/tuples of those. Signals, Samples, functions and
 type variables cannot appear in a user external's signature (checked at
 type time) — signals are lazy engine graphs, not values, and stay on the
 host side. Core externals are exempt (their implementations *are* the

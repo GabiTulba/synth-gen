@@ -1,4 +1,5 @@
 #pragma once
+#include <cstdint>
 #include <memory>
 #include <string>
 #include <vector>
@@ -27,12 +28,14 @@ struct Param {
 struct Expr {
   enum class Kind {
     NumLit,    // num
+    IntLit,    // inum
     TimeLit,   // num (seconds)
     BoolLit,   // num (1.0 = true, 0.0 = false)
     StrLit,    // str
     Ident,     // moduleName ("" if unqualified) + name
     App,       // items[0] = callee, items[1..] = args
     BinOp,     // op, items[0], items[1]
+    Neg,       // unary minus; items[0] = operand
     If,        // items[0] = condition, items[1] = then, items[2] = else
     ListLit,   // items
     TupleLit,  // items (size >= 2)
@@ -43,6 +46,7 @@ struct Expr {
   Kind kind;
   Span span{};
   double num = 0.0;
+  int64_t inum = 0;
   std::string str;
   std::string moduleName;  // Ident: qualifier, empty if none
   std::string name;        // Ident

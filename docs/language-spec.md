@@ -23,7 +23,11 @@ accepts and how it is typed and evaluated. The design document
   `module N = struct … end` definition (resp. as a definition's whole
   `external "file"` body) and lex as ordinary identifiers everywhere
   else (a binding named `end` or `external` keeps working).
-- **Number literals**: `[0-9]+(\.[0-9]+)?` — always `Scalar`.
+- **Number literals**: `[0-9]+(\.[0-9]+)?`. A literal *with* a decimal
+  point is a `Scalar` (`440.0`, `0.5`); one *without* is an `Int`
+  (`8`, `440`). Ints are the discrete kind (counts, indices); Scalars
+  the continuous one (frequencies, gains, levels). Neither converts to
+  the other implicitly (§3).
 - **Timestamp literals**: a number literal immediately followed by a unit
   suffix: `ns` (1e-9 s), `us` (1e-6 s), `ms` (1e-3 s), `s` (1 s),
   `m` (60 s). All denote the same quantity (time since the epoch or a
@@ -59,8 +63,8 @@ param       ::= [ "~" ] Ident ":" param-type      (~ marks a labeled param)
 type        ::= postfix-type [ "->" type ]          (right-associative)
 param-type  ::= postfix-type                        (arrows need parens)
 postfix-type::= atom-type { "Signal" | "Sample" | "list" }
-atom-type   ::= "Scalar" | "Vector" | "Timestamp" | "String" | "Bool"
-              | "unit"
+atom-type   ::= "Scalar" | "Int" | "Vector" | "Timestamp" | "String"
+              | "Bool" | "unit"
               | TypeVar                             ('a - see §3)
               | "(" type { "," type } ")"           (tuple if >1 element)
 
@@ -94,7 +98,8 @@ Notes:
 - Application binds tighter than operators: `sine 440.0 * 0.5` is
   `(sine 440.0) * 0.5`. `*`/`/` bind tighter than `+`/`-`; all are
   left-associative.
-- Unary minus desugars to `0 - x` (so it is Scalar-typed arithmetic).
+- Unary minus negates its operand and preserves its type: defined for
+  `Int`, `Scalar`, `Vector`, and `t Signal`.
 - List elements are separated by `;` (OCaml style); the empty list `[]`
   is a parse but not a type — see §3.
 - Function-typed parameters require parentheses:
@@ -108,7 +113,7 @@ Notes:
   ```
   let song : Scalar Signal =
     let hit : Scalar Sample = sine 440.0 |> sample ~from:0s ~to:100ms in
-    let beats : Timestamp list = time_steps ~start:0s ~step:200ms ~count:5.0 in
+    let beats : Timestamp list = time_steps ~start:0s ~step:200ms ~count:5 in
     place_multi hit beats
   ;;
   ```
@@ -126,10 +131,20 @@ Notes:
 
 ## 3. Type system
 
-Types: `Scalar`, `Vector`, `Timestamp`, `String`, `Bool`, `unit`,
+Types: `Scalar`, `Int`, `Vector`, `Timestamp`, `String`, `Bool`, `unit`,
 `t Signal`, `t Sample`, `t list`, tuples `(t1, ..., tn)`, and function
 types `t1 -> ... -> tn -> r` (in signatures only). `Signal`/`Sample` element
 types are in practice `Scalar` (mono) or `Vector` (N-channel).
+
+`Int` is the build-time integer: a 64-bit signed whole number for
+counts, indices, and other discrete quantities. The primitives that
+take counts (`List.init`, `List.repeat`, `time_steps`) take Ints, so
+"whole and non-negative" is enforced by the type system rather than by
+build-time validation (a *negative* count is still a build error —
+the type cannot see the sign of a computed value). Ints never convert
+implicitly: `Math.to_scalar` goes to the continuous side exactly, and
+`Math.round`/`Math.floor`/`Math.ceil` come back with an explicit
+fraction policy (§6).
 
 Rules:
 
@@ -274,12 +289,15 @@ For `+ - * /` with operand types L and R:
 | L | R | Result |
 |---|---|--------|
 | Scalar | Scalar | Scalar |
+| Int | Int | Int (`/` divides towards zero; division by zero is a build error) |
 | Vector | Vector | Vector (element-wise; channel counts must match at build time) |
 | Vector | Scalar (either order) | Vector |
 | t Signal | t Signal | t Signal (pointwise) |
 | t Signal | Scalar (either order) | t Signal (broadcast) |
 
-Anything else (e.g. `Timestamp + Signal`) is a type error. Channel-count
+Anything else (e.g. `Timestamp + Signal`, or `Int + Scalar` — Ints do
+not broadcast; convert explicitly with `to_scalar`) is a type error.
+Channel-count
 mismatches between Vector Signals are detected when the signal graph is
 built — before any audio is computed — and signals are capped at 16
 channels in v1.
@@ -292,8 +310,8 @@ while the graph is assembled, never a per-sample stream.
 - **`Bool`** is an atomic type with literals `true`/`false`. It works
   everywhere a type does: parameters (`~crisp:Bool`), lists, tuples,
   `'a` instantiation.
-- **Comparisons** `<` `<=` `>` `>=` `==` `!=` take two Scalars or two
-  Timestamps and produce a `Bool`. Signals are *not* comparable: a lazy
+- **Comparisons** `<` `<=` `>` `>=` `==` `!=` take two Ints, two
+  Scalars, or two Timestamps and produce a `Bool`. Signals are *not* comparable: a lazy
   signal has no single value, and a sample-wise select would be a
   different, signal-producing operation (deliberately absent in v1 —
   see §7). Comparing under `signal ~f`'s symbolic substitution is
@@ -490,8 +508,8 @@ Arguments arrive fully applied, in declaration order; return `true` with
 throw) — failures become build diagnostics on the declaring definition.
 One `.cpp` may implement several externals.
 
-**Only data crosses the boundary**: Scalar, Timestamp, Bool, String,
-Vector, unit, and lists/tuples of those. Signals, Samples, functions and
+**Only data crosses the boundary**: Scalar, Int, Timestamp, Bool,
+String, Vector, unit, and lists/tuples of those. Signals, Samples, functions and
 type variables cannot appear in a user external's signature (checked at
 type time) — signals are lazy engine graphs, not values, and stay on the
 host side. Core externals are exempt (their implementations *are* the
@@ -575,23 +593,30 @@ val Math.sqrt: x:'a -> 'a
 val Math.log: x:'a -> 'a             (* natural *)
 val Math.pow: x:'a -> y:Scalar -> 'a
 
+(* Int <-> Scalar conversions: to_scalar is exact; the way back names
+   its fraction policy. *)
+val Math.to_scalar: n:Int -> Scalar
+val Math.round: x:Scalar -> Int
+val Math.floor: x:Scalar -> Int
+val Math.ceil: x:Scalar -> Int
+
 (* Core.List: list combinators & builders *)
 val List.map    : f:('a -> 'b) -> xs:'a list -> 'b list
 val List.fold   : f:('a -> 'b -> 'a) -> init:'a -> xs:'b list -> 'a
-val List.init   : n:Scalar -> f:(Scalar -> 'a) -> 'a list   (* [f 0.0; ...; f (n-1)] *)
-val List.repeat : n:Scalar -> x:'a -> 'a list
+val List.init   : n:Int -> f:(Int -> 'a) -> 'a list   (* [f 0; ...; f (n-1)] *)
+val List.repeat : n:Int -> x:'a -> 'a list
 
 (* Core.Time: timestamp construction & sequences *)
 val Time.to_sec: x:Scalar -> Timestamp
 val Time.to_ms: x:Scalar -> Timestamp
 val Time.to_min: x:Scalar -> Timestamp
 val Math.not: b:Bool -> Bool
-val Time.time_steps: start:Timestamp -> step:Timestamp -> count:Scalar -> Timestamp list
+val Time.time_steps: start:Timestamp -> step:Timestamp -> count:Int -> Timestamp list
 val Time.jitter: seed:Scalar -> spread:Timestamp -> steps:(Timestamp list) -> Timestamp list
 ```
 
-Counts and indices are Scalars (the language's single numeric type);
-counts must be whole and non-negative, validated at build time.
+Counts and indices are Ints, so wholeness is guaranteed by the type
+system; a negative computed count is still a build (evaluation) error.
 
 `to_sec`/`to_ms`/`to_min` are the computed counterpart of the literal
 suffixes — `to_ms 250.0` is `250ms` — and are what a duration derived
@@ -609,7 +634,7 @@ independently:
 
 ```
 (* with open Core.Arrange and open Core.Time *)
-place_multi hat (time_steps ~start:0s ~step:250ms ~count:32.0
+place_multi hat (time_steps ~start:0s ~step:250ms ~count:32
                    |> jitter ~seed:7.0 ~spread:8ms)
 ```
 

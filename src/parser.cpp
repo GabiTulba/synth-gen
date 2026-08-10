@@ -294,6 +294,7 @@ class Parser {
     if (at(Tok::UpIdent)) {
       const Token& t = advance();
       if (t.text == "Scalar") return tScalar();
+      if (t.text == "Int") return tInt();
       if (t.text == "Vector") return tVector();
       if (t.text == "Timestamp") return tTimestamp();
       if (t.text == "String") return tString();
@@ -493,11 +494,12 @@ class Parser {
     if (at(Tok::Minus)) {
       Span lo = advance().span;
       ExprPtr operand = parseUnary();
-      // Desugar unary minus to (0 - x); Scalar-only per operator typing.
-      auto zero = std::make_unique<Expr>(Expr::Kind::NumLit, lo);
-      zero->num = 0.0;
-      auto e = mkBinOp(BinOpKind::Sub, std::move(zero), std::move(operand));
-      e->span.lo = lo.lo;
+      // Unary minus is its own node: it negates whatever numeric kind its
+      // operand has (Int stays Int, Scalar stays Scalar, ...), which a
+      // desugaring to (0 - x) could not express now that a bare 0 is Int.
+      auto e = std::make_unique<Expr>(Expr::Kind::Neg,
+                                      Span{lo.lo, operand->span.hi});
+      e->items.push_back(std::move(operand));
       return e;
     }
     return parseApp();
@@ -534,6 +536,7 @@ class Parser {
   bool startsAtom() const {
     switch (peek().kind) {
       case Tok::Number:
+      case Tok::IntNum:
       case Tok::Time:
       case Tok::Bool:
       case Tok::String:
@@ -554,6 +557,12 @@ class Parser {
         advance();
         auto e = std::make_unique<Expr>(Expr::Kind::NumLit, t.span);
         e->num = t.num;
+        return e;
+      }
+      case Tok::IntNum: {
+        advance();
+        auto e = std::make_unique<Expr>(Expr::Kind::IntLit, t.span);
+        e->inum = t.inum;
         return e;
       }
       case Tok::Time: {

@@ -47,6 +47,10 @@ Value expImpl(Ctx&, std::vector<Value>&);
 Value sqrtImpl(Ctx&, std::vector<Value>&);
 Value logImpl(Ctx&, std::vector<Value>&);
 Value powImpl(Ctx&, std::vector<Value>&);
+Value toScalarImpl(Ctx&, std::vector<Value>&);
+Value roundImpl(Ctx&, std::vector<Value>&);
+Value floorImpl(Ctx&, std::vector<Value>&);
+Value ceilImpl(Ctx&, std::vector<Value>&);
 Value toSecImpl(Ctx&, std::vector<Value>&);
 Value toMsImpl(Ctx&, std::vector<Value>&);
 Value toMinImpl(Ctx&, std::vector<Value>&);
@@ -96,6 +100,10 @@ const Impl kImpls[] = {
     {"math.cpp", "sqrt", sqrtImpl},
     {"math.cpp", "log", logImpl},
     {"math.cpp", "pow", powImpl},
+    {"math.cpp", "to_scalar", toScalarImpl},
+    {"math.cpp", "round", roundImpl},
+    {"math.cpp", "floor", floorImpl},
+    {"math.cpp", "ceil", ceilImpl},
     {"math.cpp", "to_sec", toSecImpl},
     {"math.cpp", "to_ms", toMsImpl},
     {"math.cpp", "to_min", toMinImpl},

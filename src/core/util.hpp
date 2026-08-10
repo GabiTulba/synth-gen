@@ -7,28 +7,28 @@
 // Shared argument accessors and conversions for the built-in external
 // implementations. Types were verified by the checker; the throws here
 // guard the paths the type system cannot see (symbolic substitution
-// under `signal ~f`, and counts that must be whole).
+// under `signal ~f`, and count ranges).
 namespace synth::native {
 
 inline double scalarArg(const Value& v) { return std::get<ScalarV>(v.v).v; }
+inline int64_t intArg(const Value& v) { return std::get<IntV>(v.v).v; }
 inline double timeArg(const Value& v) { return std::get<TimeV>(v.v).seconds; }
 inline const std::string& strArg(const Value& v) {
   return std::get<StringV>(v.v).s;
 }
 inline SigPtr signalArg(const Value& v) { return std::get<SigPtr>(v.v); }
 
-// Counts are Scalars in the language; here they must be whole,
-// non-negative, and sane (build-time validation).
-inline int64_t wholeCount(double v, const char* prim) {
-  double rounded = std::round(v);
-  if (std::fabs(v - rounded) > 1e-9 || rounded < 0)
-    throw EvalError(std::string(prim) +
-                    ": count must be a whole non-negative number (got " +
-                    std::to_string(v) + ")");
-  if (rounded > 1e6)
-    throw EvalError(std::string(prim) + ": count " + std::to_string(v) +
+// Counts are Ints, so wholeness is the type system's problem now; what
+// remains here is the range the engine is willing to iterate.
+inline int64_t countArg(const Value& v, const char* prim) {
+  int64_t n = intArg(v);
+  if (n < 0)
+    throw EvalError(std::string(prim) + ": count must be non-negative (got " +
+                    std::to_string(n) + ")");
+  if (n > 1000000)
+    throw EvalError(std::string(prim) + ": count " + std::to_string(n) +
                     " is unreasonably large");
-  return (int64_t)rounded;
+  return n;
 }
 
 inline SigPtr asSignal(const Value& v) {

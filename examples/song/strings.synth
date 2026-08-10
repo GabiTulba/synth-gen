@@ -28,9 +28,9 @@ let pluck freq:Scalar : Scalar Sample =
 let arp ~root:Scalar ~fifth:Scalar ~oct:Scalar
         ~root_t:Timestamp ~fifth_t:Timestamp ~oct_t:Timestamp
     : Scalar Signal =
-  mix_all [Seq.pattern (pluck root) ~start:root_t ~step:1s ~count:4.0;
-           Seq.pattern (pluck fifth) ~start:fifth_t ~step:500ms ~count:8.0;
-           Seq.pattern (pluck oct) ~start:oct_t ~step:1s ~count:4.0]
+  mix_all [Seq.pattern (pluck root) ~start:root_t ~step:1s ~count:4;
+           Seq.pattern (pluck fifth) ~start:fifth_t ~step:500ms ~count:8;
+           Seq.pattern (pluck oct) ~start:oct_t ~step:1s ~count:4]
 ;;
 
 (* Enters with the C chord (8s): C arpeggio, then G arpeggio. *)

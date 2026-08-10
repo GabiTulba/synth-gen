@@ -143,3 +143,26 @@ TEST(lexer_arrow_and_ge_disambiguation) {
   CHECK(toks[2].kind == Tok::Gt);
   CHECK(toks[3].kind == Tok::Equals);
 }
+
+TEST(lexer_int_vs_scalar_literals) {
+  DiagnosticBag diags;
+  auto toks = lex("42 42.0 0 007 42ms", "t", diags);
+  CHECK(!diags.hasErrors());
+  CHECK(toks[0].kind == Tok::IntNum);
+  CHECK(toks[0].inum == 42);
+  CHECK(toks[1].kind == Tok::Number);
+  CHECK_NEAR(toks[1].num, 42.0, 1e-9);
+  CHECK(toks[2].kind == Tok::IntNum);
+  CHECK(toks[2].inum == 0);
+  CHECK(toks[3].kind == Tok::IntNum);
+  CHECK(toks[3].inum == 7);
+  // A unit suffix still wins: 42ms is a Timestamp, not an Int.
+  CHECK(toks[4].kind == Tok::Time);
+  CHECK_NEAR(toks[4].num, 0.042, 1e-12);
+}
+
+TEST(lexer_int_literal_too_large) {
+  DiagnosticBag diags;
+  lex("99999999999999999999999", "t", diags);
+  CHECK(diags.hasErrors());
+}

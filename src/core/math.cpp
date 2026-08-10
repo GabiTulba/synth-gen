@@ -20,6 +20,10 @@ Value math1(const Value& v, SigUnaryOp op, const char* prim) {
     return Value{std::move(out)};
   }
   if (auto* s = std::get_if<SigPtr>(&v.v)) return Value{makeUnaryOp(op, *s)};
+  if (std::holds_alternative<IntV>(v.v))
+    throw EvalError(std::string(prim) +
+                    ": expected a Scalar, Vector, or Signal (got an Int; "
+                    "convert with to_scalar)");
   throw EvalError(std::string(prim) +
                   ": expected a Scalar, Vector, or Signal");
 }
@@ -51,7 +55,38 @@ Value powImpl(Ctx&, std::vector<Value>& args) {
   }
   if (std::holds_alternative<ScalarV>(x.v))
     return Value{ScalarV{std::pow(scalarArg(x), scalarArg(y))}};
+  if (std::holds_alternative<IntV>(x.v))
+    throw EvalError("pow: expected a Scalar, Vector, or Signal (got an "
+                    "Int; convert with to_scalar)");
   throw EvalError("pow: expected a Scalar, Vector, or Signal");
+}
+
+Value toScalarImpl(Ctx&, std::vector<Value>& args) {
+  return Value{ScalarV{(double)intArg(args[0])}};
+}
+
+namespace {
+// Scalar -> Int with an explicit fraction policy; NaNs and values
+// outside the Int range have no honest answer and are build errors.
+Value scalarToInt(double x, double rounded, const char* prim) {
+  if (!(rounded >= -9.2e18 && rounded <= 9.2e18))
+    throw EvalError(std::string(prim) + ": " + std::to_string(x) +
+                    " has no Int value");
+  return Value{IntV{(int64_t)rounded}};
+}
+}  // namespace
+
+Value roundImpl(Ctx&, std::vector<Value>& args) {
+  double x = scalarArg(args[0]);
+  return scalarToInt(x, std::round(x), "round");
+}
+Value floorImpl(Ctx&, std::vector<Value>& args) {
+  double x = scalarArg(args[0]);
+  return scalarToInt(x, std::floor(x), "floor");
+}
+Value ceilImpl(Ctx&, std::vector<Value>& args) {
+  double x = scalarArg(args[0]);
+  return scalarToInt(x, std::ceil(x), "ceil");
 }
 
 Value toSecImpl(Ctx&, std::vector<Value>& args) {

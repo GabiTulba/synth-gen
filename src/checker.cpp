@@ -232,19 +232,20 @@ class ModuleChecker {
         fail(p.span, "external '" + def.name + "': parameter '" + p.name +
                          "' has type " + typeName(p.type) +
                          ", which cannot cross the external boundary (only "
-                         "Scalar, Timestamp, Bool, String, Vector, and "
+                         "Scalar, Int, Timestamp, Bool, String, Vector, and "
                          "lists/tuples of those can)");
     if (!extDataType(def.retType))
       fail(def.span, "external '" + def.name + "': result type " +
                          typeName(def.retType) +
                          " cannot cross the external boundary (only Scalar, "
-                         "Timestamp, Bool, String, Vector, and lists/tuples "
-                         "of those can)");
+                         "Int, Timestamp, Bool, String, Vector, and "
+                         "lists/tuples of those can)");
   }
 
   static bool extDataType(const TypePtr& t) {
     switch (t->kind) {
       case Type::Kind::Scalar:
+      case Type::Kind::Int:
       case Type::Kind::Timestamp:
       case Type::Kind::String:
       case Type::Kind::Bool:
@@ -281,6 +282,7 @@ class ModuleChecker {
   TypePtr checkInner(Expr& e, std::map<std::string, TypePtr>& env) {
     switch (e.kind) {
       case Expr::Kind::NumLit: return tScalar();
+      case Expr::Kind::IntLit: return tInt();
       case Expr::Kind::TimeLit: return tTimestamp();
       case Expr::Kind::BoolLit: return tBool();
       case Expr::Kind::StrLit: return tString();
@@ -292,6 +294,21 @@ class ModuleChecker {
                      "top-level definition");
       case Expr::Kind::App: return checkApp(e, env);
       case Expr::Kind::BinOp: return checkBinOp(e, env);
+      case Expr::Kind::Neg: {
+        // Negation keeps the operand's numeric kind; the same kinds the
+        // arithmetic operators accept (a rigid 'a stays out for the same
+        // reason it does there: the caller never promised a number).
+        TypePtr t = check(*e.items[0], env);
+        switch (t->kind) {
+          case Type::Kind::Int:
+          case Type::Kind::Scalar:
+          case Type::Kind::Vector:
+          case Type::Kind::Signal:
+            return t;
+          default:
+            fail(e.span, "unary '-' is not defined for " + typeName(t));
+        }
+      }
       case Expr::Kind::If: {
         TypePtr condT = check(*e.items[0], env);
         // The condition is a build-time Bool. A rigid 'a is rejected too:
@@ -742,10 +759,18 @@ class ModuleChecker {
         std::string label = paramLabels[i].empty()
                                 ? "argument " + std::to_string(i + 1)
                                 : "argument '" + paramLabels[i] + "'";
-        fail(e.items[j + 1]->span,
-             label + " of " + calleeDesc(callee) + " expects " +
-                 typeName(applySubst(paramTypes[i], subst)) + ", got " +
-                 typeName(argTypes[j]));
+        std::string msg =
+            label + " of " + calleeDesc(callee) + " expects " +
+            typeName(applySubst(paramTypes[i], subst)) + ", got " +
+            typeName(argTypes[j]);
+        // The most common way to hold an Int where a Scalar is wanted is
+        // a whole-number literal; say how to spell the other one.
+        TypePtr want = applySubst(paramTypes[i], subst);
+        if (want->kind == Type::Kind::Scalar &&
+            argTypes[j]->kind == Type::Kind::Int)
+          msg += " (a literal like 440 is an Int; write 440.0 for a "
+                 "Scalar, or convert with to_scalar)";
+        fail(e.items[j + 1]->span, msg);
       }
     }
 
@@ -901,11 +926,13 @@ class ModuleChecker {
       case BinOpKind::Eq:
       case BinOpKind::Ne:
         if ((is(l, K::Scalar) && is(r, K::Scalar)) ||
+            (is(l, K::Int) && is(r, K::Int)) ||
             (is(l, K::Timestamp) && is(r, K::Timestamp)))
           return tBool();
         fail(e.span, "comparison is not defined for " + typeName(l) +
                          " and " + typeName(r) +
-                         " (compare two Scalars or two Timestamps)");
+                         " (compare two Ints, two Scalars, or two "
+                         "Timestamps)");
       case BinOpKind::And:
       case BinOpKind::Or:
         if (is(l, K::Bool) && is(r, K::Bool)) return tBool();
@@ -915,6 +942,15 @@ class ModuleChecker {
         break;
     }
     if (is(l, K::Scalar) && is(r, K::Scalar)) return tScalar();
+    // Ints stay Ints: whole-number arithmetic for counts and indices
+    // (`/` divides towards zero). They never mix with the continuous
+    // kinds implicitly - conversion is explicit (to_scalar, round, ...).
+    if (is(l, K::Int) && is(r, K::Int)) return tInt();
+    if (is(l, K::Int) || is(r, K::Int))
+      fail(e.span, "operator is not defined for " + typeName(l) + " and " +
+                       typeName(r) +
+                       " (an Int does not mix with other numeric types "
+                       "implicitly; convert with to_scalar)");
     if (is(l, K::Vector) && is(r, K::Vector)) return tVector();
     if ((is(l, K::Vector) && is(r, K::Scalar)) ||
         (is(l, K::Scalar) && is(r, K::Vector)))

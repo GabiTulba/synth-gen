@@ -25,6 +25,7 @@ using TypePtr = std::shared_ptr<const Type>;
 struct Type {
   enum class Kind {
     Scalar,
+    Int,
     Vector,
     Timestamp,
     String,
@@ -56,6 +57,7 @@ struct Type {
 };
 
 TypePtr tScalar();
+TypePtr tInt();
 TypePtr tVector();
 TypePtr tTimestamp();
 TypePtr tString();

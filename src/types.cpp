@@ -10,6 +10,10 @@ TypePtr tScalar() {
   static TypePtr t = make(Type::Kind::Scalar);
   return t;
 }
+TypePtr tInt() {
+  static TypePtr t = make(Type::Kind::Int);
+  return t;
+}
 TypePtr tVector() {
   static TypePtr t = make(Type::Kind::Vector);
   return t;
@@ -120,6 +124,7 @@ bool typeEquals(const TypePtr& a, const TypePtr& b) {
   if (a->kind != b->kind) return false;
   switch (a->kind) {
     case Type::Kind::Scalar:
+    case Type::Kind::Int:
     case Type::Kind::Vector:
     case Type::Kind::Timestamp:
     case Type::Kind::String:
@@ -149,6 +154,7 @@ bool typeEquals(const TypePtr& a, const TypePtr& b) {
 std::string typeName(const TypePtr& t) {
   switch (t->kind) {
     case Type::Kind::Scalar: return "Scalar";
+    case Type::Kind::Int: return "Int";
     case Type::Kind::Vector: return "Vector";
     case Type::Kind::Timestamp: return "Timestamp";
     case Type::Kind::String: return "String";
@@ -242,6 +248,7 @@ bool unify(const TypePtr& sig, const TypePtr& concrete, Subst& subst) {
   if (sig->kind != concrete->kind) return false;
   switch (sig->kind) {
     case Type::Kind::Scalar:
+    case Type::Kind::Int:
     case Type::Kind::Vector:
     case Type::Kind::Timestamp:
     case Type::Kind::String:

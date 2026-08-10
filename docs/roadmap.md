@@ -19,9 +19,6 @@ the documentation describes only what is.
   written out. Local inference (return types, `let ... in` annotations,
   lambda parameters) would remove most annotation weight without
   changing the checked language.
-- **An Integer type.** Counts and indices are Scalars validated at build
-  time to be whole and non-negative. A real integer type would move that
-  validation into the type system.
 - **Parameters on local bindings.** `let name : Type = e in body` binds
   a value only; local *function* definitions currently require a
   top-level `let` or a lambda.

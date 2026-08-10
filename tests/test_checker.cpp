@@ -731,8 +731,8 @@ TEST(checker_core_qualified_access) {
 import Core
 let tone : Scalar Signal = Core.Osc.sine 440.0 ;;
 let xs : Scalar list = Core.List.map (fun x:Scalar -> x * 2.0) [1.0] ;;
-let ys : Scalar list = Core.List.init ~n:3.0 ~f:(fun i:Scalar -> i) ;;
-let zs : Scalar list = Core.List.repeat 2.0 5.0 ;;
+let ys : Scalar list = Core.List.init ~n:3 ~f:(fun i:Int -> Core.Math.to_scalar i) ;;
+let zs : Scalar list = Core.List.repeat 2 5.0 ;;
 let t : Scalar = Core.List.fold (fun a:Scalar b:Scalar -> a + b) 0.0 zs ;;
 )");
   DiagnosticBag diags;
@@ -757,7 +757,7 @@ TEST(checker_core_open_forms) {
 open Core open Core.Osc open Core.Fx open Core.Arrange open Core.Render open Core.Io open Core.Time open Core.Sig open Core.Math
 let tone : Scalar Signal = sine 440.0 ;;
 let stack : Scalar Signal =
-  mix_all (List.init ~n:3.0 ~f:(fun i:Scalar -> sine (110.0 * (i + 1.0)))) ;;
+  mix_all (List.init ~n:3 ~f:(fun i:Int -> sine (110.0 * (to_scalar i + 1.0)))) ;;
 )");
   DiagnosticBag d1;
   Program p1 = checkProject({f}, d1);
@@ -770,8 +770,8 @@ let stack : Scalar Signal =
   std::string g = tp.write("ok2.synth", R"(
 open Core open Core.Osc open Core.Fx open Core.Arrange open Core.Render open Core.Io open Core.Time open Core.Sig open Core.Math
 open Core.List
-let xs : Scalar list = map (fun x:Scalar -> x + 1.0) (repeat 3.0 0.0) ;;
-let t : Scalar = fold (fun a:Scalar b:Scalar -> a + b) 0.0 (init 3.0 (fun i:Scalar -> i)) ;;
+let xs : Scalar list = map (fun x:Scalar -> x + 1.0) (repeat 3 0.0) ;;
+let t : Scalar = fold (fun a:Scalar b:Scalar -> a + b) 0.0 (init 3 (fun i:Int -> to_scalar i)) ;;
 )");
   DiagnosticBag d2;
   Program p2 = checkProject({g}, d2);
@@ -1269,11 +1269,11 @@ TEST(checker_list_builders) {
   TempProject tp;
   std::string f = tp.write("ok.synth", R"(
 open Core open Core.Osc open Core.Fx open Core.Arrange open Core.Render open Core.Io open Core.Time open Core.Sig open Core.Math
-let harmonic i:Scalar : Scalar Signal = sine (110.0 * (i + 1.0)) ;;
-let stack : Scalar Signal list = List.init 5.0 harmonic ;;
-let fives : Scalar list = List.repeat 3.0 5.0 ;;
-let beats : Timestamp list = time_steps ~start:0s ~step:250ms ~count:8.0 ;;
-let sigs : Scalar Signal list = List.init ~n:4.0 ~f:sine ;;
+let harmonic i:Int : Scalar Signal = sine (110.0 * (to_scalar i + 1.0)) ;;
+let stack : Scalar Signal list = List.init 5 harmonic ;;
+let fives : Scalar list = List.repeat 3 5.0 ;;
+let beats : Timestamp list = time_steps ~start:0s ~step:250ms ~count:8 ;;
+let sigs : Scalar Signal list = List.init ~n:4 ~f:harmonic ;;
 )");
   DiagnosticBag diags;
   Program prog = checkProject({f}, diags);
@@ -1293,12 +1293,12 @@ TEST(checker_list_builder_type_errors) {
   std::string f = tp.write("bad.synth", R"(
 open Core open Core.Osc open Core.Fx open Core.Arrange open Core.Render open Core.Io open Core.Time open Core.Sig open Core.Math
 let g t:Timestamp : Scalar Signal = sine 440.0 ;;
-let xs : Scalar Signal list = List.init 3.0 g ;;
+let xs : Scalar Signal list = List.init 3 g ;;
 )");
   DiagnosticBag d1;
   checkProject({f}, d1);
   CHECK(d1.hasErrors());
-  // time_steps count is a Scalar, not a Timestamp.
+  // time_steps count is an Int, not a Timestamp.
   std::string g = tp.write(
       "bad2.synth",
       "open Core open Core.Osc open Core.Fx open Core.Arrange open Core.Render open Core.Io open Core.Time open Core.Sig open Core.Math\nlet xs : Timestamp list = time_steps 0s 250ms 1s ;;");
@@ -1313,7 +1313,7 @@ TEST(checker_let_in_basic) {
 open Core open Core.Osc open Core.Fx open Core.Arrange open Core.Render open Core.Io open Core.Time open Core.Sig open Core.Math
 let song : Scalar Signal =
   let hit : Scalar Sample = sine 440.0 |> sample ~from:0s ~to:100ms in
-  let beats : Timestamp list = time_steps ~start:0s ~step:200ms ~count:5.0 in
+  let beats : Timestamp list = time_steps ~start:0s ~step:200ms ~count:5 in
   place_multi hit beats
 ;;
 )");
@@ -1481,7 +1481,7 @@ let bpm : Scalar = 120.0 ;;
 let beat : Timestamp = to_min (1.0 / bpm) ;;
 let lead : Timestamp = to_ms 250.0 ;;
 let tail : Timestamp = to_sec 1.5 ;;
-let steps : Timestamp list = time_steps ~start:lead ~step:beat ~count:4.0 ;;
+let steps : Timestamp list = time_steps ~start:lead ~step:beat ~count:4 ;;
 )");
   DiagnosticBag diags;
   Program prog = checkProject({f}, diags);
@@ -2076,4 +2076,108 @@ TEST(checker_core_is_a_real_library_of_externals) {
         return true;
       };
   CHECK(allExternal(core->parsed.defs));
+}
+
+TEST(checker_int_arithmetic_and_comparisons) {
+  TempProject tp;
+  std::string f = tp.write("i.synth", R"(
+open Core open Core.Math
+let n : Int = 3 + 4 * 2 ;;
+let d : Int = 7 / 2 ;;
+let neg : Int = -n ;;
+let b : Bool = n < 12 && d == 3 ;;
+let s : Scalar = to_scalar n * 1.5 ;;
+let r : Int = round 2.6 ;;
+let fl : Int = floor 2.6 ;;
+let ce : Int = ceil 2.4 ;;
+let pick : Int = if b then n else d ;;
+let xs : Int list = [1; 2; 3] ;;
+)");
+  DiagnosticBag diags;
+  Program prog = checkProject({f}, diags);
+  for (auto& d : diags.items)
+    std::cerr << renderDiagnostic(d, prog.modules.empty() ? std::string{}
+                                       : userMod(prog).parsed.source);
+  CHECK(!diags.hasErrors());
+  const auto& types = userMod(prog).defTypes;
+  for (const char* n : {"n", "d", "neg", "r", "fl", "ce", "pick"})
+    CHECK(typeEquals(types.at(n), tInt()));
+  CHECK(typeEquals(types.at("b"), tBool()));
+  CHECK(typeEquals(types.at("s"), tScalar()));
+  CHECK(typeEquals(types.at("xs"), tList(tInt())));
+}
+
+TEST(checker_int_does_not_mix_with_scalar) {
+  TempProject tp;
+  // Int + Scalar, Int == Scalar, and Int-for-Scalar arguments are all
+  // type errors; conversion is explicit.
+  for (const char* bad :
+       {"let x : Scalar = 1 + 2.0 ;;",
+        "let b : Bool = 1 == 1.0 ;;",
+        "let t : Scalar = 2 ;;"}) {
+    TempProject p2;
+    std::string f = p2.write("bad.synth", bad);
+    DiagnosticBag diags;
+    checkProject({f}, diags);
+    CHECK(diags.hasErrors());
+  }
+}
+
+TEST(checker_int_argument_where_scalar_expected_hints_conversion) {
+  TempProject tp;
+  std::string f = tp.write(
+      "bad.synth",
+      "open Core open Core.Osc\nlet x : Scalar Signal = sine 440 ;;");
+  DiagnosticBag diags;
+  checkProject({f}, diags);
+  CHECK(diags.hasErrors());
+  bool hinted = false;
+  for (auto& d : diags.items)
+    if (d.message.find("to_scalar") != std::string::npos) hinted = true;
+  CHECK(hinted);
+}
+
+TEST(checker_unary_minus_types) {
+  TempProject tp;
+  std::string f = tp.write("neg.synth", R"(
+open Core open Core.Osc
+let a : Int = -3 ;;
+let b : Scalar = -2.5 ;;
+let s : Scalar Signal = -(sine 440.0) ;;
+let v x:Vector : Vector = -x ;;
+)");
+  DiagnosticBag diags;
+  Program prog = checkProject({f}, diags);
+  for (auto& d : diags.items)
+    std::cerr << renderDiagnostic(d, prog.modules.empty() ? std::string{}
+                                       : userMod(prog).parsed.source);
+  CHECK(!diags.hasErrors());
+  // ...and non-numeric operands are rejected.
+  std::string g = tp.write("bad.synth", "let s : String = -\"x\" ;;");
+  DiagnosticBag d2;
+  checkProject({g}, d2);
+  CHECK(d2.hasErrors());
+}
+
+TEST(checker_int_count_signatures) {
+  TempProject tp;
+  // A Scalar count is now a type error at the call site.
+  std::string f = tp.write(
+      "bad.synth",
+      "open Core open Core.Time\n"
+      "let xs : Timestamp list = time_steps ~start:0s ~step:250ms ~count:8.0 ;;");
+  DiagnosticBag diags;
+  checkProject({f}, diags);
+  CHECK(diags.hasErrors());
+}
+
+TEST(checker_int_crosses_external_boundary) {
+  TempProject tp;
+  std::string f = tp.write("e.synth", R"(
+let twice n:Int : Int = external "twice.cpp" ;;
+let firsts ~xs:Int list : Int = external "twice.cpp" ;;
+)");
+  DiagnosticBag diags;
+  checkProject({f}, diags);
+  CHECK(!diags.hasErrors());
 }

@@ -28,13 +28,13 @@ import Strings
 let drums : Scalar Signal =
   let kicks : Scalar Signal =
     place_multi Drums.kick_hit
-                (time_steps ~start:2s ~step:500ms ~count:28.0) in
+                (time_steps ~start:2s ~step:500ms ~count:28) in
   let snares : Scalar Signal =
     place_multi Drums.snare_hit
-                (time_steps ~start:2500ms ~step:1s ~count:14.0) in
+                (time_steps ~start:2500ms ~step:1s ~count:14) in
   let hats : Scalar Signal =
     place_multi Drums.hat_hit
-                (time_steps ~start:4s ~step:250ms ~count:48.0) in
+                (time_steps ~start:4s ~step:250ms ~count:48) in
   kicks + snares * 0.9 + hats * 0.5
 ;;
 

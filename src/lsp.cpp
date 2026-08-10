@@ -475,9 +475,9 @@ void memberItems(const Program& prog, const ModEntry& m,
 const char* kKeywords[] = {"let",  "in",     "fun",  "import", "open",
                            "module", "if",   "then", "else",   "struct",
                            "end",  "external", "true", "false"};
-const char* kTypeWords[] = {"Scalar", "Vector", "Timestamp", "String",
-                            "Bool",   "Signal", "Sample",    "list",
-                            "unit"};
+const char* kTypeWords[] = {"Scalar", "Int",    "Vector", "Timestamp",
+                            "String", "Bool",   "Signal", "Sample",
+                            "list",   "unit"};
 
 // --- Diagnostics -----------------------------------------------------------
 

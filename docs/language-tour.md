@@ -93,6 +93,10 @@ let echoes : Scalar Signal =
   let hit : Scalar Sample = warm |> sample ~from:0s ~to:100ms in
   mix_all (List.map (fun t:Timestamp -> place hit t) [0s; 250ms; 500ms]) ;;
 
+let chord : Scalar Signal =
+  let tone freq:Scalar : Scalar Signal = sine freq * 0.3 in  (* local function *)
+  mix_all [tone 220.0; tone 275.0; tone 330.0] ;;
+
 let _ = sample pattern ~from:0s ~to:2s |> render ~name:"warm" ~rate:48000.0 ;;
 ```
 
@@ -109,7 +113,11 @@ let _ = sample pattern ~from:0s ~to:2s |> render ~name:"warm" ~rate:48000.0 ;;
 - **Pipe**: `x |> f a` desugars to `f a x` — the piped value becomes the
   final positional argument.
 - **Local bindings**: `let name : Type = e in body` is an expression;
-  chained sub-lets nest naturally.
+  chained sub-lets nest naturally. With parameters
+  (`let tone freq:Scalar : Scalar Signal = ... in ...`) a local binding
+  defines a **local function** — sugar for binding a lambda, so it
+  captures enclosing locals and parameters, takes labels, and curries
+  like any other function.
 
 ## Polymorphic signatures
 

@@ -1386,6 +1386,83 @@ let warm : Scalar Signal =
   CHECK(!diags.hasErrors());
 }
 
+TEST(checker_let_in_function_binding) {
+  TempProject tp;
+  // A local function definition: positional and labeled parameters,
+  // called directly and via a label-curried partial application.
+  std::string f = tp.write("ok.synth", R"(
+open Core open Core.Osc open Core.Fx open Core.Arrange open Core.Render open Core.Io open Core.Time open Core.Sig open Core.Math
+let song : Scalar Signal =
+  let pluck freq:Scalar ~gain:Scalar : Scalar Signal = (sine freq) * gain in
+  let quiet : Scalar -> Scalar Signal = pluck ~gain:0.25 in
+  pluck 440.0 ~gain:0.5 + quiet 330.0
+;;
+)");
+  DiagnosticBag diags;
+  Program prog = checkProject({f}, diags);
+  for (auto& d : diags.items)
+    std::cerr << renderDiagnostic(d, prog.modules.empty() ? std::string{}
+                                       : userMod(prog).parsed.source);
+  CHECK(!diags.hasErrors());
+  CHECK(typeEquals(userMod(prog).defTypes.at("song"), tSignal(tScalar())));
+}
+
+TEST(checker_let_in_function_body_mismatch) {
+  TempProject tp;
+  // The local function's body must match its declared return type.
+  std::string f = tp.write(
+      "bad.synth",
+      "open Core open Core.Osc open Core.Fx open Core.Arrange open Core.Render open Core.Io open Core.Time open Core.Sig open Core.Math\nlet x : Scalar = let f y:Scalar : Timestamp = y + 1.0 in 2.0 ;;");
+  DiagnosticBag diags;
+  checkProject({f}, diags);
+  CHECK(diags.hasErrors());
+}
+
+TEST(checker_let_in_function_duplicate_param) {
+  TempProject tp;
+  std::string f = tp.write(
+      "bad.synth",
+      "open Core open Core.Osc open Core.Fx open Core.Arrange open Core.Render open Core.Io open Core.Time open Core.Sig open Core.Math\nlet x : Scalar = let f y:Scalar y:Scalar : Scalar = y in f 1.0 2.0 ;;");
+  DiagnosticBag diags;
+  checkProject({f}, diags);
+  CHECK(diags.hasErrors());
+}
+
+TEST(checker_let_in_function_param_scope_ends_at_body) {
+  TempProject tp;
+  // A local function's parameter scopes over its own body only, not over
+  // the body of the `in`.
+  std::string f = tp.write("bad.synth", R"(
+open Core open Core.Osc open Core.Fx open Core.Arrange open Core.Render open Core.Io open Core.Time open Core.Sig open Core.Math
+let a : Scalar = let f y:Scalar : Scalar = y + 1.0 in f y ;;
+)");
+  DiagnosticBag diags;
+  checkProject({f}, diags);
+  CHECK(diags.hasErrors());
+}
+
+TEST(checker_let_in_function_shares_enclosing_type_variables) {
+  TempProject tp;
+  // 'a inside a local function's annotation is the enclosing top-level
+  // definition's 'a (spec par.3: same name, same variable), so a local
+  // helper can pass polymorphic values along.
+  std::string f = tp.write("ok.synth", R"(
+open Core open Core.Osc open Core.Fx open Core.Arrange open Core.Render open Core.Io open Core.Time open Core.Sig open Core.Math
+let dampen ~input:'a Signal : 'a Signal =
+  let boost x:'a Signal : 'a Signal = x * 2.0 in
+  lowpass ~cutoff:600.0 (boost input)
+;;
+let mono : Scalar Signal = dampen (saw 220.0) ;;
+let wide : Vector Signal = dampen (channels [saw 220.0; saw 221.0]) ;;
+)");
+  DiagnosticBag diags;
+  Program prog = checkProject({f}, diags);
+  for (auto& d : diags.items)
+    std::cerr << renderDiagnostic(d, prog.modules.empty() ? std::string{}
+                                       : userMod(prog).parsed.source);
+  CHECK(!diags.hasErrors());
+}
+
 TEST(checker_render_stems) {
   TempProject tp;
   std::string f = tp.write("ok.synth", R"(

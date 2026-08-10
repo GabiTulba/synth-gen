@@ -220,8 +220,8 @@ class Parser {
   }
 
   // Parameters: [~]ident ':' type, until ':' (return type), '=' or '->'.
-  // A leading '~' declares a labeled parameter. Shared by top-level lets
-  // and lambdas.
+  // A leading '~' declares a labeled parameter. Shared by top-level lets,
+  // local lets, and lambdas.
   void parseParams(std::vector<Param>& out) {
     while (at(Tok::Ident) || at(Tok::Tilde)) {
       Param p;
@@ -371,16 +371,41 @@ class Parser {
     return e;
   }
 
-  // Local binding: let name : Type = expr in body. Annotated like every
-  // other binding; value bindings only (no parameters) in v1.
+  // Local binding: let name {param} : Type = expr in body. Annotated
+  // like every other binding; with parameters it is a local function
+  // definition, represented as a lambda bound under a function-typed
+  // annotation - the checker, evaluator, and incremental hasher see the
+  // exact shape they already handle (a closure capturing the enclosing
+  // locals), so a local function behaves like the equivalent
+  // `let f : T -> R = fun ...` spelled out by hand, labels included.
   ExprPtr parseLetIn() {
     Span lo = advance().span;  // 'let'
     const Token& name = expect(Tok::Ident, "binding name");
+    std::vector<Param> params;
+    parseParams(params);
     expect(Tok::Colon,
-           "':' (local bindings are annotated: let name : Type = ... in ...)");
+           params.empty()
+               ? "':' (local bindings are annotated: "
+                 "let name : Type = ... in ...)"
+               : "':' for the return type (local functions are annotated: "
+                 "let name params : Type = ... in ...)");
     TypePtr ty = parseType();
     expect(Tok::Equals, "'='");
     ExprPtr bound = parseExpr();
+    if (!params.empty()) {
+      std::vector<TypePtr> ps;
+      std::vector<std::string> labels;
+      for (auto& p : params) {
+        ps.push_back(p.type);
+        labels.push_back(p.labeled ? p.name : "");
+      }
+      ty = tFun(std::move(ps), std::move(labels), std::move(ty));
+      auto lam = std::make_unique<Expr>(
+          Expr::Kind::Lambda, Span{params.front().span.lo, bound->span.hi});
+      lam->params = std::move(params);
+      lam->items.push_back(std::move(bound));
+      bound = std::move(lam);
+    }
     expect(Tok::In, "'in' to close the local binding");
     ExprPtr body = parseExpr();
     auto e = std::make_unique<Expr>(Expr::Kind::Let,

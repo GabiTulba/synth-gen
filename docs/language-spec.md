@@ -613,7 +613,8 @@ place_multi hat (time_steps ~start:0s ~step:250ms ~count:32.0
                    |> jitter ~seed:7.0 ~spread:8ms)
 ```
 
-Semantics details for the doc's open points (also in the README):
+Semantics details for the doc's open points (expanded in
+[`core-library.md`](core-library.md)):
 `adsr` sustains until `hold` then releases; `fm` integrates
 `carrier + modulator(t)` Hz from the epoch; `pm`'s modulator is radians;
 `am` computes `carrier * (1 + depth*modulator)` with a mono modulator

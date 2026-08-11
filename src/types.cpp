@@ -151,6 +151,16 @@ bool typeEquals(const TypePtr& a, const TypePtr& b) {
   return false;
 }
 
+namespace {
+// A function type in a nested position — a parameter of another function
+// type or the element of Signal/Sample/list — is parenthesized, matching
+// where the source grammar itself requires parentheses.
+std::string nestedTypeName(const TypePtr& t) {
+  std::string s = typeName(t);
+  return t->kind == Type::Kind::Fun ? "(" + s + ")" : s;
+}
+}  // namespace
+
 std::string typeName(const TypePtr& t) {
   switch (t->kind) {
     case Type::Kind::Scalar: return "Scalar";
@@ -160,9 +170,9 @@ std::string typeName(const TypePtr& t) {
     case Type::Kind::String: return "String";
     case Type::Kind::Bool: return "Bool";
     case Type::Kind::Unit: return "unit";
-    case Type::Kind::Signal: return typeName(t->elem) + " Signal";
-    case Type::Kind::Sample: return typeName(t->elem) + " Sample";
-    case Type::Kind::List: return typeName(t->elem) + " list";
+    case Type::Kind::Signal: return nestedTypeName(t->elem) + " Signal";
+    case Type::Kind::Sample: return nestedTypeName(t->elem) + " Sample";
+    case Type::Kind::List: return nestedTypeName(t->elem) + " list";
     case Type::Kind::Tuple: {
       std::string s = "(";
       for (size_t i = 0; i < t->items.size(); i++) {
@@ -172,13 +182,13 @@ std::string typeName(const TypePtr& t) {
       return s + ")";
     }
     case Type::Kind::Fun: {
-      std::string s = "(";
+      std::string s;
       for (size_t i = 0; i < t->items.size(); i++) {
         std::string label = t->labelAt(i);
         if (!label.empty()) s += label + ":";
-        s += typeName(t->items[i]) + " -> ";
+        s += nestedTypeName(t->items[i]) + " -> ";
       }
-      return s + typeName(t->ret) + ")";
+      return s + typeName(t->ret);
     }
     case Type::Kind::Var:
       // A user-written variable prints under the name the signature gave

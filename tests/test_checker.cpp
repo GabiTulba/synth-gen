@@ -2272,3 +2272,26 @@ TEST(checker_bundled_stdlib_checks_as_core) {
   CHECK(prog.modules.size() == 1);
   CHECK(prog.modules.front().libName == "Core");
 }
+
+TEST(checker_type_name_function_formatting) {
+  // A function type prints without enclosing parentheses; parens appear
+  // only where the source grammar itself requires them - a function-typed
+  // parameter and a Signal/Sample/list element.
+  TypePtr f = tFun({tScalar()}, {"x"}, tScalar());
+  CHECK(typeName(f) == "x:Scalar -> Scalar");
+  TypePtr hof = tFun({f, tScalar()}, {"f", ""}, tScalar());
+  CHECK(typeName(hof) == "f:(x:Scalar -> Scalar) -> Scalar -> Scalar");
+  CHECK(typeName(tList(tFun({tScalar()}, tScalar()))) ==
+        "(Scalar -> Scalar) list");
+  CHECK(typeName(tSignal(tFun({tScalar()}, tScalar()))) ==
+        "(Scalar -> Scalar) Signal");
+
+  // A bundled-stdlib signature reads back as written: Math.exp : x:'a -> 'a.
+  fs::path lib =
+      fs::path(bundledStdlibDir()) / "core" / kLibraryInterfaceFile;
+  DiagnosticBag diags;
+  Program prog = checkProject({lib.string()}, diags);
+  CHECK(!diags.hasErrors());
+  CHECK(typeName(prog.modules.front().defTypes.at("Math.exp")) ==
+        "x:'a -> 'a");
+}

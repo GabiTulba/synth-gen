@@ -2090,22 +2090,18 @@ let pick ~flag:Bool ~name:String : (String, Timestamp) list =
   const auto& types = userMod(prog).defTypes;
   CHECK(types.at("succ")->kind == Type::Kind::Fun);
 
-  // Signals cannot: they are engine-internal graphs, not data.
-  std::string bad = tp.write(
-      "bad.synth",
-      "let f ~s:Scalar Signal : Scalar Signal = external \"f.cpp\" ;;");
+  // So do signals and samples (engine graph handles), functions and
+  // type variables (opaque values) - user externals use the same
+  // mechanism the bundled Core library's implementations do.
+  std::string sigs = tp.write("sigs.synth", R"(
+let f ~s:Scalar Signal : Scalar Signal = external "f.cpp" ;;
+let cut ~s:'a Signal ~at:Timestamp : 'a Sample = external "f.cpp" ;;
+let pick ~f:('a -> 'b) ~x:'a : 'b = external "f.cpp" ;;
+let id ~x:'a : 'a = external "f.cpp" ;;
+)");
   DiagnosticBag d2;
-  checkProject({bad}, d2);
-  CHECK(d2.hasErrors());
-  CHECK(d2.items[0].message.find("cannot cross the external boundary") !=
-        std::string::npos);
-
-  // Type variables cannot either (nothing to marshal).
-  std::string badVar = tp.write(
-      "badvar.synth", "let id ~x:'a : 'a = external \"id.cpp\" ;;");
-  DiagnosticBag d3;
-  checkProject({badVar}, d3);
-  CHECK(d3.hasErrors());
+  checkProject({sigs}, d2);
+  CHECK(!d2.hasErrors());
 
   // Names must form C++ symbols: no primes.
   std::string badName = tp.write(
@@ -2257,4 +2253,22 @@ let firsts ~xs:Int list : Int = external "twice.cpp" ;;
   DiagnosticBag diags;
   checkProject({f}, diags);
   CHECK(!diags.hasErrors());
+}
+
+TEST(checker_bundled_stdlib_checks_as_core) {
+  // Opening or linting the bundled stdlib source itself (as happens when
+  // developing synthc) must check it as the Core library, under the
+  // library's canonical module identity.
+  fs::path lib =
+      fs::path(bundledStdlibDir()) / "core" / kLibraryInterfaceFile;
+  DiagnosticBag diags;
+  Program prog = checkProject({lib.string()}, diags);
+  for (auto& d : diags.items)
+    std::cerr << renderDiagnostic(
+        d, prog.modules.empty() ? std::string{}
+                                : prog.modules.front().parsed.source);
+  CHECK(!diags.hasErrors());
+  // Loaded once, under the Core name - not doubled as root + dependency.
+  CHECK(prog.modules.size() == 1);
+  CHECK(prog.modules.front().libName == "Core");
 }

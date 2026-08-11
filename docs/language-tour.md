@@ -222,9 +222,11 @@ SYNTH_EXTERNAL(succ) {
 }
 ```
 
-Only build-time data crosses the boundary (Scalar, Timestamp, Bool,
-String, Vector, lists, tuples — never signals, which stay lazy engine
-graphs). This is also how Core itself is built — see
+Every value crosses the boundary: data (Scalar, Int, Timestamp, Bool,
+String, Vector, lists, tuples) transparently, Signals and Samples as
+lazy engine graph handles you combine with the `<synth/engine.hpp>`
+constructors, and functions as opaque handles callable through the
+context. This is also how Core itself is built — see
 [`core-library.md`](core-library.md).
 
 ## Building signals directly

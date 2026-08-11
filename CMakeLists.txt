@@ -27,26 +27,29 @@ add_library(synthgraph_core
   src/build.cpp
   src/json.cpp
   src/lsp.cpp
-  src/core/native.cpp
-  src/core/oscillators.cpp
-  src/core/effects.cpp
-  src/core/sampling.cpp
-  src/core/render.cpp
-  src/core/io.cpp
-  src/core/lists.cpp
-  src/core/signals.cpp
-  src/core/math.cpp
 )
-target_include_directories(synthgraph_core PUBLIC src)
-# The bundled standard library (stdlib/core) is read at run time; the
-# source-tree location is the default, overridable via $SYNTH_STDLIB_DIR.
+# src/ext holds the public API headers (<synth/external.hpp>,
+# <synth/engine.hpp>) that external implementations - the bundled
+# stdlib's and user code's alike - compile against at run time; the host
+# includes the same files, so there is exactly one definition of the
+# boundary types.
+target_include_directories(synthgraph_core PUBLIC src src/ext)
+# The bundled standard library (stdlib/core, .synth interface plus its
+# external .cpp implementations) and the API headers are read at run
+# time; the source-tree locations are the defaults, overridable via
+# $SYNTH_STDLIB_DIR and $SYNTH_EXT_INCLUDE_DIR.
 target_compile_definitions(synthgraph_core
-  PUBLIC SYNTH_STDLIB_DEFAULT="${CMAKE_CURRENT_SOURCE_DIR}/stdlib")
+  PUBLIC SYNTH_STDLIB_DEFAULT="${CMAKE_CURRENT_SOURCE_DIR}/stdlib"
+         SYNTH_EXT_INCLUDE_DEFAULT="${CMAKE_CURRENT_SOURCE_DIR}/src/ext")
 # User `external "file.cpp"` implementations are dlopen()ed.
 target_link_libraries(synthgraph_core PUBLIC ${CMAKE_DL_LIBS})
 
 add_executable(synthc src/main.cpp)
 target_link_libraries(synthc PRIVATE synthgraph_core)
+# External implementations resolve the engine's constructors against the
+# host executable's dynamic symbol table at dlopen time; every binary
+# that evaluates synth programs must export them.
+set_target_properties(synthc PROPERTIES ENABLE_EXPORTS ON)
 
 # --- Dev app (Epic 7): SDL2 + Dear ImGui artifact browser/player ---------
 option(SYNTHGRAPH_BUILD_DEVAPP "Build the synth-dev app (needs SDL2)" ON)
@@ -78,6 +81,7 @@ if(SYNTHGRAPH_BUILD_DEVAPP)
 
     add_executable(synth-dev src/devapp/app.cpp)
     target_link_libraries(synth-dev PRIVATE synthdev_core imgui)
+    set_target_properties(synth-dev PROPERTIES ENABLE_EXPORTS ON)
 
     add_executable(devapp_tests
       tests/test_main.cpp
@@ -85,6 +89,7 @@ if(SYNTHGRAPH_BUILD_DEVAPP)
     )
     target_link_libraries(devapp_tests PRIVATE synthdev_core)
     target_include_directories(devapp_tests PRIVATE tests)
+    set_target_properties(devapp_tests PROPERTIES ENABLE_EXPORTS ON)
     add_test(NAME devapp_tests COMMAND devapp_tests)
     add_test(NAME devapp_selftest
              COMMAND synth-dev --self-test
@@ -104,4 +109,5 @@ add_executable(synth_tests
 )
 target_link_libraries(synth_tests PRIVATE synthgraph_core)
 target_include_directories(synth_tests PRIVATE tests)
+set_target_properties(synth_tests PROPERTIES ENABLE_EXPORTS ON)
 add_test(NAME synth_tests COMMAND synth_tests)

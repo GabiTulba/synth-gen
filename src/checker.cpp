@@ -209,58 +209,22 @@ class ModuleChecker {
     }
   }
 
-  // let name ... = external "file.cpp". Inside the bundled Core library
-  // the file names a built-in implementation compiled into synthc;
-  // anywhere else it is user C++ compiled at build time, and only *data*
-  // crosses that boundary - signals, samples, and functions stay inside
-  // the engine - so the signature is restricted here, where the message
-  // can point at the offending annotation.
+  // let name ... = external "file.cpp": C++ compiled at build time, for
+  // the bundled Core library and user code alike. Every type crosses the
+  // boundary - data transparently, signals and samples as engine graph
+  // handles, functions and type variables as opaque values - so the only
+  // signature demand left is that the name can be a C++ symbol.
   void checkExternal(TopDef& def) {
     if (def.name == "_")
       fail(def.span, "'let _' cannot be external (an external binds a "
                      "named value to an implementation)");
     if (!def.retType) fail(def.span, "missing return type annotation");
     def.body->type = def.retType;
-    if (mod_.libName == "Core") return;
     for (char c : def.name)
       if (!(std::isalnum((unsigned char)c) || c == '_'))
         fail(def.span, "external '" + def.name +
                            "': the name must form a valid C++ symbol "
                            "(letters, digits and '_' only)");
-    for (auto& p : def.params)
-      if (!extDataType(p.type))
-        fail(p.span, "external '" + def.name + "': parameter '" + p.name +
-                         "' has type " + typeName(p.type) +
-                         ", which cannot cross the external boundary (only "
-                         "Scalar, Int, Timestamp, Bool, String, Vector, and "
-                         "lists/tuples of those can)");
-    if (!extDataType(def.retType))
-      fail(def.span, "external '" + def.name + "': result type " +
-                         typeName(def.retType) +
-                         " cannot cross the external boundary (only Scalar, "
-                         "Int, Timestamp, Bool, String, Vector, and "
-                         "lists/tuples of those can)");
-  }
-
-  static bool extDataType(const TypePtr& t) {
-    switch (t->kind) {
-      case Type::Kind::Scalar:
-      case Type::Kind::Int:
-      case Type::Kind::Timestamp:
-      case Type::Kind::String:
-      case Type::Kind::Bool:
-      case Type::Kind::Vector:
-      case Type::Kind::Unit:
-        return true;
-      case Type::Kind::List:
-        return extDataType(t->elem);
-      case Type::Kind::Tuple:
-        for (auto& x : t->items)
-          if (!extDataType(x)) return false;
-        return true;
-      default:  // Signal, Sample, Fun, Var
-        return false;
-    }
   }
 
   static TypePtr defFunType(const TopDef& def) {
@@ -1085,7 +1049,8 @@ Program checkProject(const std::vector<std::string>& rootFiles,
     l.parsed.source = std::move(source);
     l.libName = libName;
     l.external = external;
-    // Everything may reference Core with no import; this edge puts the
+    // Core is not ambient, but it is always a permitted dependency and
+    // its unknown-name hints need it checked; this edge puts the
     // bundled library first in the topological order.
     if (libName != "Core") l.loadDeps.push_back("Core");
     std::vector<Token> toks = lex(l.parsed.source, l.parsed.path, diags);
@@ -1121,13 +1086,22 @@ Program checkProject(const std::vector<std::string>& rootFiles,
   for (auto& f : rootFiles) {
     std::string libName;
     std::string canonical;
-    if (currentLib) {
+    fs::path fp(f);
+    if (canonicalSourceKey(fp.parent_path().string()) ==
+        canonicalSourceKey(coreLib.dir)) {
+      // The bundled stdlib source itself (opened in an editor or linted
+      // directly while developing synthc): check it as the Core library
+      // so its externals resolve beside lib.synth and the module is
+      // named Core, not by its path.
+      libName = coreLib.name;
+      canonical = canonicalInLibrary(libName, fp);
+    } else if (currentLib) {
       libName = currentLib->name;
-      canonical = canonicalInLibrary(libName, fs::path(f));
+      canonical = canonicalInLibrary(libName, fp);
     } else {
       canonical = moduleNameForPath(f);
     }
-    loadFile(fs::path(f), canonical, libName, false, {}, {});
+    loadFile(fp, canonical, libName, false, {}, {});
   }
 
   // Load a library's interface module (its lib.synth) under the library's

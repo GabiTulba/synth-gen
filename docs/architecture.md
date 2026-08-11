@@ -49,8 +49,8 @@ its own detailed document (linked below).
 | Type system & module resolution | `src/types.*`, `src/checker.*` | [`language-spec.md`](language-spec.md) §3–4 |
 | Evaluator | `src/eval.*` | [`language-spec.md`](language-spec.md) §5 |
 | Signal engine | `src/signal.*`, `src/wav.*`, `src/vis.*` | [`engine.md`](engine.md) |
-| Core library | `stdlib/core/lib.synth`, `src/core/` | [`core-library.md`](core-library.md) |
-| User externals | `src/external.*` | [`core-library.md`](core-library.md) |
+| Core library | `stdlib/core/` | [`core-library.md`](core-library.md) |
+| External functions | `src/external.*`, `src/ext/` | [`core-library.md`](core-library.md) |
 | Build system | `src/build.*`, `src/library.*`, `src/incremental.*`, `src/json.*` | [`build-system.md`](build-system.md) |
 | CLI | `src/main.cpp` | [`build-system.md`](build-system.md) |
 | Language server | `src/lsp.*` | [`tooling.md`](tooling.md) |
@@ -90,9 +90,9 @@ before reading any of them:
 | `src/lexer.*`, `src/parser.*`, `src/ast.hpp` | Language front-end: tokens (incl. timestamp unit-suffix literals), OCaml-like parser, AST with source spans |
 | `src/types.*`, `src/checker.*` | Type system (rigid vs. free type variables, unification), fully-annotated checker with use-site instantiation of stored signatures, module resolution (files, libraries, inline `struct ... end` modules, the bundled Core) |
 | `src/diagnostics.*` | Diagnostic representation and rendering with source spans |
-| `stdlib/core/lib.synth` | The Core library: every primitive's name and signature, declared in synth source as `external` bindings |
-| `src/core/` | The built-in external implementations those bindings dispatch to (oscillators, effects, sampling, render, io, lists, signals, math) |
-| `src/external.*` | User externals: the generated `<synth/external.hpp>` API, build-time C++ compilation, content-hash caching, dlopen binding |
+| `stdlib/core/` | The Core library: `lib.synth` declares every primitive's name and signature as `external` bindings over the implementation `.cpp` files beside it (oscillators, effects, sampling, render, io, lists, signals, math) |
+| `src/external.*` | External-function loading: build-time C++ compilation, content-hash caching, dlopen binding — for Core and user code alike |
+| `src/ext/` | The public API headers externals compile against: `<synth/external.hpp>` (values, context services, entry-point macro) and `<synth/engine.hpp>` (signal-graph constructors) |
 | `src/signal.*` | Signal engine: lazy signal DAG, render-time discretization, sample/place windowing, filters, mixing, block rendering, fusion |
 | `src/eval.*` | Evaluator: reduces definitions to values, collects render targets, `load_*` build-time validation |
 | `src/wav.*` | WAV read (PCM 16/24/32, float 32/64) and write (PCM 16) |

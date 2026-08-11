@@ -1848,6 +1848,9 @@ let _ = base |> sample ~from:0s ~to:50ms |> render ~name:"two" ~rate:8000.0 ;;
   CHECK(has("manifest: project 'logs', 1 source(s)"));
   CHECK(has("front-end: 1 module(s), 4 definition(s)"));
   CHECK(has("evaluate: 2 target(s), 0 audio input(s)"));
+  // The bundled Core implementations used by this program are external
+  // sources, tracked like any other build input.
+  CHECK(has(" external source(s)"));
   CHECK(has("render: 2 target(s) across"));
   CHECK(has("done: 2 target(s) (2 rendered, 0 cached, 0 failed)"));
   // Per-target worker lines with timings.

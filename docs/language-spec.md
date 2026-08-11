@@ -181,20 +181,20 @@ Rules:
   value, not a function.
 - **Definition before use, no recursion.** A definition may reference
   only parameters, *earlier* definitions of its module, imported modules'
-  definitions (qualified), names brought in by an *earlier* `open`, and
-  Core primitives (see below). Name resolution order for unqualified
+  definitions (qualified), and names brought in by an *earlier* `open`
+  — Core primitives included, under an earlier, still-enclosing
+  `open Core.<Module>` (see below). Name resolution order for unqualified
   names: local binding/parameter (innermost first) → the latest earlier
   binder of the innermost enclosing scope outward (each `struct` body is
   a scope over the file's top level; binders are own/sibling definitions
   and `open`ed names, position-ordered, so an `open` shadows earlier
-  same-named binders and a later definition shadows the open) → a Core
-  primitive, but only under an earlier, still-enclosing `open Core` (or
-  `open Core.List` for the list functions). Re-defining one of a
-  scope's *own* names is still a duplicate-definition error.
+  same-named binders and a later definition shadows the open).
+  Re-defining one of a scope's *own* names is still a
+  duplicate-definition error.
 - **The Core library.** All primitives live in `Core` — a *real
   library* bundled with the compiler (`stdlib/core/lib.synth`), whose
-  every definition is an `external` binding to an implementation
-  compiled into synthc (§5), organized into functional submodules:
+  every definition is an `external` binding to a C++ implementation
+  shipped beside it (§5), organized into functional submodules:
   `Osc` (oscillators & modulation), `Fx` (effects, filters,
   envelopes), `Arrange` (sample/place/mix), `Render` (the render
   effects), `Io` (audio import), `List`, `Time` (conversions &
@@ -386,7 +386,7 @@ while the graph is assembled, never a per-sample stream.
 
   ```
   module Voices = struct
-    open Core                              (* scoped: ends at `end` *)
+    open Core.Osc open Core.Fx             (* scoped: ends at `end` *)
     let base : Scalar = 220.0 ;;
     module Fx = struct
       let damp ~input:'a Signal : 'a Signal =
@@ -395,7 +395,8 @@ while the graph is assembled, never a per-sample stream.
     let lead : Scalar Signal = Fx.damp (sine base) ;;
   end ;;
 
-  let mono : Scalar Signal = Voices.Fx.damp (Core.sine Voices.base) ;;
+  let mono : Scalar Signal =
+    Voices.Fx.damp (Core.Osc.sine Voices.base) ;;
   ```
 
   Members are referenced by dotted path (`Voices.base`,
@@ -496,23 +497,20 @@ complete type (params and result are always written; result variables
 must still be bound by parameters). Externals are ordinary values: they
 curry, take labels, and are published by libraries like anything else.
 
-Two kinds exist, split by where the declaration lives:
+There is one mechanism, and the bundled Core library uses it too. The
+file string names a C++ file resolved relative to the declaring
+`.synth` file. At build time synthc compiles it once with `$CXX`
+(default `c++`) into a shared object cached by content — edits
+recompile, rebuilds reuse; user code's objects live under the
+project's `_build/externals/`, the bundled stdlib's in a shared
+per-user cache — then loads it and binds the exported entry point. The
+C++ file is a build input: the watch daemon rebuilds when it changes.
+Every definition in `stdlib/core/lib.synth` is such an external over
+the `.cpp` files shipped beside it: the primitives' signatures live in
+synth source, their bodies in library C++, and `open Core` is a plain
+library open.
 
-- **Core externals.** Every definition in the bundled
-  `stdlib/core/lib.synth` is external; the file string names the
-  `src/core/*.cpp` translation unit compiled into synthc that implements
-  it. This is what the primitives *are* now: their signatures live in
-  synth source, their bodies in the engine, and `open Core` is a plain
-  library open.
-- **User externals.** Anywhere else, the string names a C++ file
-  resolved relative to the declaring `.synth` file. At build time synthc
-  compiles it once into a shared object cached under
-  `_build/externals/` (keyed by file content — edits recompile, rebuilds
-  reuse), loads it, and binds the exported entry point. The C++ file is
-  a build input: the watch daemon rebuilds when it changes. The
-  compiler is `$CXX` (default `c++`).
-
-A user implementation includes the generated `<synth/external.hpp>` and
+An implementation includes the shipped `<synth/external.hpp>` and
 defines one entry point per external, named after the definition:
 
 ```cpp
@@ -529,12 +527,18 @@ Arguments arrive fully applied, in declaration order; return `true` with
 throw) — failures become build diagnostics on the declaring definition.
 One `.cpp` may implement several externals.
 
-**Only data crosses the boundary**: Scalar, Int, Timestamp, Bool,
-String, Vector, unit, and lists/tuples of those. Signals, Samples, functions and
-type variables cannot appear in a user external's signature (checked at
-type time) — signals are lazy engine graphs, not values, and stay on the
-host side. Core externals are exempt (their implementations *are* the
-engine). External names must form C++ symbols (letters, digits, `_`).
+**Every value crosses the boundary.** Data — Scalar, Int, Timestamp,
+Bool, String, Vector, unit, and lists/tuples of those — arrives as
+transparent `synth::ext::Value`s. Signals and Samples arrive as lazy
+engine graph handles that combine with the `<synth/engine.hpp>`
+constructors, the same ones the engine itself uses (the symbols resolve
+against the host process when the object is loaded). Functions (and
+type-variable-typed values generally) arrive as opaque handles, callable
+through the context's `apply` service or passable back unchanged. The
+context also offers `loadAudio` (audio files as build inputs) and
+`render` (declaring render targets) — Core's own `Io.load_mono` and
+`Render.render` are ordinary externals built on exactly these. External
+names must form C++ symbols (letters, digits, `_`).
 
 ## 6. Primitive signatures (v1 roster)
 
@@ -682,9 +686,9 @@ annotated; polymorphism is written out, §3), per-definition visibility
 control (a library's `lib.synth` publishes whole modules or re-exported
 values, but a published module exposes all of its definitions), reverse
 playback (`resample` reads its source only forward, so a negative rate
-clamps to zero rather than rewinding), cache tuning knobs, native
-extensions. See design doc §13. (Lambdas, general partial application,
-cross-directory imports/packaging — via libraries, `open` and module
-aliases — user-written polymorphism, inline modules, and build-time
-Booleans with `if`/`else` were listed here originally and are now in the
-language; see §2, §3 and §4.)
+clamps to zero rather than rewinding), cache tuning knobs. See design
+doc §13. (Lambdas, general partial application, cross-directory
+imports/packaging — via libraries, `open` and module aliases —
+user-written polymorphism, inline modules, build-time Booleans with
+`if`/`else`, and native extensions — `external` functions, §5 — were
+listed here originally and are now in the language; see §2, §3 and §4.)

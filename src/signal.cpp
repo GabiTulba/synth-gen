@@ -1507,6 +1507,8 @@ SigPtr makeFileSignal(std::vector<std::vector<double>> channelData,
   return std::make_shared<FileNode>(std::move(channelData), fileRate);
 }
 
+int signalChannels(const SigPtr& s) { return s->channels(); }
+
 // --- Rendering -------------------------------------------------------------
 
 namespace {

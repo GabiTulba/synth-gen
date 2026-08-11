@@ -1,6 +1,7 @@
 (* SynthGraph Core - the standard library.
-   Every definition here is an `external` binding to an implementation
-   compiled into synthc (src/core/<file>). This file is the single
+   Every definition here is an `external` binding to a C++ implementation
+   in the file it names, sitting beside this one - the same mechanism any
+   library with external implementations uses. This file is the single
    source of truth for Core's names and signatures.
 
    Core is organized into functional submodules and must be brought into
@@ -8,7 +9,7 @@
    (Core.Osc.sine), `open Core` for module-qualified access (Osc.sine),
    or `open Core.Osc` for bare names (sine). *)
 
-(* --- Oscillators & modulation (src/core/oscillators.cpp) ------------- *)
+(* --- Oscillators & modulation (oscillators.cpp) ---------------------- *)
 
 module Osc = struct
   let sine ~freq:Scalar : Scalar Signal = external "oscillators.cpp" ;;
@@ -25,7 +26,7 @@ module Osc = struct
       : 'a Signal = external "oscillators.cpp" ;;
 end ;;
 
-(* --- Effects, filters, envelopes (src/core/effects.cpp) -------------- *)
+(* --- Effects, filters, envelopes (effects.cpp) ----------------------- *)
 
 module Fx = struct
   let delay ~by:Timestamp ~signal:'a Signal : 'a Signal =
@@ -50,7 +51,7 @@ module Fx = struct
     external "effects.cpp" ;;
 end ;;
 
-(* --- Slicing, placement, mixing (src/core/sampling.cpp) -------------- *)
+(* --- Slicing, placement, mixing (sampling.cpp) ----------------------- *)
 
 module Arrange = struct
   let mix_all ~signals:'a Signal list : 'a Signal =
@@ -65,8 +66,8 @@ module Arrange = struct
     external "sampling.cpp" ;;
 end ;;
 
-(* --- Render targets (src/core/render.cpp) - the language's only
-   effect. Artifact names share one project-wide name space. ----------- *)
+(* --- Render targets (render.cpp) - the language's only effect.
+   Artifact names share one project-wide name space. ------------------- *)
 
 module Render = struct
   let render ~name:String ~rate:Scalar ~sample:'a Sample : unit =
@@ -79,15 +80,15 @@ module Render = struct
       ~stems:(String, 'a Sample) list : unit = external "render.cpp" ;;
 end ;;
 
-(* --- Audio import (src/core/io.cpp) - build inputs, resolved relative
-   to the source file that names them. -------------------------------- *)
+(* --- Audio import (io.cpp) - build inputs, resolved relative to the
+   source file that names them. --------------------------------------- *)
 
 module Io = struct
   let load_mono ~path:String : Scalar Signal = external "io.cpp" ;;
   let load_multi ~path:String : Vector Signal = external "io.cpp" ;;
 end ;;
 
-(* --- List functions (src/core/lists.cpp) ----------------------------- *)
+(* --- List functions (lists.cpp) -------------------------------------- *)
 
 module List = struct
   let map ~f:('a -> 'b) ~xs:'a list : 'b list = external "lists.cpp" ;;
@@ -100,8 +101,7 @@ module List = struct
 end ;;
 
 (* --- Time: conversions and Timestamp sequences ------------------------
-   (src/core/math.cpp for conversions, src/core/lists.cpp for the
-   sequence builders). -------------------------------------------------- *)
+   (math.cpp for conversions, lists.cpp for the sequence builders). ----- *)
 
 module Time = struct
   (* The computed counterpart of the literal suffixes; there is
@@ -117,7 +117,7 @@ module Time = struct
       : Timestamp list = external "lists.cpp" ;;
 end ;;
 
-(* --- Signal constructors (src/core/signals.cpp) ---------------------- *)
+(* --- Signal constructors (signals.cpp) ------------------------------- *)
 
 module Sig = struct
   let constant ~value:Scalar : Scalar Signal = external "signals.cpp" ;;
@@ -131,7 +131,7 @@ module Sig = struct
     external "signals.cpp" ;;
 end ;;
 
-(* --- Math & Bool (src/core/math.cpp) --------------------------------- *)
+(* --- Math & Bool (math.cpp) ------------------------------------------ *)
 
 module Math = struct
   (* Polymorphic over Scalars, Vectors and Signals (elementwise);

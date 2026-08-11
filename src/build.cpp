@@ -523,12 +523,20 @@ static BuildResult buildUnitImpl(const std::string& projectDir,
   // 3. Evaluate: enumerate render targets (and run load_* validation).
   auto evalStart = std::chrono::steady_clock::now();
   std::vector<RenderTarget> targets;
-  std::vector<std::string> audioInputs;
-  bool evalOk = evaluateProgram(prog, targets, r.diags, &audioInputs,
+  // Audio files plus external implementation .cpp files - both are
+  // build inputs the daemon watches; the log counts them apart.
+  std::vector<std::string> evalInputs;
+  bool evalOk = evaluateProgram(prog, targets, r.diags, &evalInputs,
                                 (buildDir / "externals").string());
-  for (auto& a : audioInputs) r.inputs.push_back(a);
+  size_t cppInputs = 0;
+  for (auto& a : evalInputs) {
+    if (fs::path(a).extension() == ".cpp") cppInputs++;
+    r.inputs.push_back(a);
+  }
   log.line("evaluate: " + std::to_string(targets.size()) + " target(s), " +
-           std::to_string(audioInputs.size()) + " audio input(s) in " +
+           std::to_string(evalInputs.size() - cppInputs) +
+           " audio input(s), " + std::to_string(cppInputs) +
+           " external source(s) in " +
            fmtSecs(BuildLog::secondsSince(evalStart)));
 
   // Dependency statistics per target (from the declaring definition's
@@ -566,11 +574,11 @@ static BuildResult buildUnitImpl(const std::string& projectDir,
 
   // Content keys for incremental rebuilds (Epic 8): the target's
   // dependency-closure hash, salted with the engine version and the stamps
-  // of every audio input (audio files are build inputs; a changed file
-  // invalidates conservatively).
+  // of every evaluation input - audio files and external implementation
+  // .cpp files alike; a changed file invalidates conservatively.
   uint64_t audioSalt = fnvCombine(kFnvOffset, kEngineVersion);
   {
-    std::vector<std::string> sorted = audioInputs;
+    std::vector<std::string> sorted = evalInputs;
     std::sort(sorted.begin(), sorted.end());
     for (auto& a : sorted) {
       Stamp s = stampOf(a);

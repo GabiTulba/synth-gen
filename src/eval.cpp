@@ -8,8 +8,8 @@
 #include <optional>
 #include <stdexcept>
 
-#include "core/native.hpp"
 #include "external.hpp"
+#include "library.hpp"
 #include "wav.hpp"
 
 namespace fs = std::filesystem;
@@ -289,33 +289,15 @@ class Interp {
     return eval(*l->lam->items[0], env, *l->mod);
   }
 
-  // Dispatch an external-bodied definition. Core library declarations
-  // bind to built-in implementations (src/core/*.cpp); anything else is
-  // user C++, compiled into a cached shared object on first use.
-  // `declMod` is the module that declares the external (decides Core vs
-  // user, anchors the .cpp path); `callerMod` is where this application
-  // happens (anchors audio paths and render-target attribution).
+  // Dispatch an external-bodied definition: C++ compiled into a cached
+  // shared object on first use - the bundled Core library's
+  // implementations and user code go through the same path. `declMod` is
+  // the module that declares the external (anchors the .cpp path);
+  // `callerMod` is where this application happens (anchors audio paths
+  // and render-target attribution).
   Value callExternal(const TopDef& def, const CheckedModule& declMod,
                      const CheckedModule& callerMod,
                      std::vector<Value> args) {
-    if (declMod.libName == "Core") {
-      const native::Impl* impl = native::find(def.body->str, def.name);
-      if (!impl)
-        throw EvalError("no built-in implementation for external '" +
-                        def.name + "' (" + def.body->str + ")");
-      native::Ctx ctx;
-      ctx.apply = [this, &callerMod](const Value& fn, std::vector<Value> a) {
-        return apply(fn, std::move(a), callerMod);
-      };
-      ctx.loadAudio = [this, &callerMod](const std::string& p) {
-        return loadFile(p, callerMod);
-      };
-      ctx.targets = &targets_;
-      ctx.mod = &callerMod;
-      ctx.currentModule = currentModule_;
-      ctx.currentDef = currentDef_;
-      return impl->fn(ctx, args);
-    }
     auto it = userExternals_.find(&def);
     if (it == userExternals_.end()) {
       // The C++ file resolves relative to the declaring source file and
@@ -325,12 +307,34 @@ class Interp {
         p = fs::path(declMod.parsed.path).parent_path() / p;
       std::string resolved = p.lexically_normal().string();
       if (loadedFiles_) loadedFiles_->push_back(resolved);
+      // The bundled stdlib's objects go to the shared per-user cache
+      // (empty dir = temp default): they are identical across projects,
+      // so each project's _build/externals holds only its own code.
+      std::string cacheDir = extCacheDir_;
+      std::error_code ec;
+      fs::path stdroot = fs::absolute(bundledStdlibDir(), ec);
+      fs::path rel = fs::relative(fs::absolute(p, ec), stdroot, ec);
+      if (!rel.empty() && rel.string().rfind("..", 0) != 0) cacheDir.clear();
       it = userExternals_
                .emplace(&def,
-                        loadUserExternal(resolved, def.name, extCacheDir_))
+                        loadUserExternal(resolved, def.name, cacheDir))
                .first;
     }
-    return it->second(args);
+    ExtServices svc;
+    svc.apply = [this, &callerMod](const Value& fn, std::vector<Value> a) {
+      return apply(fn, std::move(a), callerMod);
+    };
+    svc.loadAudio = [this, &callerMod](const std::string& p) {
+      return loadFile(p, callerMod);
+    };
+    svc.declareTarget = [this, &callerMod](RenderTarget t) {
+      t.file = callerMod.parsed.path;
+      t.span = currentDef_ ? currentDef_->span : Span{};
+      t.declModule = currentModule_;
+      t.declDef = currentDef_;
+      targets_.push_back(std::move(t));
+    };
+    return it->second(svc, args);
   }
 
   // Audio file paths resolve relative to the source file that mentions them;

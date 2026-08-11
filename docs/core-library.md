@@ -2,10 +2,11 @@
 
 All primitives live in **`Core`** — a real library bundled with the
 compiler. Its interface is `stdlib/core/lib.synth`, where every
-definition is an `external` binding to an engine implementation compiled
-into synthc (`src/core/*.cpp`). So `open Core` genuinely imports a
+definition is an `external` binding to a C++ implementation shipped
+beside it (`stdlib/core/*.cpp`), compiled at build time by the same
+mechanism user externals use. So `open Core` genuinely imports a
 library rather than triggering compiler magic: primitive signatures live
-in synth source, their bodies in the engine, and the same `external`
+in synth source, their bodies in library C++, and the same `external`
 mechanism is available to users (see below).
 
 Core is always discoverable, always an allowed dependency (no manifest
@@ -24,15 +25,15 @@ semantics of the less obvious primitives.
 
 | Submodule | Contents | Engine sources |
 |-----------|----------|----------------|
-| `Core.Osc` | Oscillators (`sine`, `saw`, `square`, `noise`) and modulation (`fm`, `pm`, `am`) | `src/core/oscillators.cpp` |
-| `Core.Fx` | Envelopes (`exp_decay`, `adsr`), filters (`lowpass`, `highpass`), distortion (`hard_clip`, `soft_clip`), time effects (`delay`, `resample`, `reverb`) | `src/core/effects.cpp` |
-| `Core.Arrange` | Combination and arrangement: `mix_all`, `channels`, `sample`, `place`, `place_multi` | `src/core/sampling.cpp` |
-| `Core.Render` | The effects: `render`, `render_vis`, `render_stems`, `render_vis_stems` | `src/core/render.cpp` |
-| `Core.Io` | Audio import: `load_mono`, `load_multi` | `src/core/io.cpp` |
-| `Core.List` | List combinators & builders: `map`, `fold`, `init`, `repeat` | `src/core/lists.cpp` |
-| `Core.Time` | Timestamp construction & sequences: `to_sec`/`to_ms`/`to_min`, `time_steps`, `jitter` | `src/core/lists.cpp` |
-| `Core.Sig` | Signal constructors: `constant`, `constant_multi`, `time`, `signal`, `signal_multi` | `src/core/signals.cpp` |
-| `Core.Math` | `exp`, `sqrt`, `log`, `pow` — polymorphic over Scalars and (elementwise) Signals — plus the Int conversions `to_scalar`, `round`, `floor`, `ceil`, and `not` | `src/core/math.cpp` |
+| `Core.Osc` | Oscillators (`sine`, `saw`, `square`, `noise`) and modulation (`fm`, `pm`, `am`) | `stdlib/core/oscillators.cpp` |
+| `Core.Fx` | Envelopes (`exp_decay`, `adsr`), filters (`lowpass`, `highpass`), distortion (`hard_clip`, `soft_clip`), time effects (`delay`, `resample`, `reverb`) | `stdlib/core/effects.cpp` |
+| `Core.Arrange` | Combination and arrangement: `mix_all`, `channels`, `sample`, `place`, `place_multi` | `stdlib/core/sampling.cpp` |
+| `Core.Render` | The effects: `render`, `render_vis`, `render_stems`, `render_vis_stems` | `stdlib/core/render.cpp` |
+| `Core.Io` | Audio import: `load_mono`, `load_multi` | `stdlib/core/io.cpp` |
+| `Core.List` | List combinators & builders: `map`, `fold`, `init`, `repeat` | `stdlib/core/lists.cpp` |
+| `Core.Time` | Timestamp construction & sequences: `to_sec`/`to_ms`/`to_min`, `time_steps`, `jitter` | `stdlib/core/lists.cpp` |
+| `Core.Sig` | Signal constructors: `constant`, `constant_multi`, `time`, `signal`, `signal_multi` | `stdlib/core/signals.cpp` |
+| `Core.Math` | `exp`, `sqrt`, `log`, `pow` — polymorphic over Scalars and (elementwise) Signals — plus the Int conversions `to_scalar`, `round`, `floor`, `ceil`, and `not` | `stdlib/core/math.cpp` |
 
 ## Primitive semantics
 
@@ -142,20 +143,18 @@ the whole story:
 `let name params : Type = external "file.cpp" ;;` binds a definition to
 a C++ implementation instead of a synth body. Externals are ordinary
 values: they curry, take labels, and are published by libraries like
-anything else. Two kinds exist, split by where the declaration lives:
+anything else. There is one mechanism (`src/external.*`), and Core uses
+it too: the string names a C++ file resolved relative to the declaring
+`.synth` file. At build time synthc compiles it once with `$CXX`
+(default `c++`) into a shared object cached by content — edits
+recompile, rebuilds reuse; user code's objects live under the project's
+`_build/externals/`, the bundled stdlib's in a shared per-user cache —
+then loads it with `dlopen` and binds the exported entry point. The C++
+file is a build input: the watch daemon rebuilds when it changes. Every
+Core definition is such an external over the `stdlib/core/*.cpp` files
+shipped beside `lib.synth`.
 
-- **Core externals.** Every definition in `stdlib/core/lib.synth` is
-  external; the file string names the `src/core/*.cpp` translation unit
-  compiled into synthc that implements it.
-- **User externals** (`src/external.*`). Anywhere else, the string names
-  a C++ file resolved relative to the declaring `.synth` file. At build
-  time synthc compiles it once into a shared object cached under
-  `_build/externals/` (keyed by file content — edits recompile, rebuilds
-  reuse), loads it with `dlopen`, and binds the exported entry point.
-  The C++ file is a build input: the watch daemon rebuilds when it
-  changes. The compiler is `$CXX` (default `c++`).
-
-A user implementation includes the generated `<synth/external.hpp>` and
+An implementation includes the shipped `<synth/external.hpp>` and
 defines one entry point per external, named after the definition:
 
 ```cpp
@@ -172,9 +171,15 @@ Arguments arrive fully applied, in declaration order; return `true` with
 throw) — failures become build diagnostics on the declaring definition.
 One `.cpp` may implement several externals.
 
-**Only data crosses the boundary**: Scalar, Int, Timestamp, Bool,
-String, Vector, unit, and lists/tuples of those. Signals, Samples, functions and
-type variables cannot appear in a user external's signature (checked at
-type time) — signals are lazy engine graphs, not values, and stay on the
-host side. Core externals are exempt (their implementations *are* the
-engine). External names must form C++ symbols (letters, digits, `_`).
+**Every value crosses the boundary.** Data — Scalar, Int, Timestamp,
+Bool, String, Vector, unit, and lists/tuples of those — arrives as
+transparent `synth::ext::Value`s. Signals and Samples arrive as lazy
+engine graph handles that combine with the `<synth/engine.hpp>`
+constructors, the same ones the engine itself uses (the symbols resolve
+against the host process when the object is loaded). Functions (and
+type-variable-typed values generally) arrive as opaque handles, callable
+through the context's `apply` service or passable back unchanged. The
+context also offers `loadAudio` (audio files as build inputs) and
+`render` (declaring render targets) — `Io.load_mono` and
+`Render.render` are ordinary externals built on exactly these. External
+names must form C++ symbols (letters, digits, `_`).

@@ -503,6 +503,8 @@ struct ModEntry {
 struct Scope {
   std::map<std::string, TypePtr> values;
   std::map<std::string, ModEntry> modules;
+  // Type declarations in scope, by surface name (for completion).
+  std::map<std::string, const TypeDecl*> types;
 };
 
 std::vector<std::string> splitPath(const std::string& s) {
@@ -573,6 +575,8 @@ void addOpenedMembers(const Program& prog, const ModEntry& m, Scope& sc) {
       if (name.find('.') == std::string::npos) sc.values[name] = type;
     for (auto& p : m.host->inlineModules)
       if (p.find('.') == std::string::npos) sc.modules[p] = {m.host, p};
+    for (auto& [name, decl] : m.host->typeDecls)
+      if (name.find('.') == std::string::npos) sc.types[name] = decl.get();
     for (auto& [name, target] : m.host->exportedModules)
       if (const CheckedModule* t = prog.find(target))
         sc.modules[name] = {t, ""};
@@ -586,6 +590,10 @@ void addOpenedMembers(const Program& prog, const ModEntry& m, Scope& sc) {
   for (auto& p : m.host->inlineModules)
     if (p.rfind(pre, 0) == 0 && p.find('.', pre.size()) == std::string::npos)
       sc.modules[p.substr(pre.size())] = {m.host, p};
+  for (auto& [name, decl] : m.host->typeDecls)
+    if (name.rfind(pre, 0) == 0 &&
+        name.find('.', pre.size()) == std::string::npos)
+      sc.types[name.substr(pre.size())] = decl.get();
 }
 
 // Replay the file's position-ordered binders down to `off`, mirroring
@@ -666,6 +674,11 @@ void collectScope(const Program& prog, const CheckedModule& cm,
         }
         break;
       }
+      case TopDef::Kind::TypeDecl: {
+        auto it = cm.typeDecls.find(prefix + d.name);
+        if (it != cm.typeDecls.end()) sc.types[d.name] = it->second.get();
+        break;
+      }
     }
   }
 }
@@ -702,11 +715,14 @@ void memberItems(const Program& prog, const ModEntry& m,
     out.push_back(completionItem(name, kindForType(type), typeName(type)));
   for (auto& [name, entry] : sc.modules)
     out.push_back(completionItem(name, kKindModule, "module"));
+  for (auto& [name, decl] : sc.types)
+    out.push_back(completionItem(name, kKindKeyword, "type"));
 }
 
 const char* kKeywords[] = {"let",  "in",     "fun",  "import", "open",
                            "module", "if",   "then", "else",   "struct",
-                           "end",  "external", "true", "false"};
+                           "end",  "external", "true", "false",  "type",
+                           "match", "with",  "of"};
 const char* kTypeWords[] = {"Scalar", "Int",    "Vector", "Timestamp",
                             "String", "Bool",   "Signal", "Sample",
                             "list",   "unit"};
@@ -730,6 +746,8 @@ Value diagnosticValue(const std::string& text, const Diagnostic& d) {
 constexpr int kSymModule = 2;
 constexpr int kSymFunction = 12;
 constexpr int kSymConstant = 14;
+constexpr int kSymStruct = 23;
+constexpr int kSymEnum = 10;
 
 // Hierarchical DocumentSymbols: inline modules nest, lets carry their
 // checked type as detail. `let _` render effects have no name to list.
@@ -759,6 +777,22 @@ Value documentSymbols(const CheckedModule& cm, const std::string& text,
       v.set("range", rangeValue(text, d.span));
       v.set("selectionRange", rangeValue(text, nameSpan(text, d)));
       items.push_back(std::move(v));
+    } else if (d.kind == TopDef::Kind::TypeDecl) {
+      Value v = json::makeObject();
+      v.set("name", json::makeString(d.name));
+      v.set("kind",
+            json::makeNumber(d.typeFlavor == TopDef::TypeFlavor::Variant
+                                 ? kSymEnum
+                                 : kSymStruct));
+      v.set("detail",
+            json::makeString(d.typeFlavor == TopDef::TypeFlavor::Record
+                                 ? "record"
+                             : d.typeFlavor == TopDef::TypeFlavor::Variant
+                                 ? "variant"
+                                 : "abstract type"));
+      v.set("range", rangeValue(text, d.span));
+      v.set("selectionRange", rangeValue(text, nameSpan(text, d)));
+      items.push_back(std::move(v));
     }
   }
   return json::makeArray(std::move(items));
@@ -783,6 +817,7 @@ bool endsValue(Tok k) {
     case Tok::String:
     case Tok::RParen:
     case Tok::RBracket:
+    case Tok::RBrace:
       return true;
     default:
       return false;
@@ -1379,6 +1414,8 @@ std::vector<std::string> LspServer::onMessage(const std::string& body) {
                 completionItem(name, kindForType(type), typeName(type)));
         for (auto& [name, entry] : sc.modules)
           items.push_back(completionItem(name, kKindModule, "module"));
+        for (auto& [name, decl] : sc.types)
+          items.push_back(completionItem(name, kKindKeyword, "type"));
         for (const char* k : kKeywords)
           items.push_back(completionItem(k, kKindKeyword, ""));
         for (const char* t : kTypeWords)

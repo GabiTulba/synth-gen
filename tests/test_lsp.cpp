@@ -691,3 +691,37 @@ TEST(lsp_unsaved_buffer_overrides_disk) {
   CHECK(diags != nullptr);
   CHECK(diags->array.empty());
 }
+
+TEST(lsp_formatting_record_and_type_syntax) {
+  TempDir tmp;
+  fs::path p = tmp.write("song.synth", "");
+  std::string uri = uriFor(p);
+  std::string text =
+      "type Env = {attack : Timestamp;release : Timestamp} ;;\n"
+      "type Wave = |Sine|Pulse of Scalar ;;\n"
+      "let e : Env = { attack=5ms;   release =100ms } ;;\n"
+      "let q : Env = {e with attack = 1ms} ;;\n"
+      "let a : Timestamp = e . attack ;;\n";
+  LspServer server;
+  server.onMessage(didOpen(uri, text));
+  json::Value edits =
+      resultOf(server, docRequest(2, "textDocument/formatting", uri));
+  CHECK(edits.array.size() == 1);
+  std::string formatted = edits.array[0].getString("newText");
+  CHECK(formatted ==
+        "type Env = { attack : Timestamp; release : Timestamp } ;;\n"
+        "type Wave = | Sine | Pulse of Scalar ;;\n"
+        "let e : Env = { attack = 5ms; release = 100ms } ;;\n"
+        "let q : Env = { e with attack = 1ms } ;;\n"
+        "let a : Timestamp = e.attack ;;\n");
+  // The result is a fixed point.
+  json::Value note = parseOne(server.onMessage(
+      R"({"jsonrpc":"2.0","method":"textDocument/didChange","params":{)"
+      R"("textDocument":{"uri":")" + uri + R"("},)"
+      R"("contentChanges":[{"text":)" + json::serialize([&] {
+        return json::makeString(formatted);
+      }()) + R"(}]}})"));
+  json::Value clean =
+      resultOf(server, docRequest(3, "textDocument/formatting", uri));
+  CHECK(clean.array.empty());
+}

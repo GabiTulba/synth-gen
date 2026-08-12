@@ -52,10 +52,23 @@ struct LambdaV {
 };
 struct ListV { std::vector<Value> items; };
 struct TupleV { std::vector<Value> items; };
+// A record value: fields in DECLARATION order (projection is by index
+// into the declaration's field list, whatever order a literal wrote).
+struct RecordV {
+  const TypeDecl* decl = nullptr;
+  std::vector<Value> fields;
+};
+// A variant value: which constructor (an index into the declaration's
+// constructor list) and its payload, if the constructor takes one.
+struct VariantV {
+  const TypeDecl* decl = nullptr;
+  int ctor = 0;
+  std::shared_ptr<Value> payload;  // null for a payload-less constructor
+};
 
 struct Value {
   std::variant<UnitV, ScalarV, IntV, TimeV, BoolV, StringV, VectorV, SigPtr,
-               SampleV, ListV, TupleV, FunV, LambdaV>
+               SampleV, ListV, TupleV, FunV, LambdaV, RecordV, VariantV>
       v;
 };
 

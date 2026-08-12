@@ -22,6 +22,47 @@ namespace synth {
 struct Type;
 using TypePtr = std::shared_ptr<const Type>;
 
+// A named type declaration (`type Env = { ... }`): the nominal identity a
+// Named type points at. Declarations are owned by the CheckedModule that
+// declares them; Named types hold a plain pointer, which stays valid for
+// as long as the Program the types belong to.
+struct TypeDecl {
+  enum class Flavor {
+    Record,    // fields
+    Variant,   // ctors
+    Abstract,  // no visible structure (an engine-backed handle)
+  };
+  Flavor flavor = Flavor::Abstract;
+  std::string moduleId;  // canonical id of the declaring module
+  std::string name;      // dotted name inside it ("Voice", "A.Voice")
+  // Type parameters in order; the field/constructor types below are
+  // written over paramVars, and every use site substitutes its own
+  // arguments for them.
+  std::vector<std::string> params;
+  std::vector<TypePtr> paramVars;
+  struct Field {
+    std::string name;
+    TypePtr type;
+  };
+  std::vector<Field> fields;  // Record
+  struct Ctor {
+    std::string name;
+    TypePtr payload;  // null = no payload
+  };
+  std::vector<Ctor> ctors;  // Variant
+
+  const Field* findField(const std::string& n) const {
+    for (auto& f : fields)
+      if (f.name == n) return &f;
+    return nullptr;
+  }
+  const Ctor* findCtor(const std::string& n) const {
+    for (auto& c : ctors)
+      if (c.name == n) return &c;
+    return nullptr;
+  }
+};
+
 struct Type {
   enum class Kind {
     Scalar,
@@ -37,10 +78,12 @@ struct Type {
     Tuple,    // items
     Fun,      // items = params, ret
     Var,      // var id (primitive signatures only)
+    Named,    // decl + items = type arguments; equality is nominal
   };
   Kind kind;
   TypePtr elem;                 // Signal / Sample / List
-  std::vector<TypePtr> items;   // Tuple members or Fun params
+  std::vector<TypePtr> items;   // Tuple members, Fun params or Named args
+  const TypeDecl* decl = nullptr;  // Named
   // Fun: per-param labels, "" = positional. May be empty (all positional).
   // Labels drive call-site matching and printing; equality ignores them.
   std::vector<std::string> labels;
@@ -67,6 +110,7 @@ TypePtr tSignal(TypePtr elem);
 TypePtr tSample(TypePtr elem);
 TypePtr tList(TypePtr elem);
 TypePtr tTuple(std::vector<TypePtr> items);
+TypePtr tNamed(const TypeDecl* decl, std::vector<TypePtr> args);
 TypePtr tFun(std::vector<TypePtr> params, TypePtr ret);
 TypePtr tFun(std::vector<TypePtr> params, std::vector<std::string> labels,
              TypePtr ret);

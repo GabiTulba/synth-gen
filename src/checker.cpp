@@ -71,8 +71,19 @@ class ModuleChecker {
   struct Frame {
     std::map<std::string, ScopeVal> values;
     std::map<std::string, ModRef> modules;
+    // Type declarations in scope, by surface name. Same position-ordered
+    // shadowing as values.
+    std::map<std::string, const TypeDecl*> types;
   };
   std::vector<Frame> frames_;
+
+  const TypeDecl* lookupTypeDecl(const std::string& name) const {
+    for (auto it = frames_.rbegin(); it != frames_.rend(); ++it) {
+      auto v = it->types.find(name);
+      if (v != it->types.end()) return v->second;
+    }
+    return nullptr;
+  }
 
   const ScopeVal* lookupValue(const std::string& name) const {
     for (auto it = frames_.rbegin(); it != frames_.rend(); ++it) {
@@ -131,8 +142,65 @@ class ModuleChecker {
             frames_.back().values[def.name] = {dt->second, "", dt->first};
           break;
         }
+        case TopDef::Kind::TypeDecl:
+          checkTypeDecl(def, prefix);
+          break;
       }
     }
+  }
+
+  // type [params] Name [= { fields } | = ctors] ;;
+  // The declaration's name is in scope while its own fields resolve, so
+  // a recursive type can mention itself. Field and constructor types are
+  // written over the declaration's own rigid parameter variables; use
+  // sites substitute their arguments for them.
+  void checkTypeDecl(TopDef& def, const std::string& prefix) {
+    const std::string stored = prefix + def.name;
+    if (mod_.typeDecls.count(stored)) {
+      diags_.error(mod_.parsed.path, def.span,
+                   "duplicate declaration of type '" + stored + "'");
+      return;
+    }
+    auto decl = std::make_shared<TypeDecl>();
+    decl->flavor = def.typeFlavor == TopDef::TypeFlavor::Record
+                       ? TypeDecl::Flavor::Record
+                   : def.typeFlavor == TopDef::TypeFlavor::Variant
+                       ? TypeDecl::Flavor::Variant
+                       : TypeDecl::Flavor::Abstract;
+    decl->moduleId = mod_.parsed.name;
+    decl->name = stored;
+    defTypeVars_.clear();
+    typeResolveFailed_ = false;
+    for (auto& p : def.typeParams) {
+      TypePtr v = tRigidVar(nextTypeVarSeq_++, p);
+      defTypeVars_.emplace(p, v);
+      decl->params.push_back(p);
+      decl->paramVars.push_back(v);
+    }
+    // Register before resolving members: the declaration may refer to
+    // itself. Registration is what makes it visible to later
+    // definitions, too (shadowing any opened name, like a let).
+    mod_.typeDecls[stored] = decl;
+    frames_.back().types[def.name] = decl.get();
+    // Members may only use the declared parameters - a stray 'c in a
+    // field has no meaning at any use site.
+    declTypeVarsOnly_ = true;
+    for (auto& f : def.fields) {
+      if (decl->findField(f.name))
+        diags_.error(mod_.parsed.path, f.span,
+                     "duplicate field '" + f.name + "' in type '" + stored +
+                         "'");
+      decl->fields.push_back({f.name, resolveType(*f.type)});
+    }
+    for (auto& c : def.ctors) {
+      if (decl->findCtor(c.name))
+        diags_.error(mod_.parsed.path, c.span,
+                     "duplicate constructor '" + c.name + "' in type '" +
+                         stored + "'");
+      decl->ctors.push_back(
+          {c.name, c.type ? resolveType(*c.type) : nullptr});
+    }
+    declTypeVarsOnly_ = false;
   }
   // Signature variables ('a) are rigid ids (negative); every use site
   // instantiates a stored signature with fresh non-negative ids so two
@@ -162,6 +230,9 @@ class ModuleChecker {
   // errors do not abort on the spot: every annotation still gets a
   // (poison) type so the LSP and the fallback signature stay usable.
   bool typeResolveFailed_ = false;
+  // Inside a type declaration's members, type variables must be declared
+  // parameters; a fresh one is an error rather than a new variable.
+  bool declTypeVarsOnly_ = false;
 
   // Records the diagnostic and yields a placeholder that behaves like an
   // opaque type variable, so one bad name doesn't cascade.
@@ -171,11 +242,22 @@ class ModuleChecker {
     return tRigidVar(nextTypeVarSeq_++, name);
   }
 
-  TypePtr resolveType(const TypeExpr& te) {
+  TypePtr resolveType(TypeExpr& te) {
+    if (te.resolved) return te.resolved;
+    return te.resolved = resolveTypeUncached(te);
+  }
+
+  TypePtr resolveTypeUncached(TypeExpr& te) {
     switch (te.kind) {
       case TypeExpr::Kind::Var: {
         auto it = defTypeVars_.find(te.name);
         if (it != defTypeVars_.end()) return it->second;
+        if (declTypeVarsOnly_)
+          return typeError(te.span,
+                           "unbound type variable '" + te.name +
+                               " (a type declaration's members may only "
+                               "use its declared parameters)",
+                           te.name);
         TypePtr t = tRigidVar(nextTypeVarSeq_++, te.name);
         defTypeVars_.emplace(te.name, t);
         return t;
@@ -196,7 +278,7 @@ class ModuleChecker {
     return typeError(te.span, "internal error: unknown type syntax", "?");
   }
 
-  TypePtr resolveTypeName(const TypeExpr& te) {
+  TypePtr resolveTypeName(TypeExpr& te) {
     const std::string& n = te.name;
     std::string shown = te.moduleName.empty() ? n : te.moduleName + "." + n;
     if (te.moduleName.empty()) {
@@ -228,8 +310,59 @@ class ModuleChecker {
         if (n == "Sample") return tSample(std::move(elem));
         return tList(std::move(elem));
       }
+      if (const TypeDecl* decl = lookupTypeDecl(n)) {
+        // Rewrite to canonical form (declaring module + stored dotted
+        // name) so the incremental hasher sees one stable identity.
+        te.moduleName = decl->moduleId == mod_.parsed.name ? "" : decl->moduleId;
+        te.name = decl->name;
+        return applyTypeArgs(te, decl);
+      }
+      return typeError(te.span, "unknown type '" + shown + "'", n);
     }
-    return typeError(te.span, "unknown type '" + shown + "'", n);
+    // Qualified: resolve the module path, then look the name up in the
+    // host module's declarations (dotted for inline-module members).
+    auto r = tryResolveModulePath(te.moduleName, te.span);
+    if (!r)
+      return typeError(te.span, "module '" + te.moduleName +
+                                    "' is not imported by this module", n);
+    const CheckedModule* host = &mod_;
+    if (!r->moduleId.empty()) {
+      host = prog_.find(r->moduleId);
+      if (!host)
+        return typeError(te.span,
+                         "module '" + r->moduleId + "' was not checked", n);
+    }
+    std::string stored = r->prefix.empty() ? n : r->prefix + "." + n;
+    auto it = host->typeDecls.find(stored);
+    if (it == host->typeDecls.end())
+      return typeError(te.span, "module '" + te.moduleName +
+                                    "' has no type named '" + n + "'", n);
+    te.moduleName = host == &mod_ ? "" : r->moduleId;
+    te.name = stored;
+    return applyTypeArgs(te, it->second.get());
+  }
+
+  // Resolve `te`'s arguments against the declaration's arity. A single
+  // parenthesized tuple spreads across a multi-parameter declaration
+  // ((Scalar, String) Pair); for a one-parameter one the tuple IS the
+  // argument ((String, 'a Sample) list).
+  TypePtr applyTypeArgs(TypeExpr& te, const TypeDecl* decl) {
+    size_t arity = decl->params.size();
+    std::vector<TypePtr> args;
+    if (arity > 1 && te.args.size() == 1 &&
+        te.args[0]->kind == TypeExpr::Kind::Tuple &&
+        te.args[0]->items.size() == arity) {
+      for (auto& a : te.args[0]->items) args.push_back(resolveType(*a));
+    } else {
+      for (auto& a : te.args) args.push_back(resolveType(*a));
+    }
+    if (args.size() != arity)
+      return typeError(
+          te.span,
+          "type '" + decl->name + "' expects " + std::to_string(arity) +
+              " parameter(s), got " + std::to_string(args.size()),
+          decl->name);
+    return tNamed(decl, std::move(args));
   }
 
   // Resolves a definition's declared signature (parameters and return
@@ -340,6 +473,49 @@ class ModuleChecker {
     return t;
   }
 
+  // The substitution that maps a declaration's parameter variables to
+  // the arguments of one of its instances.
+  static Subst declSubst(const TypeDecl* decl,
+                         const std::vector<TypePtr>& args) {
+    Subst s;
+    for (size_t i = 0; i < decl->paramVars.size() && i < args.size(); i++)
+      s[decl->paramVars[i]->var] = args[i];
+    return s;
+  }
+
+  // A record literal names no type; it resolves to the innermost visible
+  // record declaration with exactly its field set. Two matches in the
+  // same frame are a genuine ambiguity and an error; an inner match
+  // shadows outer ones like any other binder.
+  const TypeDecl* findRecordDeclByFields(const Expr& e) {
+    std::set<std::string> want(e.argLabels.begin(), e.argLabels.end());
+    for (auto it = frames_.rbegin(); it != frames_.rend(); ++it) {
+      const TypeDecl* found = nullptr;
+      for (auto& [name, decl] : it->types) {
+        if (decl->flavor != TypeDecl::Flavor::Record) continue;
+        if (decl->fields.size() != want.size()) continue;
+        bool all = true;
+        for (auto& f : decl->fields)
+          if (!want.count(f.name)) {
+            all = false;
+            break;
+          }
+        if (!all) continue;
+        if (found && found != decl)
+          fail(e.span, "this record literal matches two types in scope, '" +
+                           found->name + "' and '" + decl->name +
+                           "'; annotate the binding or qualify a field "
+                           "through an update ({ base with ... })");
+        found = decl;
+      }
+      if (found) return found;
+    }
+    std::string fs;
+    for (auto& l : e.argLabels) fs += (fs.empty() ? "" : "; ") + l;
+    fail(e.span,
+         "no record type in scope has exactly the fields { " + fs + " }");
+  }
+
   TypePtr checkInner(Expr& e, std::map<std::string, TypePtr>& env) {
     switch (e.kind) {
       case Expr::Kind::NumLit: return tScalar();
@@ -411,6 +587,90 @@ class ModuleChecker {
         std::vector<TypePtr> items;
         for (auto& x : e.items) items.push_back(check(*x, env));
         return tTuple(std::move(items));
+      }
+      case Expr::Kind::RecordLit: {
+        for (size_t i = 0; i < e.argLabels.size(); i++)
+          for (size_t j = 0; j < i; j++)
+            if (e.argLabels[i] == e.argLabels[j])
+              fail(e.items[i]->span,
+                   "duplicate field '" + e.argLabels[i] + "'");
+        const TypeDecl* decl = findRecordDeclByFields(e);
+        // Instantiate the declaration's parameters fresh, then let the
+        // field values pin them down - the same shape as a call.
+        Subst freshening;
+        for (auto& pv : decl->paramVars)
+          freshening[pv->var] = tVar(nextFreshVar_++, pv->varName);
+        Subst subst;
+        for (size_t i = 0; i < e.items.size(); i++) {
+          const TypeDecl::Field* f = decl->findField(e.argLabels[i]);
+          TypePtr sig = applySubst(f->type, freshening);
+          TypePtr got = check(*e.items[i], env);
+          if (!unify(sig, got, subst))
+            fail(e.items[i]->span,
+                 "field '" + f->name + "' of type '" + decl->name +
+                     "' expects " + typeName(applySubst(sig, subst)) +
+                     ", got " + typeName(got));
+        }
+        std::vector<TypePtr> args;
+        for (auto& pv : decl->paramVars)
+          args.push_back(applySubst(freshening.at(pv->var), subst));
+        // A leftover free variable here means no field mentioned the
+        // parameter; the annotation this literal checks against can
+        // still resolve it, exactly like a partial application.
+        return tNamed(decl, std::move(args));
+      }
+      case Expr::Kind::RecordUpdate: {
+        TypePtr baseT = check(*e.items[0], env);
+        if (baseT->kind != Type::Kind::Named ||
+            baseT->decl->flavor != TypeDecl::Flavor::Record)
+          fail(e.items[0]->span,
+               "record update needs a record, got " + typeName(baseT));
+        const TypeDecl* decl = baseT->decl;
+        Subst args = declSubst(decl, baseT->items);
+        for (size_t i = 0; i < e.argLabels.size(); i++) {
+          for (size_t j = 0; j < i; j++)
+            if (e.argLabels[i] == e.argLabels[j])
+              fail(e.items[i + 1]->span,
+                   "duplicate field '" + e.argLabels[i] + "'");
+          const TypeDecl::Field* f = decl->findField(e.argLabels[i]);
+          if (!f)
+            fail(e.items[i + 1]->span, "type '" + decl->name +
+                                           "' has no field '" +
+                                           e.argLabels[i] + "'");
+          TypePtr sig = applySubst(f->type, args);
+          TypePtr got = check(*e.items[i + 1], env);
+          bool ok;
+          if (containsAnyVar(sig) || containsAnyVar(got)) {
+            Subst subst;
+            ok = unify(sig, got, subst);
+          } else {
+            ok = typeEquals(sig, got);
+          }
+          if (!ok)
+            fail(e.items[i + 1]->span,
+                 "field '" + f->name + "' of type '" + decl->name +
+                     "' expects " + typeName(sig) + ", got " +
+                     typeName(got));
+        }
+        return baseT;
+      }
+      case Expr::Kind::Project: {
+        TypePtr t = check(*e.items[0], env);
+        if (t->kind != Type::Kind::Named ||
+            t->decl->flavor != TypeDecl::Flavor::Record) {
+          std::string msg = "cannot access field '" + e.name + "' of " +
+                            typeName(t);
+          if (t->kind == Type::Kind::Named)
+            msg += " (not a record)";
+          else if (t->kind == Type::Kind::Var)
+            msg += " (its type is not known here)";
+          fail(e.items[0]->span, msg);
+        }
+        const TypeDecl::Field* f = t->decl->findField(e.name);
+        if (!f)
+          fail(e.span, "type '" + t->decl->name + "' has no field '" +
+                           e.name + "'");
+        return applySubst(f->type, declSubst(t->decl, t->items));
       }
       case Expr::Kind::Let: {
         if (!e.declType && e.declTypeExpr)
@@ -567,7 +827,8 @@ class ModuleChecker {
       Frame& frame = frames_.back();
       if (!r.prefix.empty()) {
         // An inline module: its immediate values become bare names, its
-        // immediate sub-modules become bare module names.
+        // immediate sub-modules become bare module names, and its
+        // immediate type declarations become bare type names.
         std::string pre = r.prefix + ".";
         for (auto& [name, type] : host->defTypes)
           if (name.rfind(pre, 0) == 0 &&
@@ -577,6 +838,10 @@ class ModuleChecker {
           if (p.rfind(pre, 0) == 0 &&
               p.find('.', pre.size()) == std::string::npos)
             frame.modules[p.substr(pre.size())] = {r.moduleId, p};
+        for (auto& [name, decl] : host->typeDecls)
+          if (name.rfind(pre, 0) == 0 &&
+              name.find('.', pre.size()) == std::string::npos)
+            frame.types[name.substr(pre.size())] = decl.get();
         return;
       }
       for (auto& [name, type] : host->defTypes) {
@@ -588,6 +853,9 @@ class ModuleChecker {
       for (auto& p : host->inlineModules)
         if (p.find('.') == std::string::npos)
           frame.modules[p] = {r.moduleId, p};
+      for (auto& [name, decl] : host->typeDecls)
+        if (name.find('.') == std::string::npos)
+          frame.types[name] = decl.get();
       for (auto& [name, target] : host->exportedModules)
         frame.modules[name] = {target, ""};
     } catch (const Abort&) {
@@ -907,6 +1175,7 @@ class ModuleChecker {
         break;
       case Type::Kind::Tuple:
       case Type::Kind::Fun:
+      case Type::Kind::Named:
         for (auto& x : t->items) collectVarIds(x, out);
         if (t->ret) collectVarIds(t->ret, out);
         break;
@@ -924,7 +1193,8 @@ class ModuleChecker {
       case Type::Kind::List:
         return varNameById(t->elem, id);
       case Type::Kind::Tuple:
-      case Type::Kind::Fun: {
+      case Type::Kind::Fun:
+      case Type::Kind::Named: {
         for (auto& x : t->items)
           if (std::string s = varNameById(x, id); !s.empty()) return s;
         return t->ret ? varNameById(t->ret, id) : std::string{};
@@ -949,7 +1219,8 @@ class ModuleChecker {
         collectFreshening(t->elem, renaming);
         break;
       case Type::Kind::Tuple:
-      case Type::Kind::Fun: {
+      case Type::Kind::Fun:
+      case Type::Kind::Named: {
         for (auto& x : t->items) collectFreshening(x, renaming);
         if (t->ret) collectFreshening(t->ret, renaming);
         break;
@@ -1164,7 +1435,8 @@ Program checkProject(const std::vector<std::string>& rootFiles,
             if (d.kind == TopDef::Kind::ModuleDef) {
               l.inlineNames.insert(d.name);
               collect(d.defs);
-            } else if (d.kind != TopDef::Kind::Let) {
+            } else if (d.kind != TopDef::Kind::Let &&
+                       d.kind != TopDef::Kind::TypeDecl) {
               l.mentions.push_back({d.kind, d.moduleName, d.span});
             }
           }

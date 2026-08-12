@@ -2343,3 +2343,232 @@ TEST(checker_builtin_type_arity) {
   checkProject({g}, d2);
   CHECK(d2.hasErrors());
 }
+
+TEST(checker_record_declaration_literal_projection_update) {
+  TempProject tp;
+  std::string f = tp.write("t.synth", R"(
+type Env = { attack : Timestamp; release : Timestamp } ;;
+let env : Env = { attack = 5ms; release = 100ms } ;;
+let a : Timestamp = env.attack ;;
+let quick : Env = { env with attack = 1ms } ;;
+let r : Timestamp = quick.release ;;
+)");
+  DiagnosticBag diags;
+  Program prog = checkProject({f}, diags);
+  for (auto& d : diags.items)
+    std::cerr << renderDiagnostic(d, userMod(prog).parsed.source);
+  CHECK(!diags.hasErrors());
+  const auto& types = userMod(prog).defTypes;
+  CHECK(types.at("env")->kind == Type::Kind::Named);
+  CHECK(types.at("env")->decl->name == "Env");
+  CHECK(typeEquals(types.at("a"), tTimestamp()));
+  CHECK(typeEquals(types.at("env"), types.at("quick")));
+}
+
+TEST(checker_polymorphic_record) {
+  TempProject tp;
+  std::string f = tp.write("t.synth", R"(
+type ('a, 'b) Pair = { first : 'a; second : 'b } ;;
+let p : (Scalar, Timestamp) Pair = { first = 1.0; second = 5ms } ;;
+let s : Scalar = p.first ;;
+let t : Timestamp = p.second ;;
+let swap x:(Scalar, Timestamp) Pair : (Timestamp, Scalar) Pair =
+  { first = x.second; second = x.first } ;;
+let q : (Timestamp, Scalar) Pair = swap p ;;
+)");
+  DiagnosticBag diags;
+  Program prog = checkProject({f}, diags);
+  for (auto& d : diags.items)
+    std::cerr << renderDiagnostic(d, userMod(prog).parsed.source);
+  CHECK(!diags.hasErrors());
+  const auto& types = userMod(prog).defTypes;
+  CHECK(typeEquals(types.at("s"), tScalar()));
+  CHECK(typeEquals(types.at("t"), tTimestamp()));
+}
+
+TEST(checker_record_field_type_mismatch) {
+  TempProject tp;
+  std::string f = tp.write("t.synth", R"(
+type Env = { attack : Timestamp; release : Timestamp } ;;
+let env : Env = { attack = 5.0; release = 100ms } ;;
+)");
+  DiagnosticBag diags;
+  checkProject({f}, diags);
+  CHECK(diags.hasErrors());
+}
+
+TEST(checker_record_literal_needs_exact_field_set) {
+  TempProject tp;
+  std::string f = tp.write("t.synth", R"(
+type Env = { attack : Timestamp; release : Timestamp } ;;
+let env : Env = { attack = 5ms } ;;
+)");
+  DiagnosticBag d1;
+  checkProject({f}, d1);
+  CHECK(d1.hasErrors());
+  TempProject tp2;
+  std::string g = tp2.write("t.synth", R"(
+type Env = { attack : Timestamp } ;;
+let env : Env = { attack = 5ms; extra = 1.0 } ;;
+)");
+  DiagnosticBag d2;
+  checkProject({g}, d2);
+  CHECK(d2.hasErrors());
+}
+
+TEST(checker_record_unknown_field_and_non_record) {
+  TempProject tp;
+  std::string f = tp.write("t.synth", R"(
+type Env = { attack : Timestamp } ;;
+let env : Env = { attack = 5ms } ;;
+let x : Timestamp = env.decay ;;
+)");
+  DiagnosticBag d1;
+  checkProject({f}, d1);
+  CHECK(d1.hasErrors());
+  bool found = false;
+  for (auto& d : d1.items)
+    if (d.message.find("has no field 'decay'") != std::string::npos)
+      found = true;
+  CHECK(found);
+  TempProject tp2;
+  std::string g = tp2.write("t.synth", "let x : Scalar = (1.0).attack ;;");
+  DiagnosticBag d2;
+  checkProject({g}, d2);
+  CHECK(d2.hasErrors());
+}
+
+TEST(checker_duplicate_type_and_ambiguous_literal) {
+  TempProject tp;
+  std::string f = tp.write("t.synth", R"(
+type Env = { a : Scalar } ;;
+type Env = { b : Scalar } ;;
+)");
+  DiagnosticBag d1;
+  checkProject({f}, d1);
+  CHECK(d1.hasErrors());
+  // Two visible record types with the same field set: ambiguous literal.
+  TempProject tp2;
+  std::string g = tp2.write("t.synth", R"(
+type A = { x : Scalar } ;;
+type B = { x : Scalar } ;;
+let v : A = { x = 1.0 } ;;
+)");
+  DiagnosticBag d2;
+  checkProject({g}, d2);
+  CHECK(d2.hasErrors());
+}
+
+TEST(checker_abstract_type_declaration) {
+  TempProject tp;
+  std::string f = tp.write("t.synth", R"(
+type Handle ;;
+let use h:Handle : Handle = h ;;
+)");
+  DiagnosticBag diags;
+  Program prog = checkProject({f}, diags);
+  CHECK(!diags.hasErrors());
+  const auto& types = userMod(prog).defTypes;
+  CHECK(types.at("use")->items[0]->kind == Type::Kind::Named);
+  CHECK(types.at("use")->items[0]->decl->flavor ==
+        TypeDecl::Flavor::Abstract);
+}
+
+TEST(checker_type_decl_in_inline_module_and_qualified_use) {
+  TempProject tp;
+  std::string f = tp.write("t.synth", R"(
+module Voices = struct
+  type Voice = { gain : Scalar } ;;
+  let make g:Scalar : Voice = { gain = g } ;;
+end ;;
+let v : Voices.Voice = Voices.make 0.5 ;;
+let g : Scalar = v.gain ;;
+open Voices
+let w : Voice = make 0.25 ;;
+)");
+  DiagnosticBag diags;
+  Program prog = checkProject({f}, diags);
+  for (auto& d : diags.items)
+    std::cerr << renderDiagnostic(d, userMod(prog).parsed.source);
+  CHECK(!diags.hasErrors());
+  const auto& m = userMod(prog);
+  CHECK(m.typeDecls.count("Voices.Voice") == 1);
+  CHECK(typeEquals(m.defTypes.at("v"), m.defTypes.at("w")));
+}
+
+TEST(checker_type_decl_across_modules) {
+  TempProject tp;
+  tp.write("shapes.synth", R"(
+type Env = { attack : Timestamp } ;;
+let make a:Timestamp : Env = { attack = a } ;;
+)");
+  std::string f = tp.write("song.synth", R"(
+import Shapes
+let e : Shapes.Env = Shapes.make 5ms ;;
+let a : Timestamp = e.attack ;;
+)");
+  DiagnosticBag diags;
+  Program prog = checkProject({f}, diags);
+  for (auto& d : diags.items)
+    std::cerr << renderDiagnostic(d, prog.modules.back().parsed.source);
+  CHECK(!diags.hasErrors());
+}
+
+TEST(checker_type_decl_must_precede_use) {
+  TempProject tp;
+  std::string f = tp.write("t.synth", R"(
+let e : Env = { attack = 5ms } ;;
+type Env = { attack : Timestamp } ;;
+)");
+  DiagnosticBag diags;
+  checkProject({f}, diags);
+  CHECK(diags.hasErrors());
+}
+
+TEST(checker_recursive_record_type_is_declarable) {
+  // A record may mention itself (unbuildable without variants, but the
+  // declaration is legal); the arity check still applies.
+  TempProject tp;
+  std::string f = tp.write("t.synth", R"(
+type 'a Chain = { head : 'a; rest : 'a Chain } ;;
+let use c:Scalar Chain : Scalar = c.head ;;
+)");
+  DiagnosticBag diags;
+  Program prog = checkProject({f}, diags);
+  for (auto& d : diags.items)
+    std::cerr << renderDiagnostic(d, userMod(prog).parsed.source);
+  CHECK(!diags.hasErrors());
+}
+
+TEST(checker_type_decl_arity_and_unbound_var) {
+  TempProject tp;
+  std::string f = tp.write("t.synth", R"(
+type 'a Box = { v : 'a } ;;
+let b : Box = { v = 1.0 } ;;
+)");
+  DiagnosticBag d1;
+  checkProject({f}, d1);
+  CHECK(d1.hasErrors());
+  TempProject tp2;
+  std::string g = tp2.write("t.synth", "type Box = { v : 'a } ;;");
+  DiagnosticBag d2;
+  checkProject({g}, d2);
+  CHECK(d2.hasErrors());
+}
+
+TEST(checker_record_in_signal_pipeline) {
+  // Records hold signals and feed the usual pipeline.
+  TempProject tp;
+  std::string f = tp.write("t.synth", R"(
+open Core open Core.Osc open Core.Fx
+type Voice = { osc : Scalar Signal; vel : Scalar } ;;
+let v : Voice = { osc = sine 440.0; vel = 0.5 } ;;
+let out : Scalar Signal = v.osc * v.vel ;;
+)");
+  DiagnosticBag diags;
+  Program prog = checkProject({f}, diags);
+  for (auto& d : diags.items)
+    std::cerr << renderDiagnostic(d, userMod(prog).parsed.source);
+  CHECK(!diags.hasErrors());
+  CHECK(typeEquals(userMod(prog).defTypes.at("out"), tSignal(tScalar())));
+}

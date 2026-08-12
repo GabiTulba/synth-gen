@@ -26,10 +26,12 @@ class Parser {
           defs.push_back(parseModuleDef(/*insideStruct=*/false));
         } else if (at(Tok::Let)) {
           defs.push_back(parseLet());
+        } else if (atTypeDecl()) {
+          defs.push_back(parseTypeDecl());
         } else {
           fail(peek().span,
-               std::string(
-                   "expected 'let', 'import', 'open' or 'module', found ") +
+               std::string("expected 'let', 'type', 'import', 'open' or "
+                           "'module', found ") +
                    tokenName(peek().kind));
         }
       } catch (const Recover&) {
@@ -158,10 +160,12 @@ class Parser {
           defs.push_back(parseModuleDef(/*insideStruct=*/true));
         } else if (at(Tok::Let)) {
           defs.push_back(parseLet());
+        } else if (atTypeDecl()) {
+          defs.push_back(parseTypeDecl());
         } else {
           fail(peek().span,
-               std::string("expected 'let', 'open', 'module' or 'end', "
-                           "found ") + tokenName(peek().kind));
+               std::string("expected 'let', 'type', 'open', 'module' or "
+                           "'end', found ") + tokenName(peek().kind));
         }
       } catch (const Recover&) {
         // Recover within the body: skip past the next ';;' but never past
@@ -173,6 +177,77 @@ class Parser {
       }
     }
     return defs;
+  }
+
+  // type [params] Name ;;                       (abstract)
+  // type [params] Name = { f : T; g : T } ;;    (record)
+  // type [params] Name = | A | B of T ;;        (variant)
+  // params: 'a or ('a, 'b). `type` and `of` are contextual (ordinary
+  // identifiers elsewhere), following `struct`/`end`/`external`.
+  bool atTypeDecl() const { return at(Tok::Ident) && peek().text == "type"; }
+
+  TopDef parseTypeDecl() {
+    TopDef d{};
+    d.kind = TopDef::Kind::TypeDecl;
+    Span lo = advance().span;  // 'type'
+    if (at(Tok::TypeVar)) {
+      d.typeParams.push_back(advance().text);
+    } else if (at(Tok::LParen)) {
+      advance();
+      d.typeParams.push_back(expect(Tok::TypeVar, "type parameter").text);
+      while (at(Tok::Comma)) {
+        advance();
+        d.typeParams.push_back(expect(Tok::TypeVar, "type parameter").text);
+      }
+      expect(Tok::RParen, "')' after type parameters");
+    }
+    const Token& name = expect(Tok::UpIdent, "type name (capitalized)");
+    d.name = name.text;
+    for (size_t i = 0; i < d.typeParams.size(); i++)
+      for (size_t j = 0; j < i; j++)
+        if (d.typeParams[i] == d.typeParams[j])
+          fail(name.span,
+               "duplicate type parameter '" + d.typeParams[i] + "'");
+    if (at(Tok::Equals)) {
+      advance();
+      if (at(Tok::LBrace)) {
+        d.typeFlavor = TopDef::TypeFlavor::Record;
+        advance();  // '{'
+        for (;;) {
+          const Token& fn = expect(Tok::Ident, "field name");
+          expect(Tok::Colon, "':' after field name");
+          TypeExprPtr ft = parseType();
+          d.fields.push_back({fn.text, ft, Span{fn.span.lo, ft->span.hi}});
+          if (!at(Tok::Semi)) break;
+          advance();
+        }
+        expect(Tok::RBrace, "'}' to close the record declaration");
+        if (d.fields.empty())
+          fail(name.span, "a record needs at least one field");
+      } else if (at(Tok::Bar) || at(Tok::UpIdent)) {
+        d.typeFlavor = TopDef::TypeFlavor::Variant;
+        if (at(Tok::Bar)) advance();  // optional leading '|'
+        for (;;) {
+          const Token& cn = expect(Tok::UpIdent, "constructor name");
+          TypeExprPtr payload;
+          uint32_t hi = cn.span.hi;
+          if (at(Tok::Ident) && peek().text == "of") {
+            advance();
+            payload = parseType();
+            hi = payload->span.hi;
+          }
+          d.ctors.push_back({cn.text, payload, Span{cn.span.lo, hi}});
+          if (!at(Tok::Bar)) break;
+          advance();
+        }
+      } else {
+        fail(peek().span,
+             "expected '{' (a record) or a constructor list after '='");
+      }
+    }
+    const Token& end = expect(Tok::SemiSemi, "';;' to end type declaration");
+    d.span = {lo.lo, end.span.hi};
+    return d;
   }
 
   TopDef parseLet() {
@@ -593,13 +668,30 @@ class Parser {
       case Tok::UpIdent:
       case Tok::LParen:
       case Tok::LBracket:
+      case Tok::LBrace:
         return true;
       default:
         return false;
     }
   }
 
+  // An atom plus any postfix projections: r.field, (f x).field.a - the
+  // dot binds tighter than application, so `f r.x` is `f (r.x)`.
   ExprPtr parseAtom() {
+    ExprPtr e = parseAtomBase();
+    while (at(Tok::Dot) && peek(1).kind == Tok::Ident) {
+      advance();  // '.'
+      const Token& f = advance();
+      auto p = std::make_unique<Expr>(Expr::Kind::Project,
+                                      Span{e->span.lo, f.span.hi});
+      p->name = f.text;
+      p->items.push_back(std::move(e));
+      e = std::move(p);
+    }
+    return e;
+  }
+
+  ExprPtr parseAtomBase() {
     const Token& t = peek();
     switch (t.kind) {
       case Tok::Number: {
@@ -677,6 +769,33 @@ class Parser {
         const Token& close = expect(Tok::RParen, "')'");
         first->span = {lo.lo, close.span.hi};
         return first;
+      }
+      case Tok::LBrace: {
+        // { f = e; ... } is a record literal; { e with f = e; ... } a
+        // record update. A leading `ident =` commits to the literal.
+        Span lo = advance().span;
+        std::unique_ptr<Expr> e;
+        if (at(Tok::Ident) && peek(1).kind == Tok::Equals) {
+          e = std::make_unique<Expr>(Expr::Kind::RecordLit, lo);
+        } else {
+          ExprPtr base = parseExpr();
+          expect(Tok::With,
+                 "'with' ({ record with field = ... }) or 'field = ...' "
+                 "(a record literal)");
+          e = std::make_unique<Expr>(Expr::Kind::RecordUpdate, lo);
+          e->items.push_back(std::move(base));
+        }
+        for (;;) {
+          const Token& fn = expect(Tok::Ident, "field name");
+          expect(Tok::Equals, "'=' after field name");
+          e->items.push_back(parseExpr());
+          e->argLabels.push_back(fn.text);
+          if (!at(Tok::Semi)) break;
+          advance();
+        }
+        const Token& close = expect(Tok::RBrace, "'}'");
+        e->span = {lo.lo, close.span.hi};
+        return e;
       }
       case Tok::LBracket: {
         Span lo = advance().span;

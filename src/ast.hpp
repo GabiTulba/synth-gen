@@ -13,13 +13,15 @@ struct Expr;
 using ExprPtr = std::unique_ptr<Expr>;
 
 struct TypeExpr;
-using TypeExprPtr = std::shared_ptr<const TypeExpr>;
+using TypeExprPtr = std::shared_ptr<TypeExpr>;
 
 // A type annotation exactly as written. The parser produces these; the
 // checker resolves them to semantic TypePtrs (filling Param::type,
 // Expr::declType and TopDef::retType) once it knows what type names are
-// in scope. Shared and immutable, like Type, so the local-function
-// desugaring can reuse parameter annotations freely.
+// in scope. Nodes are shared (the local-function desugaring reuses
+// parameter annotations); the checker rewrites Name nodes to canonical
+// module ids + stored declaration names, exactly as it does for value
+// identifiers, so the incremental hasher sees stable identities.
 struct TypeExpr {
   enum class Kind {
     Name,   // a (possibly qualified) type name applied to `args`:
@@ -39,6 +41,11 @@ struct TypeExpr {
   // only; a written arrow type has no labels).
   std::vector<std::string> labels;
   TypeExprPtr ret;  // Fun
+  // Filled by the checker: the resolved semantic type. Doubles as the
+  // idempotency guard - a node shared by the local-function desugaring
+  // resolves once, which matters because resolution also canonicalizes
+  // the surface name in place.
+  TypePtr resolved;
   explicit TypeExpr(Kind k, Span s) : kind(k), span(s) {}
 };
 
@@ -73,6 +80,12 @@ struct Expr {
     Let,       // name, declType; items[0] = bound expr, items[1] = body
     Lambda,    // params; items[0] = body
     External,  // str = C++ file; whole body of a top-level let only
+    RecordLit,     // items = field values, argLabels = field names;
+                   // moduleName/name = resolved declaration (checker)
+    RecordUpdate,  // items[0] = base, items[1..] = new field values,
+                   // argLabels = their names (parallel to items[1..]);
+                   // moduleName/name = resolved declaration (checker)
+    Project,   // items[0] = record, name = field
   };
   Kind kind;
   Span span{};
@@ -83,7 +96,9 @@ struct Expr {
   std::string name;        // Ident
   BinOpKind op = BinOpKind::Add;
   std::vector<ExprPtr> items;
-  // App only: label per argument, parallel to items[1..]; "" = positional.
+  // App: label per argument, parallel to items[1..]; "" = positional.
+  // RecordLit: field name per value, parallel to items.
+  // RecordUpdate: field name per new value, parallel to items[1..].
   std::vector<std::string> argLabels;
   // Let only: the local binding's annotation as written (parser) and as
   // resolved (checker).
@@ -98,6 +113,13 @@ struct Expr {
   explicit Expr(Kind k, Span s) : kind(k), span(s) {}
 };
 
+// One record field or variant constructor in a `type` declaration.
+struct TypeDeclField {
+  std::string name;
+  TypeExprPtr type;  // Ctor: null when the constructor has no payload
+  Span span{};
+};
+
 struct TopDef {
   enum class Kind {
     Import,       // moduleName (possibly dotted: "Lib" or "Lib.File")
@@ -105,16 +127,23 @@ struct TopDef {
     ModuleAlias,  // name = alias, moduleName = dotted target path
     ModuleDef,    // name = module, defs = its body (module N = struct ... end)
     Let,          // name ("_" for effect bindings), params, retType, body
+    TypeDecl,     // name, typeParams, and fields (record) or ctors
+                  // (variant) or neither (abstract)
   };
+  enum class TypeFlavor { Record, Variant, Abstract };
   Kind kind;
   Span span{};
   std::string moduleName;      // Import / Open / ModuleAlias target
-  std::string name;            // Let / ModuleAlias / ModuleDef
+  std::string name;            // Let / ModuleAlias / ModuleDef / TypeDecl
   std::vector<Param> params;   // Let (empty for constants)
   TypeExprPtr retTypeExpr;     // Let: annotation as written; null for `let _`
   TypePtr retType;             // Let: resolved by the checker
   ExprPtr body;                // Let
   std::vector<TopDef> defs;    // ModuleDef body (lets, opens, nested modules)
+  TypeFlavor typeFlavor = TypeFlavor::Abstract;   // TypeDecl
+  std::vector<std::string> typeParams;            // TypeDecl: 'a names
+  std::vector<TypeDeclField> fields;              // TypeDecl: record fields
+  std::vector<TypeDeclField> ctors;               // TypeDecl: variant ctors
 };
 
 struct ParsedModule {

@@ -184,6 +184,51 @@ class Interp {
         // Capture the local environment by value; the AST is owned by the
         // Program for the whole build, so the Expr pointer stays valid.
         return Value{LambdaV{&e, &mod, std::make_shared<Env>(env), nullptr}};
+      case Expr::Kind::RecordLit: {
+        // The checker stamped the resolved record type on the node;
+        // fields evaluate in source order but store in declaration order,
+        // so projection is a plain index.
+        const TypeDecl* decl = e.type ? e.type->decl : nullptr;
+        if (!decl)
+          throw EvalError("internal error: unresolved record literal");
+        RecordV out;
+        out.decl = decl;
+        out.fields.resize(decl->fields.size());
+        for (size_t i = 0; i < e.items.size(); i++) {
+          Value v = eval(*e.items[i], env, mod);
+          for (size_t k = 0; k < decl->fields.size(); k++)
+            if (decl->fields[k].name == e.argLabels[i]) {
+              out.fields[k] = std::move(v);
+              break;
+            }
+        }
+        return Value{std::move(out)};
+      }
+      case Expr::Kind::RecordUpdate: {
+        Value base = eval(*e.items[0], env, mod);
+        auto* rec = std::get_if<RecordV>(&base.v);
+        if (!rec)
+          throw EvalError("record update applied to a non-record value");
+        RecordV out = *rec;  // copy, then overwrite the named fields
+        for (size_t i = 0; i + 1 < e.items.size(); i++) {
+          Value v = eval(*e.items[i + 1], env, mod);
+          for (size_t k = 0; k < out.decl->fields.size(); k++)
+            if (out.decl->fields[k].name == e.argLabels[i]) {
+              out.fields[k] = std::move(v);
+              break;
+            }
+        }
+        return Value{std::move(out)};
+      }
+      case Expr::Kind::Project: {
+        Value base = eval(*e.items[0], env, mod);
+        auto* rec = std::get_if<RecordV>(&base.v);
+        if (!rec)
+          throw EvalError("field access applied to a non-record value");
+        for (size_t k = 0; k < rec->decl->fields.size(); k++)
+          if (rec->decl->fields[k].name == e.name) return rec->fields[k];
+        throw EvalError("record has no field '" + e.name + "'");
+      }
       case Expr::Kind::External:
         // evalDefs and applyValue dispatch external bodies before eval.
         throw EvalError("internal error: external body evaluated directly");

@@ -2403,3 +2403,84 @@ let _ = layers |> sample ~from:0s ~to:100ms
   for (double v : w.channels[0]) peak = std::max(peak, std::fabs(v));
   CHECK_NEAR(peak, 0.4, 0.01);
 }
+
+TEST(build_records_evaluate_and_render) {
+  // Records built, updated, projected and passed through an external
+  // (mix_all's list elements come out of record fields).
+  TempDir tp;
+  tp.write("song.synth", R"(
+open Core open Core.Osc open Core.Fx open Core.Arrange open Core.Render
+type Voice = { osc : Scalar Signal; vel : Scalar } ;;
+let v : Voice = { osc = sine 440.0; vel = 0.5 } ;;
+let quiet : Voice = { v with vel = 0.25 } ;;
+let mixed : Scalar Signal = v.osc * v.vel + quiet.osc * quiet.vel ;;
+let _ = render "rec" 48000.0 (sample mixed 0s 100ms) ;;
+)");
+  tp.write("build.json", projectManifest("rec-demo", {"song.synth"}));
+  BuildResult r = buildProject(tp.dir.string());
+  for (auto& d : r.diags.items) std::cerr << d.message << "\n";
+  CHECK(r.ok);
+  CHECK(r.targets.size() == 1);
+  CHECK(r.targets[0].ok);
+  WavData w = readWav((tp.dir / "_build" / "artifacts" / "rec.wav").string());
+  CHECK(w.frames() == 4800);
+  // 0.75 * sine(440) peaks around 0.75.
+  double peak = 0;
+  for (auto s : w.channels[0]) peak = std::max(peak, std::fabs(s));
+  CHECK(peak > 0.7);
+  CHECK(peak < 0.8);
+}
+
+TEST(build_record_through_external_boundary) {
+  // A record round-trips opaquely through a polymorphic external:
+  // List.map carries Voice values through C++ and back.
+  TempDir tp;
+  tp.write("song.synth", R"(
+open Core open Core.Osc open Core.Arrange open Core.Render
+type Voice = { osc : Scalar Signal; vel : Scalar } ;;
+let mk f:Scalar : Voice = { osc = sine f; vel = 0.5 } ;;
+let flatten v:Voice : Scalar Signal = v.osc * v.vel ;;
+let voices : Voice list = List.map ~f:mk ~xs:[220.0; 440.0] ;;
+let out : Scalar Signal = mix_all (List.map ~f:flatten ~xs:voices) ;;
+let _ = render "vox" 48000.0 (sample out 0s 50ms) ;;
+)");
+  tp.write("build.json", projectManifest("vox-demo", {"song.synth"}));
+  BuildResult r = buildProject(tp.dir.string());
+  for (auto& d : r.diags.items) std::cerr << d.message << "\n";
+  CHECK(r.ok);
+  CHECK(r.targets[0].ok);
+}
+
+TEST(build_type_decl_edit_invalidates_dependents) {
+  // Changing a type declaration changes the closure hash of every
+  // definition typed by it - even transitively, and even when the
+  // dependent definitions' own source text is unchanged.
+  auto check = [](const char* innerField, uint64_t* outHash) {
+    TempDir tp;
+    tp.write("song.synth", std::string(R"(
+type Inner = { x : )") + innerField + R"( } ;;
+type Box = { v : Inner } ;;
+let use b:Box : Inner = b.v ;;
+)");
+    DiagnosticBag diags;
+    Program prog = checkProject({(tp.dir / "song.synth").string()}, diags);
+    CHECK(!diags.hasErrors());
+    const CheckedModule* m = nullptr;
+    for (auto& mm : prog.modules)
+      if (mm.libName != "Core") m = &mm;
+    const TopDef* use = nullptr;
+    for (auto& d : m->parsed.defs)
+      if (d.kind == TopDef::Kind::Let && d.name == "use") use = &d;
+    // Stable across repeated hashing of one program.
+    CHECK(defClosureHash(prog, *m, *use) == defClosureHash(prog, *m, *use));
+    *outHash = defClosureHash(prog, *m, *use);
+  };
+  uint64_t hScalar = 0, hScalar2 = 0, hVector = 0;
+  check("Scalar", &hScalar);
+  check("Scalar", &hScalar2);
+  check("Vector", &hVector);
+  CHECK(hScalar == hScalar2);  // same sources -> same hash across runs
+  // `use` and `Box` texts are identical in both programs; only Inner
+  // changed, two hops away in the type-dependency chain.
+  CHECK(hScalar != hVector);
+}

@@ -609,3 +609,112 @@ TEST(parser_unary_minus_binds_tighter_than_mul) {
   CHECK(b.op == BinOpKind::Mul);
   CHECK(b.items[0]->kind == Expr::Kind::Neg);
 }
+
+TEST(parser_record_type_declaration) {
+  DiagnosticBag diags;
+  auto defs = parseSrc(
+      "type Env = { attack : Timestamp; release : Timestamp } ;;", diags);
+  CHECK(!diags.hasErrors());
+  CHECK(defs.size() == 1);
+  CHECK(defs[0].kind == TopDef::Kind::TypeDecl);
+  CHECK(defs[0].typeFlavor == TopDef::TypeFlavor::Record);
+  CHECK(defs[0].name == "Env");
+  CHECK(defs[0].typeParams.empty());
+  CHECK(defs[0].fields.size() == 2);
+  CHECK(defs[0].fields[0].name == "attack");
+  CHECK(defs[0].fields[0].type->name == "Timestamp");
+  CHECK(defs[0].fields[1].name == "release");
+}
+
+TEST(parser_polymorphic_and_abstract_type_declarations) {
+  DiagnosticBag diags;
+  auto defs = parseSrc(
+      "type 'a Voice = { osc : 'a Signal; vel : Scalar } ;;\n"
+      "type ('a, 'b) Pair = { first : 'a; second : 'b } ;;\n"
+      "type Handle ;;",
+      diags);
+  CHECK(!diags.hasErrors());
+  CHECK(defs.size() == 3);
+  CHECK(defs[0].typeParams.size() == 1);
+  CHECK(defs[0].typeParams[0] == "a");
+  CHECK(defs[0].fields[0].type->name == "Signal");
+  CHECK(defs[0].fields[0].type->args[0]->kind == TypeExpr::Kind::Var);
+  CHECK(defs[1].typeParams.size() == 2);
+  CHECK(defs[1].typeParams[1] == "b");
+  CHECK(defs[2].kind == TopDef::Kind::TypeDecl);
+  CHECK(defs[2].typeFlavor == TopDef::TypeFlavor::Abstract);
+  CHECK(defs[2].fields.empty());
+}
+
+TEST(parser_variant_type_declaration) {
+  DiagnosticBag diags;
+  auto defs = parseSrc(
+      "type Wave = | Sine | Saw | Pulse of Scalar ;;\n"
+      "type Note = Rest | Play of (Scalar, Timestamp) ;;",
+      diags);
+  CHECK(!diags.hasErrors());
+  CHECK(defs.size() == 2);
+  CHECK(defs[0].typeFlavor == TopDef::TypeFlavor::Variant);
+  CHECK(defs[0].ctors.size() == 3);
+  CHECK(defs[0].ctors[0].name == "Sine");
+  CHECK(!defs[0].ctors[0].type);
+  CHECK(defs[0].ctors[2].name == "Pulse");
+  CHECK(defs[0].ctors[2].type->name == "Scalar");
+  // The leading '|' is optional.
+  CHECK(defs[1].ctors.size() == 2);
+  CHECK(defs[1].ctors[1].type->kind == TypeExpr::Kind::Tuple);
+}
+
+TEST(parser_record_literal_update_and_projection) {
+  DiagnosticBag diags;
+  auto defs = parseSrc(
+      "let e : Env = { attack = 5ms; release = 100ms } ;;\n"
+      "let f : Env = { e with attack = 1ms } ;;\n"
+      "let a : Timestamp = e.attack ;;\n"
+      "let b : Timestamp = (quick e).attack ;;",
+      diags);
+  CHECK(!diags.hasErrors());
+  CHECK(defs[0].body->kind == Expr::Kind::RecordLit);
+  CHECK(defs[0].body->items.size() == 2);
+  CHECK(defs[0].body->argLabels[0] == "attack");
+  CHECK(defs[1].body->kind == Expr::Kind::RecordUpdate);
+  CHECK(defs[1].body->items.size() == 2);
+  CHECK(defs[1].body->items[0]->kind == Expr::Kind::Ident);
+  CHECK(defs[1].body->argLabels[0] == "attack");
+  CHECK(defs[2].body->kind == Expr::Kind::Project);
+  CHECK(defs[2].body->name == "attack");
+  CHECK(defs[3].body->kind == Expr::Kind::Project);
+  CHECK(defs[3].body->items[0]->kind == Expr::Kind::App);
+}
+
+TEST(parser_projection_binds_tighter_than_application) {
+  DiagnosticBag diags;
+  auto defs = parseSrc("let x : Scalar = f r.gain ;;", diags);
+  CHECK(!diags.hasErrors());
+  const Expr& app = *defs[0].body;
+  CHECK(app.kind == Expr::Kind::App);
+  CHECK(app.items[1]->kind == Expr::Kind::Project);
+  CHECK(app.items[1]->name == "gain");
+}
+
+TEST(parser_type_is_contextual) {
+  // `type` still works as a binding name and expression reference.
+  DiagnosticBag diags;
+  auto defs = parseSrc(
+      "let type : Scalar = 1.0 ;;\n"
+      "let x : Scalar = type ;;",
+      diags);
+  CHECK(!diags.hasErrors());
+  CHECK(defs[0].name == "type");
+  CHECK(defs[1].body->kind == Expr::Kind::Ident);
+}
+
+TEST(parser_qualified_type_name) {
+  DiagnosticBag diags;
+  auto defs = parseSrc("let v : Scalar Voices.Voice = make 1.0 ;;", diags);
+  CHECK(!diags.hasErrors());
+  CHECK(defs[0].retTypeExpr->kind == TypeExpr::Kind::Name);
+  CHECK(defs[0].retTypeExpr->moduleName == "Voices");
+  CHECK(defs[0].retTypeExpr->name == "Voice");
+  CHECK(defs[0].retTypeExpr->args[0]->name == "Scalar");
+}

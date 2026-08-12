@@ -25,14 +25,16 @@ uint64_t hashString(const std::string& s, uint64_t seed = kFnvOffset) {
 // dotted for members of inline modules ("A.x" reaches into
 // `module A = struct ... end`).
 const TopDef* findDefIn(const std::vector<TopDef>& defs,
-                        const std::string& name) {
+                        const std::string& name,
+                        TopDef::Kind kind = TopDef::Kind::Let) {
   for (auto& d : defs) {
-    if (d.kind == TopDef::Kind::Let && d.name == name) return &d;
+    if (d.kind == kind && d.name == name) return &d;
     if (d.kind == TopDef::Kind::ModuleDef &&
         name.size() > d.name.size() + 1 &&
         name.compare(0, d.name.size(), d.name) == 0 &&
         name[d.name.size()] == '.') {
-      if (const TopDef* r = findDefIn(d.defs, name.substr(d.name.size() + 1)))
+      if (const TopDef* r =
+              findDefIn(d.defs, name.substr(d.name.size() + 1), kind))
         return r;
     }
   }
@@ -95,6 +97,64 @@ void collectDeps(const Expr& e, const std::set<std::string>& params,
   for (auto& child : e.items) collectDeps(*child, params, mod, prog, out);
 }
 
+// --- Type-declaration dependencies -----------------------------------------
+//
+// A definition depends on every type declaration its checked types
+// mention: change a record's fields and everything typed by it must
+// rebuild. The checker leaves resolved types on every expression
+// (Expr::type), parameter and return annotation; walking those Named
+// nodes catches record literals, projections and annotations alike.
+
+void collectNamedDecls(const TypePtr& t, const Program& prog, DepMap& out) {
+  if (!t) return;
+  switch (t->kind) {
+    case Type::Kind::Named: {
+      if (const CheckedModule* m = prog.find(t->decl->moduleId))
+        if (const TopDef* d = findDefIn(m->parsed.defs, t->decl->name,
+                                        TopDef::Kind::TypeDecl))
+          // The "type:" prefix keeps type keys clear of value keys in
+          // the stable combination order.
+          out.emplace("type:" + t->decl->moduleId + "." + t->decl->name,
+                      std::make_pair(m, d));
+      for (auto& x : t->items) collectNamedDecls(x, prog, out);
+      return;
+    }
+    case Type::Kind::Signal:
+    case Type::Kind::Sample:
+    case Type::Kind::List:
+      collectNamedDecls(t->elem, prog, out);
+      return;
+    case Type::Kind::Tuple:
+    case Type::Kind::Fun:
+      for (auto& x : t->items) collectNamedDecls(x, prog, out);
+      collectNamedDecls(t->ret, prog, out);
+      return;
+    default:
+      return;
+  }
+}
+
+void collectExprTypeDeps(const Expr& e, const Program& prog, DepMap& out) {
+  collectNamedDecls(e.type, prog, out);
+  collectNamedDecls(e.declType, prog, out);
+  for (auto& p : e.params) collectNamedDecls(p.type, prog, out);
+  for (auto& child : e.items) collectExprTypeDeps(*child, prog, out);
+}
+
+void collectTypeDeps(const TopDef& def, const Program& prog, DepMap& out) {
+  if (def.kind == TopDef::Kind::TypeDecl) {
+    // A declaration depends on the declarations its members mention.
+    for (auto& f : def.fields)
+      if (f.type) collectNamedDecls(f.type->resolved, prog, out);
+    for (auto& c : def.ctors)
+      if (c.type) collectNamedDecls(c.type->resolved, prog, out);
+    return;
+  }
+  for (auto& p : def.params) collectNamedDecls(p.type, prog, out);
+  collectNamedDecls(def.retType, prog, out);
+  if (def.body) collectExprTypeDeps(*def.body, prog, out);
+}
+
 struct Hasher {
   const Program& prog;
   std::map<const TopDef*, uint64_t> memo;
@@ -113,14 +173,16 @@ struct Hasher {
     uint64_t h = hashString(src.substr(lo, hi - lo));
     h = fnvCombine(h, hashString(mod.parsed.name));
 
+    DepMap deps;
     if (def.body) {
       std::set<std::string> params;
       for (auto& p : def.params) params.insert(p.name);
-      DepMap deps;
       collectDeps(*def.body, params, mod, prog, deps);
-      for (auto& [key, dep] : deps)
-        if (dep.second != &def) h = fnvCombine(h, hashDef(*dep.first, *dep.second));
     }
+    collectTypeDeps(def, prog, deps);
+    for (auto& [key, dep] : deps)
+      if (dep.second != &def)
+        h = fnvCombine(h, hashDef(*dep.first, *dep.second));
     memo[&def] = h;
     return h;
   }

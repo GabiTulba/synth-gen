@@ -129,8 +129,9 @@ TEST(lexer_comparison_and_logic_operators) {
   CHECK(toks[7].kind == Tok::OrOr);
   CHECK(toks[8].kind == Tok::PipeGt);
   CHECK(toks[9].kind == Tok::Equals);
-  // A lone '|' is still an error (only '|>' and '||' exist).
-  CHECK(diags.hasErrors());
+  // A lone '|' is the variant/match bar ('|>' and '||' win when they fit).
+  CHECK(toks[10].kind == Tok::Bar);
+  CHECK(!diags.hasErrors());
 }
 
 TEST(lexer_arrow_and_ge_disambiguation) {
@@ -165,4 +166,21 @@ TEST(lexer_int_literal_too_large) {
   DiagnosticBag diags;
   lex("99999999999999999999999", "t", diags);
   CHECK(diags.hasErrors());
+}
+
+TEST(lexer_braces_and_new_keywords) {
+  DiagnosticBag diags;
+  auto toks = lex("{ } match with type of rec", "t", diags);
+  CHECK(!diags.hasErrors());
+  CHECK(toks[0].kind == Tok::LBrace);
+  CHECK(toks[1].kind == Tok::RBrace);
+  CHECK(toks[2].kind == Tok::Match);
+  CHECK(toks[3].kind == Tok::With);
+  // `type`, `of` and `rec` stay contextual identifiers.
+  CHECK(toks[4].kind == Tok::Ident);
+  CHECK(toks[4].text == "type");
+  CHECK(toks[5].kind == Tok::Ident);
+  CHECK(toks[5].text == "of");
+  CHECK(toks[6].kind == Tok::Ident);
+  CHECK(toks[6].text == "rec");
 }

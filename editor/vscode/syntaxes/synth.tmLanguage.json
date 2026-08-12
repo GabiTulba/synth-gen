@@ -6,6 +6,7 @@
     { "include": "#comment" },
     { "include": "#string" },
     { "include": "#letBinding" },
+    { "include": "#typeDecl" },
     { "include": "#moduleDef" },
     { "include": "#keyword" },
     { "include": "#constant" },
@@ -47,15 +48,21 @@
         "2": { "name": "entity.name.namespace.synth" }
       }
     },
+    "typeDecl": {
+      "match": "^\\s*(type)\\b",
+      "captures": {
+        "1": { "name": "keyword.other.type.synth" }
+      }
+    },
     "keyword": {
       "patterns": [
         {
           "name": "keyword.control.synth",
-          "match": "\\b(if|then|else)\\b"
+          "match": "\\b(if|then|else|match|with)\\b"
         },
         {
           "name": "keyword.other.synth",
-          "match": "\\b(let|in|fun|import|open|module|struct|end|external)\\b"
+          "match": "\\b(let|rec|in|fun|import|open|module|struct|end|external|of)\\b"
         }
       ]
     },
@@ -118,7 +125,8 @@
     "punctuation": {
       "patterns": [
         { "name": "punctuation.terminator.synth", "match": ";;" },
-        { "name": "punctuation.separator.synth", "match": "[;,:.]" }
+        { "name": "punctuation.separator.synth", "match": "[;,:.|]" },
+        { "name": "punctuation.section.braces.synth", "match": "[{}]" }
       ]
     }
   }

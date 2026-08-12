@@ -22,9 +22,12 @@ TEST(parser_function_def) {
   CHECK(defs[0].name == "pluck");
   CHECK(defs[0].params.size() == 1);
   CHECK(defs[0].params[0].name == "freq");
-  CHECK(defs[0].params[0].type->kind == Type::Kind::Scalar);
-  CHECK(defs[0].retType->kind == Type::Kind::Signal);
-  CHECK(defs[0].retType->elem->kind == Type::Kind::Scalar);
+  CHECK(defs[0].params[0].typeExpr->kind == TypeExpr::Kind::Name);
+  CHECK(defs[0].params[0].typeExpr->name == "Scalar");
+  CHECK(defs[0].retTypeExpr->kind == TypeExpr::Kind::Name);
+  CHECK(defs[0].retTypeExpr->name == "Signal");
+  CHECK(defs[0].retTypeExpr->args.size() == 1);
+  CHECK(defs[0].retTypeExpr->args[0]->name == "Scalar");
   CHECK(defs[0].body->kind == Expr::Kind::BinOp);
   CHECK(defs[0].body->op == BinOpKind::Mul);
 }
@@ -81,7 +84,9 @@ TEST(parser_list_literal_semicolons) {
   CHECK(!diags.hasErrors());
   CHECK(defs[0].body->kind == Expr::Kind::ListLit);
   CHECK(defs[0].body->items.size() == 3);
-  CHECK(defs[0].retType->kind == Type::Kind::List);
+  CHECK(defs[0].retTypeExpr->kind == TypeExpr::Kind::Name);
+  CHECK(defs[0].retTypeExpr->name == "list");
+  CHECK(defs[0].retTypeExpr->args[0]->name == "Timestamp");
 }
 
 TEST(parser_tuple_type_and_literal) {
@@ -89,7 +94,8 @@ TEST(parser_tuple_type_and_literal) {
   auto defs = parseSrc(
       "let two : (Scalar, Timestamp) = (1.0, 500ms) ;;", diags);
   CHECK(!diags.hasErrors());
-  CHECK(defs[0].retType->kind == Type::Kind::Tuple);
+  CHECK(defs[0].retTypeExpr->kind == TypeExpr::Kind::Tuple);
+  CHECK(defs[0].retTypeExpr->items.size() == 2);
   CHECK(defs[0].body->kind == Expr::Kind::TupleLit);
 }
 
@@ -99,9 +105,9 @@ TEST(parser_function_typed_param) {
       "let ap f:(Timestamp -> Scalar Signal) t:Timestamp : Scalar Signal = f t ;;",
       diags);
   CHECK(!diags.hasErrors());
-  CHECK(defs[0].params[0].type->kind == Type::Kind::Fun);
-  CHECK(defs[0].params[0].type->items.size() == 1);
-  CHECK(defs[0].params[0].type->ret->kind == Type::Kind::Signal);
+  CHECK(defs[0].params[0].typeExpr->kind == TypeExpr::Kind::Fun);
+  CHECK(defs[0].params[0].typeExpr->items.size() == 1);
+  CHECK(defs[0].params[0].typeExpr->ret->name == "Signal");
 }
 
 TEST(parser_precedence) {
@@ -252,7 +258,7 @@ TEST(parser_lambda) {
   CHECK(lam.kind == Expr::Kind::Lambda);
   CHECK(lam.params.size() == 1);
   CHECK(lam.params[0].name == "x");
-  CHECK(lam.params[0].type->kind == Type::Kind::Scalar);
+  CHECK(lam.params[0].typeExpr->name == "Scalar");
   CHECK(!lam.params[0].labeled);
   CHECK(lam.items[0]->kind == Expr::Kind::BinOp);
   const Expr& lam2 = *defs[1].body;
@@ -326,7 +332,8 @@ let song : Scalar Signal =
   const Expr& outer = *defs[0].body;
   CHECK(outer.kind == Expr::Kind::Let);
   CHECK(outer.name == "hit");
-  CHECK(outer.declType->kind == Type::Kind::Sample);
+  CHECK(outer.declTypeExpr->kind == TypeExpr::Kind::Name);
+  CHECK(outer.declTypeExpr->name == "Sample");
   const Expr& inner = *outer.items[1];
   CHECK(inner.kind == Expr::Kind::Let);
   CHECK(inner.name == "beats");
@@ -358,12 +365,13 @@ let song : Scalar Signal =
   const Expr& let = *defs[0].body;
   CHECK(let.kind == Expr::Kind::Let);
   CHECK(let.name == "pluck");
-  CHECK(let.declType->kind == Type::Kind::Fun);
-  CHECK(let.declType->items.size() == 2);
-  CHECK(let.declType->items[0]->kind == Type::Kind::Scalar);
-  CHECK(let.declType->labelAt(0) == "");
-  CHECK(let.declType->labelAt(1) == "gain");
-  CHECK(let.declType->ret->kind == Type::Kind::Signal);
+  CHECK(let.declTypeExpr->kind == TypeExpr::Kind::Fun);
+  CHECK(let.declTypeExpr->items.size() == 2);
+  CHECK(let.declTypeExpr->items[0]->name == "Scalar");
+  CHECK(let.declTypeExpr->labels.size() == 2);
+  CHECK(let.declTypeExpr->labels[0] == "");
+  CHECK(let.declTypeExpr->labels[1] == "gain");
+  CHECK(let.declTypeExpr->ret->name == "Signal");
   const Expr& lam = *let.items[0];
   CHECK(lam.kind == Expr::Kind::Lambda);
   CHECK(lam.params.size() == 2);
@@ -389,25 +397,15 @@ TEST(parser_type_variables) {
       diags);
   CHECK(!diags.hasErrors());
   CHECK(defs.size() == 1);
-  const TypePtr& param = defs[0].params[0].type;
-  CHECK(param->kind == Type::Kind::Signal);
-  CHECK(param->elem->kind == Type::Kind::Var);
-  CHECK(param->elem->varName == "a");
-  CHECK(isRigidVar(param->elem));
-  // The same name in the return type is the same variable.
-  CHECK(defs[0].retType->elem->var == param->elem->var);
-}
-
-TEST(parser_type_variables_are_scoped_per_definition) {
-  DiagnosticBag diags;
-  auto defs = parseSrc(
-      "let f ~x:'a : 'a = x ;;\n"
-      "let g ~y:'a : 'a = y ;;",
-      diags);
-  CHECK(!diags.hasErrors());
-  CHECK(defs.size() == 2);
-  // Same spelling, different definitions: distinct variables.
-  CHECK(defs[0].retType->var != defs[1].retType->var);
+  const TypeExprPtr& param = defs[0].params[0].typeExpr;
+  CHECK(param->kind == TypeExpr::Kind::Name);
+  CHECK(param->name == "Signal");
+  CHECK(param->args[0]->kind == TypeExpr::Kind::Var);
+  CHECK(param->args[0]->name == "a");
+  // The same name appears in the return type; the checker ties them to
+  // one rigid variable per definition.
+  CHECK(defs[0].retTypeExpr->args[0]->kind == TypeExpr::Kind::Var);
+  CHECK(defs[0].retTypeExpr->args[0]->name == "a");
 }
 
 TEST(parser_type_variable_in_function_type_and_list) {
@@ -415,12 +413,13 @@ TEST(parser_type_variable_in_function_type_and_list) {
   auto defs = parseSrc("let twice ~f:('a -> 'a) ~xs:'a list : 'a = f 1.0 ;;",
                        diags);
   CHECK(!diags.hasErrors());
-  const TypePtr& f = defs[0].params[0].type;
-  CHECK(f->kind == Type::Kind::Fun);
-  CHECK(f->items[0]->kind == Type::Kind::Var);
-  CHECK(f->ret->var == f->items[0]->var);
-  CHECK(defs[0].params[1].type->kind == Type::Kind::List);
-  CHECK(defs[0].params[1].type->elem->var == f->items[0]->var);
+  const TypeExprPtr& f = defs[0].params[0].typeExpr;
+  CHECK(f->kind == TypeExpr::Kind::Fun);
+  CHECK(f->items[0]->kind == TypeExpr::Kind::Var);
+  CHECK(f->ret->kind == TypeExpr::Kind::Var);
+  CHECK(f->ret->name == f->items[0]->name);
+  CHECK(defs[0].params[1].typeExpr->name == "list");
+  CHECK(defs[0].params[1].typeExpr->args[0]->kind == TypeExpr::Kind::Var);
 }
 
 TEST(parser_inline_module) {
@@ -522,8 +521,8 @@ TEST(parser_bool_literals_and_type) {
   DiagnosticBag diags;
   auto defs = parseSrc("let flag ~on:Bool : Bool = true ;;", diags);
   CHECK(!diags.hasErrors());
-  CHECK(defs[0].params[0].type->kind == Type::Kind::Bool);
-  CHECK(defs[0].retType->kind == Type::Kind::Bool);
+  CHECK(defs[0].params[0].typeExpr->name == "Bool");
+  CHECK(defs[0].retTypeExpr->name == "Bool");
   CHECK(defs[0].body->kind == Expr::Kind::BoolLit);
   CHECK(defs[0].body->num == 1.0);
 }
@@ -585,7 +584,8 @@ TEST(parser_int_type_and_literal) {
   DiagnosticBag diags;
   auto defs = parseSrc("let n : Int = 42 ;;", diags);
   CHECK(!diags.hasErrors());
-  CHECK(defs[0].retType->kind == Type::Kind::Int);
+  CHECK(defs[0].retTypeExpr->kind == TypeExpr::Kind::Name);
+  CHECK(defs[0].retTypeExpr->name == "Int");
   CHECK(defs[0].body->kind == Expr::Kind::IntLit);
   CHECK(defs[0].body->inum == 42);
 }

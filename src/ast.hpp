@@ -12,6 +12,36 @@ namespace synth {
 struct Expr;
 using ExprPtr = std::unique_ptr<Expr>;
 
+struct TypeExpr;
+using TypeExprPtr = std::shared_ptr<const TypeExpr>;
+
+// A type annotation exactly as written. The parser produces these; the
+// checker resolves them to semantic TypePtrs (filling Param::type,
+// Expr::declType and TopDef::retType) once it knows what type names are
+// in scope. Shared and immutable, like Type, so the local-function
+// desugaring can reuse parameter annotations freely.
+struct TypeExpr {
+  enum class Kind {
+    Name,   // a (possibly qualified) type name applied to `args`:
+            // "Scalar", "'a list" (args = ['a]), "Scalar Signal"
+    Var,    // 'a; the surface name (without the quote) is in `name`
+    Tuple,  // items (size >= 2)
+    Fun,    // items = params, labels, ret
+  };
+  Kind kind;
+  Span span{};
+  std::string moduleName;  // Name: dotted qualifier, "" if none
+  std::string name;        // Name: the type name; Var: the variable name
+  // Name: type arguments, written postfix (`'a list`, `Scalar Signal`).
+  std::vector<TypeExprPtr> args;
+  std::vector<TypeExprPtr> items;  // Tuple members or Fun params
+  // Fun: per-param labels, "" = positional (local-function desugaring
+  // only; a written arrow type has no labels).
+  std::vector<std::string> labels;
+  TypeExprPtr ret;  // Fun
+  explicit TypeExpr(Kind k, Span s) : kind(k), span(s) {}
+};
+
 enum class BinOpKind {
   Add, Sub, Mul, Div,        // arithmetic (§3, pointwise lifting)
   Lt, Le, Gt, Ge, Eq, Ne,    // comparisons: Scalar/Timestamp pairs -> Bool
@@ -20,7 +50,8 @@ enum class BinOpKind {
 
 struct Param {
   std::string name;
-  TypePtr type;
+  TypeExprPtr typeExpr;  // the annotation as written (parser)
+  TypePtr type;          // resolved by the checker
   bool labeled = false;  // declared with ~name:Type
   Span span{};
 };
@@ -54,7 +85,9 @@ struct Expr {
   std::vector<ExprPtr> items;
   // App only: label per argument, parallel to items[1..]; "" = positional.
   std::vector<std::string> argLabels;
-  // Let only: the local binding's annotation.
+  // Let only: the local binding's annotation as written (parser) and as
+  // resolved (checker).
+  TypeExprPtr declTypeExpr;
   TypePtr declType;
   // Lambda only: the anonymous function's parameters.
   std::vector<Param> params;
@@ -78,7 +111,8 @@ struct TopDef {
   std::string moduleName;      // Import / Open / ModuleAlias target
   std::string name;            // Let / ModuleAlias / ModuleDef
   std::vector<Param> params;   // Let (empty for constants)
-  TypePtr retType;             // Let; null for `let _ = ...` (implied unit)
+  TypeExprPtr retTypeExpr;     // Let: annotation as written; null for `let _`
+  TypePtr retType;             // Let: resolved by the checker
   ExprPtr body;                // Let
   std::vector<TopDef> defs;    // ModuleDef body (lets, opens, nested modules)
 };

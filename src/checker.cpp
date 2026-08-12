@@ -134,11 +134,10 @@ class ModuleChecker {
       }
     }
   }
-  // Signature variables ('a) are parser-assigned rigid ids (negative);
-  // every use site instantiates a stored signature with fresh
-  // non-negative ids so two polymorphic calls - or a partial application
-  // fed into another polymorphic call - can never capture each other's
-  // variables.
+  // Signature variables ('a) are rigid ids (negative); every use site
+  // instantiates a stored signature with fresh non-negative ids so two
+  // polymorphic calls - or a partial application fed into another
+  // polymorphic call - can never capture each other's variables.
   int nextFreshVar_ = 0;
 
   struct Abort {};  // stop checking the current definition
@@ -148,11 +147,109 @@ class ModuleChecker {
     throw Abort{};
   }
 
+  // --- Type resolution ----------------------------------------------------
+  //
+  // Annotations arrive from the parser as surface TypeExprs; they resolve
+  // here, where scope is known. Type variables are scoped to one
+  // top-level definition: every 'a in its parameters, return type,
+  // lambda parameters and local annotations is the same rigid variable,
+  // and the next definition starts over. Ids stay unique module-wide
+  // (nextTypeVarSeq_ never resets) so a stored signature can never be
+  // confused with another definition's.
+  std::map<std::string, TypePtr> defTypeVars_;
+  int nextTypeVarSeq_ = 0;
+  // Set when any resolution in the current definition failed. Resolution
+  // errors do not abort on the spot: every annotation still gets a
+  // (poison) type so the LSP and the fallback signature stay usable.
+  bool typeResolveFailed_ = false;
+
+  // Records the diagnostic and yields a placeholder that behaves like an
+  // opaque type variable, so one bad name doesn't cascade.
+  TypePtr typeError(Span span, std::string msg, const std::string& name) {
+    diags_.error(mod_.parsed.path, span, std::move(msg));
+    typeResolveFailed_ = true;
+    return tRigidVar(nextTypeVarSeq_++, name);
+  }
+
+  TypePtr resolveType(const TypeExpr& te) {
+    switch (te.kind) {
+      case TypeExpr::Kind::Var: {
+        auto it = defTypeVars_.find(te.name);
+        if (it != defTypeVars_.end()) return it->second;
+        TypePtr t = tRigidVar(nextTypeVarSeq_++, te.name);
+        defTypeVars_.emplace(te.name, t);
+        return t;
+      }
+      case TypeExpr::Kind::Tuple: {
+        std::vector<TypePtr> items;
+        for (auto& i : te.items) items.push_back(resolveType(*i));
+        return tTuple(std::move(items));
+      }
+      case TypeExpr::Kind::Fun: {
+        std::vector<TypePtr> ps;
+        for (auto& i : te.items) ps.push_back(resolveType(*i));
+        return tFun(std::move(ps), te.labels, resolveType(*te.ret));
+      }
+      case TypeExpr::Kind::Name:
+        return resolveTypeName(te);
+    }
+    return typeError(te.span, "internal error: unknown type syntax", "?");
+  }
+
+  TypePtr resolveTypeName(const TypeExpr& te) {
+    const std::string& n = te.name;
+    std::string shown = te.moduleName.empty() ? n : te.moduleName + "." + n;
+    if (te.moduleName.empty()) {
+      // The built-in roster. Atoms take no parameter; Signal/Sample/list
+      // take exactly one, written postfix.
+      bool atom = n == "Scalar" || n == "Int" || n == "Vector" ||
+                  n == "Timestamp" || n == "String" || n == "Bool" ||
+                  n == "unit";
+      bool unary = n == "Signal" || n == "Sample" || n == "list";
+      if (atom) {
+        if (!te.args.empty())
+          return typeError(te.span,
+                           "type '" + n + "' does not take a parameter", n);
+        if (n == "Scalar") return tScalar();
+        if (n == "Int") return tInt();
+        if (n == "Vector") return tVector();
+        if (n == "Timestamp") return tTimestamp();
+        if (n == "String") return tString();
+        if (n == "Bool") return tBool();
+        return tUnit();
+      }
+      if (unary) {
+        if (te.args.size() != 1)
+          return typeError(te.span,
+                           "type '" + n + "' expects an element type, "
+                           "written postfix (as in 'Scalar " + n + "')", n);
+        TypePtr elem = resolveType(*te.args[0]);
+        if (n == "Signal") return tSignal(std::move(elem));
+        if (n == "Sample") return tSample(std::move(elem));
+        return tList(std::move(elem));
+      }
+    }
+    return typeError(te.span, "unknown type '" + shown + "'", n);
+  }
+
+  // Resolves a definition's declared signature (parameters and return
+  // type). Runs before anything else looks at the definition so the
+  // resolved types are in place even when checking later aborts.
+  void resolveDefSignature(TopDef& def) {
+    defTypeVars_.clear();
+    typeResolveFailed_ = false;
+    for (auto& p : def.params)
+      if (p.typeExpr) p.type = resolveType(*p.typeExpr);
+    if (def.retTypeExpr) def.retType = resolveType(*def.retTypeExpr);
+    if (typeResolveFailed_) throw Abort{};
+  }
+
   void checkDef(TopDef& def, const std::string& prefix) {
     // Inside `module A = struct`, `x` is stored under "A.x": one flat
     // per-file map, with the dotted path as the canonical name.
     const std::string stored = prefix + def.name;
     try {
+      resolveDefSignature(def);
       std::map<std::string, TypePtr> env;
       for (auto& p : def.params) {
         if (env.count(p.name))
@@ -316,6 +413,8 @@ class ModuleChecker {
         return tTuple(std::move(items));
       }
       case Expr::Kind::Let: {
+        if (!e.declType && e.declTypeExpr)
+          e.declType = resolveType(*e.declTypeExpr);
         TypePtr boundT = check(*e.items[0], env);
         // Same rule as top-level bindings: a var-carrying partial
         // application resolves against the annotation.
@@ -345,6 +444,8 @@ class ModuleChecker {
         // Params bind (shadowing) for the body only; the result type is
         // the function of the annotated params to the synthesized body
         // type, labels included - the same shape defFunType builds.
+        for (auto& p : e.params)
+          if (!p.type && p.typeExpr) p.type = resolveType(*p.typeExpr);
         for (size_t i = 0; i < e.params.size(); i++)
           for (size_t j = 0; j < i; j++)
             if (e.params[i].name == e.params[j].name)

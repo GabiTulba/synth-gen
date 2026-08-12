@@ -2295,3 +2295,51 @@ TEST(checker_type_name_function_formatting) {
   CHECK(typeName(prog.modules.front().defTypes.at("Math.exp")) ==
         "x:'a -> 'a");
 }
+
+TEST(checker_type_variables_are_scoped_per_definition) {
+  // Same spelling in two definitions: two distinct rigid variables. The
+  // parser only records the surface name; the checker allocates ids
+  // per definition.
+  TempProject tp;
+  std::string f = tp.write("t.synth",
+                           "let f ~x:'a : 'a = x ;;\n"
+                           "let g ~y:'a : 'a = y ;;");
+  DiagnosticBag diags;
+  Program prog = checkProject({f}, diags);
+  CHECK(!diags.hasErrors());
+  const auto& types = userMod(prog).defTypes;
+  const TypePtr& fT = types.at("f");
+  const TypePtr& gT = types.at("g");
+  CHECK(fT->ret->kind == Type::Kind::Var);
+  CHECK(isRigidVar(fT->ret));
+  CHECK(fT->ret->var != gT->ret->var);
+  // Within one definition the spelling ties parameter and result.
+  CHECK(fT->items[0]->var == fT->ret->var);
+}
+
+TEST(checker_unknown_type_name) {
+  TempProject tp;
+  std::string f = tp.write("t.synth", "let x : Nope = 1.0 ;;");
+  DiagnosticBag diags;
+  checkProject({f}, diags);
+  CHECK(diags.hasErrors());
+  bool found = false;
+  for (auto& d : diags.items)
+    if (d.message.find("unknown type 'Nope'") != std::string::npos)
+      found = true;
+  CHECK(found);
+}
+
+TEST(checker_builtin_type_arity) {
+  // An atom type does not take a parameter; Signal needs one.
+  TempProject tp;
+  std::string f = tp.write("t.synth", "let x : Timestamp Scalar = 1.0 ;;");
+  DiagnosticBag d1;
+  checkProject({f}, d1);
+  CHECK(d1.hasErrors());
+  TempProject tp2;
+  std::string g = tp2.write("t.synth", "let x : Signal = 1.0 ;;");
+  DiagnosticBag d2;
+  checkProject({g}, d2);
+  CHECK(d2.hasErrors());
+}

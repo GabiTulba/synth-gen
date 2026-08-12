@@ -598,13 +598,17 @@ void collectExprScope(const Expr& e, uint32_t off, Scope& sc) {
     case Expr::Kind::Let:
       collectExprScope(*e.items[0], off, sc);
       if (covers(e.items[1]->span, off)) {
-        sc.values[e.name] = e.declType;
+        // The annotation can be unresolved (null) when the enclosing
+        // definition's own signature failed to check; skip it rather
+        // than surface a typeless entry.
+        if (e.declType) sc.values[e.name] = e.declType;
         collectExprScope(*e.items[1], off, sc);
       }
       return;
     case Expr::Kind::Lambda:
       if (covers(e.items[0]->span, off)) {
-        for (auto& p : e.params) sc.values[p.name] = p.type;
+        for (auto& p : e.params)
+          if (p.type) sc.values[p.name] = p.type;
         collectExprScope(*e.items[0], off, sc);
       }
       return;
@@ -655,7 +659,8 @@ void collectScope(const Program& prog, const CheckedModule& cm,
         if (it != cm.defTypes.end() && d.name != "_")
           sc.values[d.name] = it->second;
         if (inside) {
-          for (auto& p : d.params) sc.values[p.name] = p.type;
+          for (auto& p : d.params)
+            if (p.type) sc.values[p.name] = p.type;
           if (d.body) collectExprScope(*d.body, off, sc);
           return;
         }

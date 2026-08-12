@@ -44,11 +44,6 @@ TypePtr tSample(TypePtr elem) {
   t->elem = std::move(elem);
   return t;
 }
-TypePtr tList(TypePtr elem) {
-  auto t = std::make_shared<Type>(Type::Kind::List);
-  t->elem = std::move(elem);
-  return t;
-}
 TypePtr tTuple(std::vector<TypePtr> items) {
   auto t = std::make_shared<Type>(Type::Kind::Tuple);
   t->items = std::move(items);
@@ -101,7 +96,6 @@ bool anyVar(const TypePtr& t, Pred pred) {
       return pred(t->var);
     case Type::Kind::Signal:
     case Type::Kind::Sample:
-    case Type::Kind::List:
       return anyVar(t->elem, pred);
     case Type::Kind::Tuple:
     case Type::Kind::Fun:
@@ -140,7 +134,6 @@ bool typeEquals(const TypePtr& a, const TypePtr& b) {
       return true;
     case Type::Kind::Signal:
     case Type::Kind::Sample:
-    case Type::Kind::List:
       return typeEquals(a->elem, b->elem);
     case Type::Kind::Tuple:
       if (a->items.size() != b->items.size()) return false;
@@ -187,7 +180,6 @@ std::string typeName(const TypePtr& t) {
     case Type::Kind::Unit: return "unit";
     case Type::Kind::Signal: return nestedTypeName(t->elem) + " Signal";
     case Type::Kind::Sample: return nestedTypeName(t->elem) + " Sample";
-    case Type::Kind::List: return nestedTypeName(t->elem) + " list";
     case Type::Kind::Tuple: {
       std::string s = "(";
       for (size_t i = 0; i < t->items.size(); i++) {
@@ -240,7 +232,6 @@ bool occurs(int v, const TypePtr& t, const Subst& subst) {
     }
     case Type::Kind::Signal:
     case Type::Kind::Sample:
-    case Type::Kind::List:
       return occurs(v, t->elem, subst);
     case Type::Kind::Tuple:
     case Type::Kind::Fun:
@@ -296,7 +287,6 @@ bool unify(const TypePtr& sig, const TypePtr& concrete, Subst& subst) {
       return true;
     case Type::Kind::Signal:
     case Type::Kind::Sample:
-    case Type::Kind::List:
       return unify(sig->elem, concrete->elem, subst);
     case Type::Kind::Tuple:
       if (sig->items.size() != concrete->items.size()) return false;
@@ -332,7 +322,6 @@ TypePtr applySubst(const TypePtr& t, const Subst& subst) {
     }
     case Type::Kind::Signal: return tSignal(applySubst(t->elem, subst));
     case Type::Kind::Sample: return tSample(applySubst(t->elem, subst));
-    case Type::Kind::List: return tList(applySubst(t->elem, subst));
     case Type::Kind::Tuple: {
       std::vector<TypePtr> items;
       for (auto& x : t->items) items.push_back(applySubst(x, subst));

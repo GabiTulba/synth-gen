@@ -74,14 +74,13 @@ struct Type {
     Unit,
     Signal,   // elem
     Sample,   // elem
-    List,     // elem
     Tuple,    // items
     Fun,      // items = params, ret
     Var,      // var id (primitive signatures only)
     Named,    // decl + items = type arguments; equality is nominal
   };
   Kind kind;
-  TypePtr elem;                 // Signal / Sample / List
+  TypePtr elem;                 // Signal / Sample
   std::vector<TypePtr> items;   // Tuple members, Fun params or Named args
   const TypeDecl* decl = nullptr;  // Named
   // Fun: per-param labels, "" = positional. May be empty (all positional).
@@ -108,7 +107,6 @@ TypePtr tBool();
 TypePtr tUnit();
 TypePtr tSignal(TypePtr elem);
 TypePtr tSample(TypePtr elem);
-TypePtr tList(TypePtr elem);
 TypePtr tTuple(std::vector<TypePtr> items);
 TypePtr tNamed(const TypeDecl* decl, std::vector<TypePtr> args);
 TypePtr tFun(std::vector<TypePtr> params, TypePtr ret);

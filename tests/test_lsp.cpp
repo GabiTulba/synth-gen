@@ -4,11 +4,13 @@
 
 #include <filesystem>
 #include <fstream>
+#include <sstream>
 #include <string>
 #include <vector>
 
 #include "checker.hpp"
 #include "json.hpp"
+#include "library.hpp"
 #include "test_framework.hpp"
 
 using namespace synth;
@@ -724,4 +726,22 @@ TEST(lsp_formatting_record_and_type_syntax) {
   json::Value clean =
       resultOf(server, docRequest(3, "textDocument/formatting", uri));
   CHECK(clean.array.empty());
+}
+
+TEST(lsp_formatting_bundled_stdlib_is_a_fixed_point) {
+  // docs/tooling.md: the shipped stdlib (like examples/) is already
+  // formatted - the formatter must propose no edits for it.
+  fs::path lib =
+      fs::path(bundledStdlibDir()) / "core" / kLibraryInterfaceFile;
+  std::ifstream in(lib);
+  std::stringstream ss;
+  ss << in.rdbuf();
+  std::string text = ss.str();
+  CHECK(!text.empty());
+  std::string uri = uriFor(lib);
+  LspServer server;
+  server.onMessage(didOpen(uri, text));
+  json::Value edits =
+      resultOf(server, docRequest(2, "textDocument/formatting", uri));
+  CHECK(edits.array.empty());
 }

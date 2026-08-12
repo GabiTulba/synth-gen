@@ -55,6 +55,15 @@ struct Program {
       if (m.parsed.name == name) return &m;
     return nullptr;
   }
+
+  // A type the compiler itself knows from the bundled Core library
+  // (`list` today): its declaration once Core is checked.
+  const TypeDecl* coreTypeDecl(const std::string& name) const {
+    const CheckedModule* core = find("Core");
+    if (!core) return nullptr;
+    auto it = core->typeDecls.find(name);
+    return it != core->typeDecls.end() ? it->second.get() : nullptr;
+  }
 };
 
 // Library context for a check: the discovered registry, the library whose

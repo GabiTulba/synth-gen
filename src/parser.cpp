@@ -201,7 +201,12 @@ class Parser {
       }
       expect(Tok::RParen, "')' after type parameters");
     }
-    const Token& name = expect(Tok::UpIdent, "type name (capitalized)");
+    // Declared type names are capitalized; `list` is the grandfathered
+    // lowercase spelling (Core declares it).
+    if (!at(Tok::UpIdent) && !(at(Tok::Ident) && peek().text == "list"))
+      fail(peek().span, std::string("expected a type name (capitalized), "
+                                    "found ") + tokenName(peek().kind));
+    const Token& name = advance();
     d.name = name.text;
     for (size_t i = 0; i < d.typeParams.size(); i++)
       for (size_t j = 0; j < i; j++)

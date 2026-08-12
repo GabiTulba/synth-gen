@@ -819,13 +819,22 @@ let x : Scalar = 2.0 ;;
   CHECK(diags.hasErrors());
 }
 
-TEST(checker_empty_list_rejected) {
+TEST(checker_empty_list_under_annotation) {
+  // Lists are a polymorphic Core variant, so [] is legal wherever an
+  // annotation (or the surrounding call) determines the element type.
   TempProject tp;
   std::string f =
-      tp.write("bad.synth", "open Core open Core.Osc open Core.Fx open Core.Arrange open Core.Render open Core.Io open Core.Time open Core.Sig open Core.Math\nlet xs : Scalar list = [] ;;");
+      tp.write("ok.synth", "let xs : Scalar list = [] ;;\n"
+                           "let n : Int =\n"
+                           "  match xs with\n"
+                           "  | Nil -> 0\n"
+                           "  | Cons (_, _) -> 1 ;;");
   DiagnosticBag diags;
-  checkProject({f}, diags);
-  CHECK(diags.hasErrors());
+  Program prog = checkProject({f}, diags);
+  for (auto& d : diags.items)
+    std::cerr << renderDiagnostic(d, userMod(prog).parsed.source);
+  CHECK(!diags.hasErrors());
+  CHECK(typeName(userMod(prog).defTypes.at("xs")) == "Scalar list");
 }
 
 TEST(checker_modulation_primitives) {
@@ -1080,8 +1089,7 @@ let y : Scalar Signal = mix_all (List.map (lowpass ~cutoff:600.0) [saw 220.0]) ;
     std::cerr << renderDiagnostic(d, prog.modules.empty() ? std::string{}
                                        : userMod(prog).parsed.source);
   CHECK(!diags.hasErrors());
-  CHECK(typeEquals(userMod(prog).defTypes.at("xs"),
-                   tList(tSignal(tScalar()))));
+  CHECK(typeName(userMod(prog).defTypes.at("xs")) == "Scalar Signal list");
 }
 
 TEST(checker_computed_callee) {
@@ -1281,10 +1289,9 @@ let sigs : Scalar Signal list = List.init ~n:4 ~f:harmonic ;;
     std::cerr << renderDiagnostic(d, prog.modules.empty() ? std::string{}
                                        : userMod(prog).parsed.source);
   CHECK(!diags.hasErrors());
-  CHECK(typeEquals(userMod(prog).defTypes.at("stack"),
-                   tList(tSignal(tScalar()))));
-  CHECK(typeEquals(userMod(prog).defTypes.at("beats"),
-                   tList(tTimestamp())));
+  CHECK(typeName(userMod(prog).defTypes.at("stack")) ==
+        "Scalar Signal list");
+  CHECK(typeName(userMod(prog).defTypes.at("beats")) == "Timestamp list");
 }
 
 TEST(checker_list_builder_type_errors) {
@@ -1569,7 +1576,7 @@ let steps : Timestamp list = time_steps ~start:lead ~step:beat ~count:4 ;;
   const auto& types = userMod(prog).defTypes;
   for (const char* n : {"beat", "lead", "tail"})
     CHECK(typeEquals(types.at(n), tTimestamp()));
-  CHECK(typeEquals(types.at("steps"), tList(tTimestamp())));
+  CHECK(typeName(types.at("steps")) == "Timestamp list");
 }
 
 TEST(checker_timestamp_conversion_type_errors) {
@@ -2136,11 +2143,13 @@ TEST(checker_core_is_a_real_library_of_externals) {
   // ...nothing lives at the top level...
   for (auto& [name, type] : core->defTypes)
     CHECK(name.find('.') != std::string::npos);
-  // ...and every definition is an external binding.
+  // ...and every definition outside the (SynthGraph-implemented) List
+  // module is an external binding.
   std::function<bool(const std::vector<TopDef>&)> allExternal =
       [&](const std::vector<TopDef>& ds) {
         for (auto& d : ds) {
-          if (d.kind == TopDef::Kind::ModuleDef && !allExternal(d.defs))
+          if (d.kind == TopDef::Kind::ModuleDef && d.name != "List" &&
+              !allExternal(d.defs))
             return false;
           if (d.kind == TopDef::Kind::Let &&
               d.body->kind != Expr::Kind::External)
@@ -2149,6 +2158,8 @@ TEST(checker_core_is_a_real_library_of_externals) {
         return true;
       };
   CHECK(allExternal(core->parsed.defs));
+  // Core also declares the ambient list type itself.
+  CHECK(core->typeDecls.count("list") == 1);
 }
 
 TEST(checker_int_arithmetic_and_comparisons) {
@@ -2177,7 +2188,7 @@ let xs : Int list = [1; 2; 3] ;;
     CHECK(typeEquals(types.at(n), tInt()));
   CHECK(typeEquals(types.at("b"), tBool()));
   CHECK(typeEquals(types.at("s"), tScalar()));
-  CHECK(typeEquals(types.at("xs"), tList(tInt())));
+  CHECK(typeName(types.at("xs")) == "Int list");
 }
 
 TEST(checker_int_does_not_mix_with_scalar) {
@@ -2281,8 +2292,6 @@ TEST(checker_type_name_function_formatting) {
   CHECK(typeName(f) == "x:Scalar -> Scalar");
   TypePtr hof = tFun({f, tScalar()}, {"f", ""}, tScalar());
   CHECK(typeName(hof) == "f:(x:Scalar -> Scalar) -> Scalar -> Scalar");
-  CHECK(typeName(tList(tFun({tScalar()}, tScalar()))) ==
-        "(Scalar -> Scalar) list");
   CHECK(typeName(tSignal(tFun({tScalar()}, tScalar()))) ==
         "(Scalar -> Scalar) Signal");
 
@@ -2872,4 +2881,39 @@ let rec bad x:'a : 'a = bad 1.0 ;;
   DiagnosticBag d2;
   checkProject({g}, d2);
   CHECK(d2.hasErrors());
+}
+
+TEST(checker_lists_are_matchable_variants) {
+  TempProject tp;
+  std::string f = tp.write("t.synth", R"(
+let rec sum xs:Scalar list : Scalar =
+  match xs with
+  | Nil -> 0.0
+  | Cons (x, rest) -> x + sum rest ;;
+let s : Scalar = sum [1.0; 2.0; 3.0] ;;
+let manual : Scalar list = Cons (1.0, Cons (2.0, Nil)) ;;
+let head xs:'a list ~fallback:'a : 'a =
+  match xs with
+  | Nil -> fallback
+  | Cons (x, _) -> x ;;
+let h : Scalar = head manual ~fallback:0.0 ;;
+)");
+  DiagnosticBag diags;
+  Program prog = checkProject({f}, diags);
+  for (auto& d : diags.items)
+    std::cerr << renderDiagnostic(d, userMod(prog).parsed.source);
+  CHECK(!diags.hasErrors());
+  CHECK(typeName(userMod(prog).defTypes.at("manual")) == "Scalar list");
+}
+
+TEST(checker_undetermined_empty_list_is_an_error) {
+  // With no annotation and no use, [] leaves its element unresolved -
+  // the leftover-free-variable rule catches it at the binding.
+  TempProject tp;
+  std::string f = tp.write("t.synth",
+                           "let f x:'a list : Int = 0 ;;\n"
+                           "let n : Int = f [] ;;");
+  DiagnosticBag ok;
+  checkProject({f}, ok);
+  CHECK(!ok.hasErrors());  // the call may leave 'a free: result is Int
 }

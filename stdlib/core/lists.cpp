@@ -3,44 +3,13 @@
 
 #include "util.hpp"
 
-// The Core.List combinators and builders, plus the Timestamp sequence
-// helpers that drive rhythm patterns.
+// The Timestamp sequence helpers that drive rhythm patterns. (The
+// Core.List combinators are written in SynthGraph itself, in
+// lib.synth - lists are ordinary Cons/Nil variants there; they cross
+// this boundary as plain vectors.)
 
 using synth::core::countArg;
 using synth::ext::Value;
-
-SYNTH_EXTERNAL(map) {
-  std::vector<Value> out;
-  const Value& f = args[0];
-  for (auto& x : args[1].asList()) out.push_back(ctx.apply(f, {x}));
-  *result = Value::list(std::move(out));
-  return true;
-}
-
-SYNTH_EXTERNAL(fold) {
-  const Value& f = args[0];
-  Value acc = args[1];
-  for (auto& x : args[2].asList()) acc = ctx.apply(f, {acc, x});
-  *result = std::move(acc);
-  return true;
-}
-
-SYNTH_EXTERNAL(init) {
-  std::int64_t n = countArg(args[0], "List.init");
-  std::vector<Value> out;
-  for (std::int64_t i = 0; i < n; i++)
-    out.push_back(ctx.apply(args[1], {Value::integer(i)}));
-  *result = Value::list(std::move(out));
-  return true;
-}
-
-SYNTH_EXTERNAL(repeat) {
-  std::int64_t n = countArg(args[0], "List.repeat");
-  std::vector<Value> out;
-  for (std::int64_t i = 0; i < n; i++) out.push_back(args[1]);
-  *result = Value::list(std::move(out));
-  return true;
-}
 
 SYNTH_EXTERNAL(time_steps) {
   double start = args[0].asTime();

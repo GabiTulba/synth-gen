@@ -32,8 +32,28 @@ std::string readFileOrEmpty(const fs::path& p) {
   return ss.str();
 }
 
-ext::Value toExt(const Value& v) {
+ext::Value toExt(const Value& v, const CoreListInfo& list) {
   ext::Value out;
+  // A Core list value (a Cons/Nil chain) flattens to an ext-level list,
+  // so implementations keep seeing plain vectors.
+  if (auto* var = std::get_if<VariantV>(&v.v);
+      var && list && var->decl == list.decl) {
+    out.kind = ext::Value::Kind::List;
+    const VariantV* cur = var;
+    for (;;) {
+      if (cur->ctor == list.nilIndex) break;
+      const TupleV* cell =
+          cur->payload ? std::get_if<TupleV>(&cur->payload->v) : nullptr;
+      if (!cell || cell->items.size() != 2)
+        throw EvalError("internal error: malformed list value");
+      out.items.push_back(toExt(cell->items[0], list));
+      const VariantV* next = std::get_if<VariantV>(&cell->items[1].v);
+      if (!next)
+        throw EvalError("internal error: malformed list value");
+      cur = next;
+    }
+    return out;
+  }
   if (std::holds_alternative<UnitV>(v.v)) {
     out.kind = ext::Value::Kind::Unit;
   } else if (auto* s = std::get_if<ScalarV>(&v.v)) {
@@ -59,12 +79,9 @@ ext::Value toExt(const Value& v) {
       e.num = c;
       out.items.push_back(std::move(e));
     }
-  } else if (auto* list = std::get_if<ListV>(&v.v)) {
-    out.kind = ext::Value::Kind::List;
-    for (auto& x : list->items) out.items.push_back(toExt(x));
   } else if (auto* tup = std::get_if<TupleV>(&v.v)) {
     out.kind = ext::Value::Kind::Tuple;
-    for (auto& x : tup->items) out.items.push_back(toExt(x));
+    for (auto& x : tup->items) out.items.push_back(toExt(x, list));
   } else if (auto* sig = std::get_if<SigPtr>(&v.v)) {
     out.kind = ext::Value::Kind::Signal;
     out.sig = *sig;
@@ -80,7 +97,7 @@ ext::Value toExt(const Value& v) {
   return out;
 }
 
-Value fromExt(const ext::Value& v) {
+Value fromExt(const ext::Value& v, const CoreListInfo& list) {
   switch (v.kind) {
     case ext::Value::Kind::Unit: return Value{UnitV{}};
     case ext::Value::Kind::Scalar: return Value{ScalarV{v.num}};
@@ -94,13 +111,22 @@ Value fromExt(const ext::Value& v) {
       return Value{std::move(out)};
     }
     case ext::Value::Kind::List: {
-      ListV out;
-      for (auto& x : v.items) out.items.push_back(fromExt(x));
-      return Value{std::move(out)};
+      if (!list)
+        throw EvalError("internal error: Core's list type is not loaded");
+      Value out{VariantV{list.decl, list.nilIndex, nullptr}};
+      for (auto it = v.items.rbegin(); it != v.items.rend(); ++it) {
+        TupleV cell;
+        cell.items.push_back(fromExt(*it, list));
+        cell.items.push_back(std::move(out));
+        out = Value{VariantV{list.decl, list.consIndex,
+                             std::make_shared<Value>(
+                                 Value{std::move(cell)})}};
+      }
+      return out;
     }
     case ext::Value::Kind::Tuple: {
       TupleV out;
-      for (auto& x : v.items) out.items.push_back(fromExt(x));
+      for (auto& x : v.items) out.items.push_back(fromExt(x, list));
       return Value{std::move(out)};
     }
     case ext::Value::Kind::Signal:
@@ -251,8 +277,9 @@ ExternalFn loadUserExternal(const std::string& cppPath,
                        std::vector<ext::Value> a) -> ext::Value {
       std::vector<Value> hostArgs;
       hostArgs.reserve(a.size());
-      for (auto& x : a) hostArgs.push_back(fromExt(x));
-      return toExt(svc.apply(fromExt(fn), std::move(hostArgs)));
+      for (auto& x : a) hostArgs.push_back(fromExt(x, svc.coreList));
+      return toExt(svc.apply(fromExt(fn, svc.coreList), std::move(hostArgs)),
+                   svc.coreList);
     };
     ctx.loadAudio = svc.loadAudio;
     ctx.render = [&svc](ext::RenderDecl d) {
@@ -263,7 +290,7 @@ ExternalFn loadUserExternal(const std::string& cppPath,
 
     std::vector<ext::Value> extArgs;
     extArgs.reserve(args.size());
-    for (auto& a : args) extArgs.push_back(toExt(a));
+    for (auto& a : args) extArgs.push_back(toExt(a, svc.coreList));
     ext::Value result;
     std::string error;
     bool ok;
@@ -279,7 +306,7 @@ ExternalFn loadUserExternal(const std::string& cppPath,
       throw EvalError("external '" + name + "' (" + cppPath + "): " +
                       (error.empty() ? "implementation reported failure"
                                      : error));
-    return fromExt(result);
+    return fromExt(result, svc.coreList);
   };
 }
 

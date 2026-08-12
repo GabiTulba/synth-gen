@@ -1147,18 +1147,20 @@ let _ = mix_all (List.repeat 1 (sine 1.0)) |> sample ~from:0s ~to:10ms
   CHECK(!rb.ok);
   CHECK(rb.diags.hasErrors());
 
-  // A negative count types fine and is still a build (evaluation) error.
+  // A negative count types fine and yields the empty list (List.init
+  // counts up from 0, so nothing below n=1 produces an element).
   TempDir neg;
   neg.write("p.synth", R"(
 open Core open Core.Osc open Core.Fx open Core.Arrange open Core.Render open Core.Io open Core.Time open Core.Sig open Core.Math
 let xs : Scalar list = List.repeat (0 - 2) 1.0 ;;
-let _ = mix_all (List.repeat 1 (sine 1.0)) |> sample ~from:0s ~to:10ms
+let n : Int = List.fold ~f:(fun acc:Int x:Scalar -> acc + 1) ~init:0 ~xs:xs ;;
+let _ = mix_all (List.repeat (n + 1) (sine 1.0)) |> sample ~from:0s ~to:10ms
         |> render ~name:"x" ~rate:8000.0 ;;
 )");
   neg.write("build.json", projectManifest("negrep", {"p.synth"}));
   BuildResult rn = buildProject(neg.dir.string());
-  CHECK(!rn.ok);
-  CHECK(rn.diags.hasErrors());
+  for (auto& d : rn.diags.items) std::cerr << d.message << "\n";
+  CHECK(rn.ok);
 }
 
 TEST(build_let_in_matches_flat_version) {
@@ -2644,4 +2646,61 @@ let use : Int = fact 5 ;;
   uint64_t h2 = defClosureHash(prog, *m, *fact);
   CHECK(h1 == h2);  // terminates, deterministically
   CHECK(defClosureHash(prog, *m, *use) != h1);
+}
+
+TEST(build_synthgraph_list_functions) {
+  // The List module is written in SynthGraph; map/fold/init/repeat all
+  // evaluate, lists cross the external boundary both ways, and match
+  // takes them apart.
+  TempDir tp;
+  tp.write("song.synth", R"(
+open Core open Core.Osc open Core.Arrange open Core.Render open Core.Time open Core.Math
+let rec sum xs:Scalar list : Scalar =
+  match xs with
+  | Nil -> 0.0
+  | Cons (x, rest) -> x + sum rest ;;
+let doubled : Scalar list = List.map ~f:(fun x:Scalar -> x * 2.0) ~xs:[1.0; 2.0; 3.0] ;;
+let total : Scalar = sum doubled ;;
+let folded : Scalar = List.fold ~f:(fun a:Scalar x:Scalar -> a + x) ~init:0.0 ~xs:doubled ;;
+let harmonics : Scalar Signal list =
+  List.init ~n:3 ~f:(fun i:Int -> sine (110.0 * (to_scalar i + 1.0))) ;;
+let steps : Timestamp list = time_steps ~start:0s ~step:100ms ~count:3 ;;
+let first_step : Timestamp =
+  match steps with
+  | Nil -> 0s
+  | Cons (t, _) -> t ;;
+let amp : Scalar = (total + folded) / 24.0 ;;
+let out : Scalar Signal = mix_all harmonics * amp ;;
+let _ = render "lists" 48000.0 (sample out first_step 50ms) ;;
+)");
+  tp.write("build.json", projectManifest("lists-demo", {"song.synth"}));
+  BuildResult r = buildProject(tp.dir.string());
+  for (auto& d : r.diags.items) std::cerr << d.message << "\n";
+  CHECK(r.ok);
+  CHECK(r.targets.size() == 1);
+  CHECK(r.targets[0].ok);
+  // total = 12, folded = 12 -> amp = 1.0; three sines peak near 3.0
+  // scaled by 1.0 via mix_all's normalization behavior - just require
+  // non-silence.
+  WavData w =
+      readWav((tp.dir / "_build" / "artifacts" / "lists.wav").string());
+  double peak = 0;
+  for (auto s : w.channels[0]) peak = std::max(peak, std::fabs(s));
+  CHECK(peak > 0.1);
+}
+
+TEST(build_long_list_map_within_recursion_limit) {
+  // A list in the thousands maps fine (each element is one recursion
+  // level in the SynthGraph List.map).
+  TempDir tp;
+  tp.write("song.synth", R"(
+open Core open Core.Time
+let steps : Timestamp list = time_steps ~start:0s ~step:1ms ~count:2000 ;;
+let same : Timestamp list = List.map ~f:(fun t:Timestamp -> t) ~xs:steps ;;
+let n : Int = List.fold ~f:(fun a:Int x:Timestamp -> a + 1) ~init:0 ~xs:same ;;
+)");
+  tp.write("build.json", projectManifest("long-demo", {"song.synth"}));
+  BuildResult r = buildProject(tp.dir.string());
+  for (auto& d : r.diags.items) std::cerr << d.message << "\n";
+  CHECK(r.ok);
 }

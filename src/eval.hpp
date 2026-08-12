@@ -50,7 +50,6 @@ struct LambdaV {
   std::shared_ptr<const std::map<std::string, Value>> captured;
   std::shared_ptr<std::map<std::string, Value>> bound;  // by param name
 };
-struct ListV { std::vector<Value> items; };
 struct TupleV { std::vector<Value> items; };
 // A record value: fields in DECLARATION order (projection is by index
 // into the declaration's field list, whatever order a literal wrote).
@@ -68,8 +67,18 @@ struct VariantV {
 
 struct Value {
   std::variant<UnitV, ScalarV, IntV, TimeV, BoolV, StringV, VectorV, SigPtr,
-               SampleV, ListV, TupleV, FunV, LambdaV, RecordV, VariantV>
+               SampleV, TupleV, FunV, LambdaV, RecordV, VariantV>
       v;
+};
+
+// Core's list declaration and its constructor indexes: lists are
+// ordinary Cons/Nil variant values, and the external boundary flattens
+// them to (and rebuilds them from) ext-level lists with this.
+struct CoreListInfo {
+  const TypeDecl* decl = nullptr;
+  int nilIndex = 0;
+  int consIndex = 1;
+  explicit operator bool() const { return decl != nullptr; }
 };
 
 // A build target collected from a `render` call (§5.2): the name is the

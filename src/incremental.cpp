@@ -137,7 +137,6 @@ void collectNamedDecls(const TypePtr& t, const Program& prog, DepMap& out) {
     }
     case Type::Kind::Signal:
     case Type::Kind::Sample:
-    case Type::Kind::List:
       collectNamedDecls(t->elem, prog, out);
       return;
     case Type::Kind::Tuple:

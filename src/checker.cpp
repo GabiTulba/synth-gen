@@ -38,11 +38,25 @@ bool readFile(const fs::path& p, std::string& out) {
 
 class ModuleChecker {
  public:
-  ModuleChecker(CheckedModule& mod, const Program& prog, DiagnosticBag& diags)
-      : mod_(mod), prog_(prog), diags_(diags) {}
+  // `typeVarSeq` allocates rigid type-variable ids program-wide: one
+  // module's 'a and another's (or a Core declaration's parameter) must
+  // never share an id, or substitutions built across modules - a
+  // declaration's parameters against a use site's arguments - would
+  // conflate them.
+  ModuleChecker(CheckedModule& mod, const Program& prog,
+                DiagnosticBag& diags, int& typeVarSeq)
+      : mod_(mod), prog_(prog), diags_(diags), typeVarSeq_(typeVarSeq) {}
 
   void run() {
     frames_.emplace_back();  // the file-level scope
+    // The prelude: Core's `list` declaration (and its Nil/Cons
+    // constructors) are ambient, like the built-in type names - list
+    // literals and annotations need no import. Core itself declares
+    // them at the top of its interface, so nothing to seed there.
+    if (const TypeDecl* list = coreListDecl()) {
+      frames_.back().types["list"] = list;
+      bindDeclCtors(frames_.back(), list);
+    }
     checkDefs(mod_.parsed.defs, "");
   }
 
@@ -50,6 +64,7 @@ class ModuleChecker {
   CheckedModule& mod_;
   const Program& prog_;
   DiagnosticBag& diags_;
+  int& typeVarSeq_;
 
   // One lexical scope layer: the file's top level, or one `struct` body.
   // Lookup runs innermost frame outward; within a frame, later writes
@@ -85,6 +100,16 @@ class ModuleChecker {
       if (v != it->types.end()) return v->second;
     }
     return nullptr;
+  }
+
+  // Core's `list` declaration - through the program for ordinary
+  // modules, from our own declarations while Core itself is checking.
+  const TypeDecl* coreListDecl() const {
+    if (const TypeDecl* d = prog_.coreTypeDecl("list")) return d;
+    auto it = mod_.typeDecls.find("list");
+    return it != mod_.typeDecls.end() && mod_.parsed.name == "Core"
+               ? it->second.get()
+               : nullptr;
   }
 
   const std::pair<const TypeDecl*, int>* lookupCtor(
@@ -188,7 +213,7 @@ class ModuleChecker {
     defTypeVars_.clear();
     typeResolveFailed_ = false;
     for (auto& p : def.typeParams) {
-      TypePtr v = tRigidVar(nextTypeVarSeq_++, p);
+      TypePtr v = tRigidVar(typeVarSeq_++, p);
       defTypeVars_.emplace(p, v);
       decl->params.push_back(p);
       decl->paramVars.push_back(v);
@@ -241,10 +266,10 @@ class ModuleChecker {
   // top-level definition: every 'a in its parameters, return type,
   // lambda parameters and local annotations is the same rigid variable,
   // and the next definition starts over. Ids stay unique module-wide
-  // (nextTypeVarSeq_ never resets) so a stored signature can never be
+  // (typeVarSeq_ never resets, and is shared program-wide) so a stored
+  // signature can never be
   // confused with another definition's.
   std::map<std::string, TypePtr> defTypeVars_;
-  int nextTypeVarSeq_ = 0;
   // Set when any resolution in the current definition failed. Resolution
   // errors do not abort on the spot: every annotation still gets a
   // (poison) type so the LSP and the fallback signature stay usable.
@@ -258,7 +283,7 @@ class ModuleChecker {
   TypePtr typeError(Span span, std::string msg, const std::string& name) {
     diags_.error(mod_.parsed.path, span, std::move(msg));
     typeResolveFailed_ = true;
-    return tRigidVar(nextTypeVarSeq_++, name);
+    return tRigidVar(typeVarSeq_++, name);
   }
 
   TypePtr resolveType(TypeExpr& te) {
@@ -277,7 +302,7 @@ class ModuleChecker {
                                " (a type declaration's members may only "
                                "use its declared parameters)",
                            te.name);
-        TypePtr t = tRigidVar(nextTypeVarSeq_++, te.name);
+        TypePtr t = tRigidVar(typeVarSeq_++, te.name);
         defTypeVars_.emplace(te.name, t);
         return t;
       }
@@ -306,7 +331,9 @@ class ModuleChecker {
       bool atom = n == "Scalar" || n == "Int" || n == "Vector" ||
                   n == "Timestamp" || n == "String" || n == "Bool" ||
                   n == "unit";
-      bool unary = n == "Signal" || n == "Sample" || n == "list";
+      // `list` is not here: it is an ordinary (Core-declared, ambient)
+      // type declaration and resolves through the scope below.
+      bool unary = n == "Signal" || n == "Sample";
       if (atom) {
         if (!te.args.empty())
           return typeError(te.span,
@@ -326,8 +353,7 @@ class ModuleChecker {
                            "written postfix (as in 'Scalar " + n + "')", n);
         TypePtr elem = resolveType(*te.args[0]);
         if (n == "Signal") return tSignal(std::move(elem));
-        if (n == "Sample") return tSample(std::move(elem));
-        return tList(std::move(elem));
+        return tSample(std::move(elem));
       }
       if (const TypeDecl* decl = lookupTypeDecl(n)) {
         // Rewrite to canonical form (declaring module + stored dotted
@@ -1004,18 +1030,24 @@ class ModuleChecker {
                          typeName(thenT) + " vs " + typeName(elseT));
       }
       case Expr::Kind::ListLit: {
-        if (e.items.empty())
-          fail(e.span, "cannot determine the element type of an empty list "
-                       "(not supported in v1)");
-        TypePtr elem = check(*e.items[0], env);
-        for (size_t i = 1; i < e.items.size(); i++) {
-          TypePtr t = check(*e.items[i], env);
-          if (!typeEquals(t, elem))
-            fail(e.items[i]->span,
+        // [a; b; c] is sugar for a Cons chain of Core's list variant.
+        // An empty [] leaves the element as a free variable that the
+        // annotation (or the surrounding call) resolves - the same rule
+        // as a partial application.
+        const TypeDecl* list = coreListDecl();
+        if (!list)
+          fail(e.span, "internal error: Core's list type is not loaded");
+        TypePtr elemVar = tVar(nextFreshVar_++);
+        Subst subst;
+        for (auto& item : e.items) {
+          TypePtr t = check(*item, env);
+          if (!unify(elemVar, t, subst))
+            fail(item->span,
                  "list elements must all have the same type: expected " +
-                     typeName(elem) + ", got " + typeName(t));
+                     typeName(applySubst(elemVar, subst)) + ", got " +
+                     typeName(t));
         }
-        return tList(elem);
+        return tNamed(list, {applySubst(elemVar, subst)});
       }
       case Expr::Kind::TupleLit: {
         std::vector<TypePtr> items;
@@ -1707,7 +1739,6 @@ class ModuleChecker {
       case Type::Kind::Var: out.insert(t->var); break;
       case Type::Kind::Signal:
       case Type::Kind::Sample:
-      case Type::Kind::List:
         collectVarIds(t->elem, out);
         break;
       case Type::Kind::Tuple:
@@ -1727,7 +1758,6 @@ class ModuleChecker {
         return t->var == id ? typeName(t) : std::string{};
       case Type::Kind::Signal:
       case Type::Kind::Sample:
-      case Type::Kind::List:
         return varNameById(t->elem, id);
       case Type::Kind::Tuple:
       case Type::Kind::Fun:
@@ -1752,7 +1782,6 @@ class ModuleChecker {
         break;
       case Type::Kind::Signal:
       case Type::Kind::Sample:
-      case Type::Kind::List:
         collectFreshening(t->elem, renaming);
         break;
       case Type::Kind::Tuple:
@@ -2292,6 +2321,9 @@ Program checkProject(const std::vector<std::string>& rootFiles,
       };
   for (auto& [name, l] : byName) visit(name);
 
+  // Rigid type-variable ids are unique across the whole program (see
+  // ModuleChecker's constructor comment).
+  int typeVarSeq = 0;
   for (auto& name : order) {
     Loaded& l = byName.at(name);
     CheckedModule cm;
@@ -2301,7 +2333,7 @@ Program checkProject(const std::vector<std::string>& rootFiles,
     cm.libName = l.libName;
     cm.external = l.external;
     prog.modules.push_back(std::move(cm));
-    ModuleChecker(prog.modules.back(), prog, diags).run();
+    ModuleChecker(prog.modules.back(), prog, diags, typeVarSeq).run();
   }
   return prog;
 }

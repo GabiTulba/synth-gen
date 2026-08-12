@@ -47,6 +47,21 @@ class Interp {
   std::string extCacheDir_;                        // user external .so cache
   std::map<std::string, Env> globals_;             // module -> name -> value
   std::map<std::string, SigPtr> fileCache_;        // absolute path -> signal
+  mutable CoreListInfo coreList_;                  // resolved on first use
+
+  const CoreListInfo& coreList() const {
+    if (!coreList_) {
+      const TypeDecl* d = prog_.coreTypeDecl("list");
+      if (!d)
+        throw EvalError("internal error: Core's list type is not loaded");
+      coreList_.decl = d;
+      for (size_t i = 0; i < d->ctors.size(); i++) {
+        if (d->ctors[i].name == "Nil") coreList_.nilIndex = (int)i;
+        if (d->ctors[i].name == "Cons") coreList_.consIndex = (int)i;
+      }
+    }
+    return coreList_;
+  }
   // Resolved user externals, one compile+load per definition per build.
   std::map<const TopDef*, ExternalFn> userExternals_;
 
@@ -171,9 +186,21 @@ class Interp {
         throw EvalError("unary '-' applied to a non-numeric value");
       }
       case Expr::Kind::ListLit: {
-        ListV out;
-        for (auto& x : e.items) out.items.push_back(eval(*x, env, mod));
-        return Value{std::move(out)};
+        // Sugar for a Cons chain. Elements evaluate left to right; the
+        // chain builds back to front.
+        const CoreListInfo& list = coreList();
+        std::vector<Value> items;
+        for (auto& x : e.items) items.push_back(eval(*x, env, mod));
+        Value out{VariantV{list.decl, list.nilIndex, nullptr}};
+        for (auto it = items.rbegin(); it != items.rend(); ++it) {
+          TupleV cell;
+          cell.items.push_back(std::move(*it));
+          cell.items.push_back(std::move(out));
+          out = Value{VariantV{list.decl, list.consIndex,
+                               std::make_shared<Value>(
+                                   Value{std::move(cell)})}};
+        }
+        return out;
       }
       case Expr::Kind::TupleLit: {
         TupleV out;
@@ -407,6 +434,11 @@ class Interp {
       }
       ApplyDepthGuard guard(*this, f->def->name);
       Env env;
+      // A recursive definition finds itself under its own (surface)
+      // name - required for members of inline modules, whose stored
+      // names are dotted and unreachable from an unqualified lookup.
+      if (f->def->isRec)
+        env[f->def->name] = Value{FunV{f->def, f->mod, nullptr}};
       for (auto& name : paramNames) env[name] = (*bound)[name];
       return eval(*f->def->body, env, *f->mod);
     }
@@ -478,6 +510,7 @@ class Interp {
                .first;
     }
     ExtServices svc;
+    svc.coreList = coreList();
     svc.apply = [this, &callerMod](const Value& fn, std::vector<Value> a) {
       return apply(fn, std::move(a), callerMod);
     };

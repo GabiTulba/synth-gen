@@ -53,9 +53,11 @@ submodules are open.
 ## Types, annotations, and time
 
 Everything is fully annotated — the checker verifies, it never guesses.
-The value types are `Scalar`, `Int`, `Vector` (N-channel), `Timestamp`,
-`String`, `Bool`, `unit`, plus `t Signal`, `t Sample`, `t list`, and
-tuples. A number literal with a decimal point is a `Scalar` (`440.0`);
+The built-in value types are `Scalar`, `Int`, `Vector` (N-channel),
+`Timestamp`, `String`, `Bool`, `unit`, and tuples; `t Signal`,
+`t Sample` and `t list` are ordinary *declarations* the Core library
+makes ambient (and you can declare your own — see "Records" and
+"Variants and match" below). A number literal with a decimal point is a `Scalar` (`440.0`);
 without one it is an `Int` (`8`) — the whole-number kind that counts
 and indexes. A literal with a unit suffix (`100ns`, `800ms`, `1.5s`,
 `1m`) is a `Timestamp`. A *computed* Scalar enters the time domain
@@ -142,6 +144,78 @@ determine it. Polymorphic definitions curry, take and return functions
 libraries like any other value. Types are erased before evaluation, so a
 polymorphic definition renders bit-identically to the monomorphic one it
 replaces.
+
+## Records
+
+`type` declares your own types. A record bundles named fields; a
+literal names no type — it resolves to the record declaration in scope
+with exactly those fields:
+
+```ocaml
+type Patch = { freq : Scalar; gain : Scalar; bite : Scalar } ;;
+
+let lead : Patch = { freq = 440.0; gain = 0.5; bite = 0.8 } ;;
+let soft : Patch = { lead with gain = 0.2 } ;;        (* functional update *)
+
+let voice p:Patch : Scalar Signal =
+  soft_clip ~threshold:p.bite (saw p.freq) * p.gain ;;
+```
+
+Projection (`p.freq`) binds tighter than application, updates keep the
+record's type, and declarations can be polymorphic
+(`type 'a Voice = { osc : 'a Signal; vel : Scalar }`, used as
+`Scalar Voice`) or *abstract* (`type Handle ;;` — no visible
+structure; Core's `Signal` is declared exactly like that). Core's
+`Sample` is itself a record, `{ sig; from; to }`, so `s.from` and
+`{ s with to = 1s }` work out of the box. Types are nominal: two
+same-shaped records are still different types, and declarations travel
+with modules like values do.
+
+## Variants and match
+
+A variant enumerates shapes; `match` picks them apart. Constructors
+carry at most one payload (bundle more in a tuple), and matches must be
+exhaustive — the checker names a missing case concretely:
+
+```ocaml
+type Wave = | Sine | Saw | Pulse of Scalar ;;
+
+let osc w:Wave ~freq:Scalar : Scalar Signal =
+  match w with
+  | Sine -> sine ~freq:freq
+  | Saw -> saw ~freq:freq
+  | Pulse duty -> square ~freq:freq * duty ;;
+```
+
+Patterns nest (`| Full (Pulse d) -> ...`), destructure tuples and
+records (`| (t, s) -> ...`, `{ attack; release = r }` — punned or
+renamed, any subset of the fields), and bind without annotations: the
+scrutinee's type already says everything. Only the taken arm
+evaluates, so an arm can even `render`. An irrefutable pattern also
+works straight in a binding:
+`let (lo, hi) : (Scalar, Scalar) = bounds in ...`.
+
+## Recursion — and lists are just a variant
+
+`let rec` puts a function's own name in scope in its body. That, plus
+recursive type declarations, is exactly what lists are made of: Core
+declares `type 'a list = | Nil | Cons of ('a, 'a list)`, makes it
+ambient, and writes `List.map`/`fold`/`init`/`repeat` in SynthGraph —
+`[a; b; c]` is sugar for a `Cons` chain:
+
+```ocaml
+let rec swell xs:Scalar Signal list ~gain:Scalar : Scalar Signal =
+  match xs with
+  | Nil -> constant 0.0
+  | Cons (x, rest) -> x * gain + swell rest ~gain:(gain / 2.0) ;;
+
+let stack : Scalar Signal = swell [sine 110.0; sine 220.0; sine 440.0] ~gain:0.5 ;;
+```
+
+Recursion is self-only (no mutual groups), needs at least one
+parameter, and is guarded: past 4096 nested calls the build fails with
+a recursion-limit diagnostic instead of running away. Musical lists —
+one recursion level per element — sit far under that.
 
 ## Modules: files, libraries, inline modules
 

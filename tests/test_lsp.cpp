@@ -728,20 +728,34 @@ TEST(lsp_formatting_record_and_type_syntax) {
   CHECK(clean.array.empty());
 }
 
-TEST(lsp_formatting_bundled_stdlib_is_a_fixed_point) {
-  // docs/tooling.md: the shipped stdlib (like examples/) is already
-  // formatted - the formatter must propose no edits for it.
-  fs::path lib =
-      fs::path(bundledStdlibDir()) / "core" / kLibraryInterfaceFile;
-  std::ifstream in(lib);
-  std::stringstream ss;
-  ss << in.rdbuf();
-  std::string text = ss.str();
-  CHECK(!text.empty());
-  std::string uri = uriFor(lib);
-  LspServer server;
-  server.onMessage(didOpen(uri, text));
-  json::Value edits =
-      resultOf(server, docRequest(2, "textDocument/formatting", uri));
-  CHECK(edits.array.empty());
+TEST(lsp_formatting_stdlib_and_examples_are_a_fixed_point) {
+  // docs/tooling.md: the shipped stdlib and the examples tree are
+  // already formatted - the formatter must propose no edits for them.
+  std::vector<fs::path> files;
+  files.push_back(fs::path(bundledStdlibDir()) / "core" /
+                  kLibraryInterfaceFile);
+  fs::path examples = fs::path(bundledStdlibDir()) / ".." / "examples";
+  std::error_code ec;
+  if (fs::exists(examples, ec))
+    for (auto& e : fs::recursive_directory_iterator(examples, ec))
+      if (e.path().extension() == ".synth" &&
+          e.path().string().find("_build") == std::string::npos)
+        files.push_back(e.path());
+  CHECK(files.size() >= 1);
+  int reqId = 2;
+  for (auto& f : files) {
+    std::ifstream in(f);
+    std::stringstream ss;
+    ss << in.rdbuf();
+    std::string text = ss.str();
+    CHECK(!text.empty());
+    std::string uri = uriFor(f);
+    LspServer server;
+    server.onMessage(didOpen(uri, text));
+    json::Value edits =
+        resultOf(server, docRequest(reqId++, "textDocument/formatting", uri));
+    if (!edits.array.empty())
+      std::cerr << "formatter is not a fixed point on " << f << "\n";
+    CHECK(edits.array.empty());
+  }
 }

@@ -90,7 +90,7 @@ before reading any of them:
 | `src/lexer.*`, `src/parser.*`, `src/ast.hpp` | Language front-end: tokens (incl. timestamp unit-suffix literals), OCaml-like parser, AST with source spans |
 | `src/types.*`, `src/checker.*` | Type system (rigid vs. free type variables, unification), fully-annotated checker with use-site instantiation of stored signatures, module resolution (files, libraries, inline `struct ... end` modules, the bundled Core) |
 | `src/diagnostics.*` | Diagnostic representation and rendering with source spans |
-| `stdlib/core/` | The Core library: `lib.synth` declares every primitive's name and signature as `external` bindings over the implementation `.cpp` files beside it (oscillators, effects, sampling, render, io, lists, signals, math) |
+| `stdlib/core/` | The Core library: `lib.synth` declares the ambient types (`list`, `Signal`, `Sample`) and every primitive's name and signature — mostly `external` bindings over the implementation `.cpp` files beside it, with the List module written in SynthGraph (oscillators, effects, sampling, render, io, lists, signals, math) |
 | `src/external.*` | External-function loading: build-time C++ compilation, content-hash caching, dlopen binding — for Core and user code alike |
 | `src/ext/` | The public API headers externals compile against: `<synth/external.hpp>` (values, context services, entry-point macro) and `<synth/engine.hpp>` (signal-graph constructors) |
 | `src/signal.*` | Signal engine: lazy signal DAG, render-time discretization, sample/place windowing, filters, mixing, block rendering, fusion |

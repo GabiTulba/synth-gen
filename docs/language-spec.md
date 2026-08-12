@@ -18,11 +18,14 @@ accepts and how it is typed and evaluated. The design document
   token only here — inside an identifier it is an ordinary continuation
   character, so `x'` remains one name.
 - **Keywords**: `let`, `in`, `fun`, `import`, `open`, `module`, `if`,
-  `then`, `else`, `true`, `false`. The words `struct`, `end` and
-  `external` are *contextual*: they matter only inside a
-  `module N = struct … end` definition (resp. as a definition's whole
-  `external "file"` body) and lex as ordinary identifiers everywhere
-  else (a binding named `end` or `external` keeps working).
+  `then`, `else`, `match`, `with`, `true`, `false`. The words `struct`,
+  `end`, `external`, `type`, `of` and `rec` are *contextual*: they
+  matter only in their own position — inside a
+  `module N = struct … end` definition, as a definition's whole
+  `external "file"` body, at the start of a `type` declaration, before
+  a constructor's payload, and directly between `let` and a binding
+  name — and lex as ordinary identifiers everywhere else (a binding
+  named `end`, `external`, `type` or `rec` keeps working).
 - **Number literals**: `[0-9]+(\.[0-9]+)?`. A literal *with* a decimal
   point is a `Scalar` (`440.0`, `0.5`); one *without* is an `Int`
   (`8`, `440`). Ints are the discrete kind (counts, indices); Scalars
@@ -37,8 +40,10 @@ accepts and how it is typed and evaluated. The design document
   (§5.4).
 - **Boolean literals**: `true`, `false` — always `Bool`.
 - **String literals**: `"..."` with escapes `\n`, `\t`, `\\`, `\"`.
-- **Punctuation**: `;;` `;` `:` `=` `(` `)` `[` `]` `,` `.` `->` `~`
-  `|>` `+` `-` `*` `/` `<` `<=` `>` `>=` `==` `!=` `&&` `||`.
+- **Punctuation**: `;;` `;` `:` `=` `(` `)` `[` `]` `{` `}` `,` `.`
+  `->` `~` `|>` `|` `+` `-` `*` `/` `<` `<=` `>` `>=` `==` `!=` `&&`
+  `||`. A lone `|` is the variant/match bar; `|>` and `||` win where
+  they fit.
 
 ## 2. Grammar
 
@@ -46,7 +51,8 @@ EBNF; `{x}` is repetition, `[x]` is optionality.
 
 ```
 module      ::= { top-def }
-top-def     ::= import-def | open-def | alias-def | module-def | let-def
+top-def     ::= import-def | open-def | alias-def | module-def
+              | let-def | type-def
 module-path ::= UpIdent { "." UpIdent }             (may end inside an
                                                      inline module:
                                                      Lib.File.A)
@@ -54,26 +60,61 @@ import-def  ::= "import" module-path [ ";;" ]
 open-def    ::= "open" module-path [ ";;" ]
 alias-def   ::= "module" UpIdent "=" module-path [ ";;" ]
 module-def  ::= "module" UpIdent "=" "struct" { struct-def } "end" [ ";;" ]
-struct-def  ::= open-def | module-def | let-def
-let-def     ::= "let" (Ident | "_") { param } [ ":" type ] "="
+struct-def  ::= open-def | module-def | let-def | type-def
+let-def     ::= "let" [ "rec" ] (Ident | "_") { param } [ ":" type ] "="
                 (expr | external-body) ";;"
 external-body ::= "external" String                 (C++ file; §5)
 param       ::= [ "~" ] Ident ":" param-type      (~ marks a labeled param)
 
+type-def    ::= "type" [ type-params ] UpIdent
+                [ "=" ( record-body | ctor-list ) ] ";;"
+                                                    (no "=": abstract)
+type-params ::= TypeVar | "(" TypeVar { "," TypeVar } ")"
+record-body ::= "{" field { ";" field } "}"
+field       ::= Ident ":" type
+ctor-list   ::= [ "|" ] ctor { "|" ctor }
+ctor        ::= UpIdent [ "of" type ]               (at most one payload;
+                                                     tuples carry more)
+
 type        ::= postfix-type [ "->" type ]          (right-associative)
 param-type  ::= postfix-type                        (arrows need parens)
-postfix-type::= atom-type { "Signal" | "Sample" | "list" }
+postfix-type::= atom-type { type-name }             (postfix application:
+                                                     Scalar Signal,
+                                                     'a list, Scalar Voice)
+type-name   ::= [ module-path "." ] UpIdent | "list"
 atom-type   ::= "Scalar" | "Int" | "Vector" | "Timestamp" | "String"
               | "Bool" | "unit"
+              | type-name                           (a 0-parameter one)
               | TypeVar                             ('a - see §3)
-              | "(" type { "," type } ")"           (tuple if >1 element)
+              | "(" type { "," type } ")"           (tuple if >1 element;
+                                                     spread across a
+                                                     multi-parameter
+                                                     type-name: ('a, 'b) Pair)
 
-expr        ::= let-in | lambda | if-expr | pipe
-let-in      ::= "let" Ident { param } ":" type "=" expr "in" expr
+expr        ::= let-in | lambda | if-expr | match-expr | pipe
+let-in      ::= "let" [ "rec" ] Ident { param } ":" type "=" expr
+                "in" expr
+              | "let" (tuple-pattern | record-pattern) ":" type "="
+                expr "in" expr                      (destructuring; must
+                                                     be irrefutable)
 lambda      ::= "fun" param { param } "->" expr
 if-expr     ::= "if" expr "then" expr "else" expr   (both branches
                                                      required; extends
                                                      maximally right)
+match-expr  ::= "match" expr "with" [ "|" ] arm { "|" arm }
+arm         ::= pattern "->" expr                   (bodies extend
+                                                     maximally right; a
+                                                     nested match needs
+                                                     parens)
+pattern     ::= ctor-pattern | pattern-atom
+ctor-pattern::= [ module-path "." ] UpIdent [ pattern-atom ]
+pattern-atom::= "_" | Ident
+              | [ module-path "." ] UpIdent         (payload-less ctor)
+              | "(" pattern { "," pattern } ")"     (tuple if >1 element)
+              | record-pattern
+tuple-pattern ::= "(" pattern { "," pattern } ")"
+record-pattern ::= "{" field-pat { ";" field-pat } "}"
+field-pat   ::= Ident [ "=" pattern ]               (bare = punned bind)
 pipe        ::= or-expr { "|>" additive }           (lowest, left-assoc)
 or-expr     ::= and-expr { "||" and-expr }
 and-expr    ::= comparison { "&&" comparison }
@@ -84,11 +125,20 @@ multiplicative ::= unary { ("*" | "/") unary }
 unary       ::= "-" unary | app
 app         ::= atom { arg }                        (application, left)
 arg         ::= atom | "~" Ident ":" atom           (labeled argument)
-atom        ::= Number | Time | String
+atom        ::= atom-base { "." Ident }             (record projection;
+                                                     binds tighter than
+                                                     application)
+atom-base   ::= Number | Time | String
               | Ident                               (unqualified name)
               | module-path "." Ident               (qualified name)
+              | [ module-path "." ] UpIdent         (constructor - an
+                                                     uppercase leaf)
               | "(" expr { "," expr } ")"           (tuple if >1 element)
               | "[" [ expr { ";" expr } ] "]"       (list literal)
+              | "{" Ident "=" expr { ";" Ident "=" expr } "}"
+                                                    (record literal)
+              | "{" expr "with" Ident "=" expr
+                    { ";" Ident "=" expr } "}"      (record update)
 ```
 
 Notes:
@@ -100,8 +150,12 @@ Notes:
   left-associative.
 - Unary minus negates its operand and preserves its type: defined for
   `Int`, `Scalar`, `Vector`, and `t Signal`.
-- List elements are separated by `;` (OCaml style); the empty list `[]`
-  is a parse but not a type — see §3.
+- List elements are separated by `;` (OCaml style); `[]` is legal
+  wherever the element type is determined — see §3.
+- Record projection `r.field` binds tighter than application
+  (`f r.x` is `f (r.x)`) and chains (`s.inner.gain`). A dotted path
+  with an *uppercase* leaf is a constructor reference; a lowercase leaf
+  is a qualified value, as before.
 - Function-typed parameters require parentheses:
   `f:(Timestamp -> Scalar Signal)`.
 - **Local bindings**: `let name : Type = e in body` is an expression;
@@ -148,10 +202,22 @@ Notes:
 
 ## 3. Type system
 
-Types: `Scalar`, `Int`, `Vector`, `Timestamp`, `String`, `Bool`, `unit`,
-`t Signal`, `t Sample`, `t list`, tuples `(t1, ..., tn)`, and function
-types `t1 -> ... -> tn -> r` (in signatures only). `Signal`/`Sample` element
-types are in practice `Scalar` (mono) or `Vector` (N-channel).
+Built-in types: `Scalar`, `Int`, `Vector`, `Timestamp`, `String`,
+`Bool`, `unit`, tuples `(t1, ..., tn)`, and function types
+`t1 -> ... -> tn -> r` (in signatures only). Everything else is a
+*declared* type: user `type` declarations (records, variants, abstract
+types — see below), and the three Core declares that are ambient like
+the built-in names, needing no import to write in an annotation:
+
+- `'a list` — an ordinary recursive variant,
+  `type 'a list = | Nil | Cons of ('a, 'a list)`. `[a; b; c]` literals
+  are sugar for `Cons` chains and `match` takes lists apart.
+- `'a Signal` — abstract: an engine-backed handle with no visible
+  structure. Element types are in practice `Scalar` (mono) or `Vector`
+  (N-channel).
+- `'a Sample` — a record,
+  `type 'a Sample = { sig : 'a Signal; from : Timestamp; to : Timestamp }`,
+  so `s.from` projects and `{ s with to = 1s }` re-windows a sample.
 
 `Int` is the build-time integer: a 64-bit signed whole number for
 counts, indices, and other discrete quantities. The primitives that
@@ -179,7 +245,8 @@ Rules:
   Scalar, Vector, or Scalar Signal is reported as a build (evaluation)
   error. `time` is the one nullary primitive: it is a `Scalar Signal`
   value, not a function.
-- **Definition before use, no recursion.** A definition may reference
+- **Definition before use; recursion is opt-in and self-only.** A
+  definition may reference
   only parameters, *earlier* definitions of its module, imported modules'
   definitions (qualified), and names brought in by an *earlier* `open`
   — Core primitives included, under an earlier, still-enclosing
@@ -190,11 +257,16 @@ Rules:
   and `open`ed names, position-ordered, so an `open` shadows earlier
   same-named binders and a later definition shadows the open).
   Re-defining one of a scope's *own* names is still a
-  duplicate-definition error.
+  duplicate-definition error. `let rec` (top-level or local) puts the
+  binding's own name in scope in its own body, at its full annotated
+  signature — see "Recursion" below; *mutual* recursion remains out.
 - **The Core library.** All primitives live in `Core` — a *real
-  library* bundled with the compiler (`stdlib/core/lib.synth`), whose
+  library* bundled with the compiler (`stdlib/core/lib.synth`). Nearly
   every definition is an `external` binding to a C++ implementation
-  shipped beside it (§5), organized into functional submodules:
+  shipped beside it (§5); the `List` module is written in SynthGraph
+  itself, and the interface opens with the `list`/`Signal`/`Sample`
+  type declarations (§3, top). Core is organized into functional
+  submodules:
   `Osc` (oscillators & modulation), `Fx` (effects, filters,
   envelopes), `Arrange` (sample/place/mix), `Render` (the render
   effects), `Io` (audio import), `List`, `Time` (conversions &
@@ -257,10 +329,127 @@ Rules:
 - **`let _` is the effect form.** Its body must have type `unit`, and
   the render primitives (`render`, `render_vis`) are the only sources of
   `unit`.
-- **Empty list literals are rejected** ("cannot determine the element
-  type"); list elements must all have one type.
+- **List literals** unify their elements to one type. `[]` (and a
+  polymorphic `Nil`, which is the same value) leaves the element as an
+  unknown the annotation or the surrounding call resolves — exactly the
+  partial-application rule; if nothing determines it, that is the usual
+  leftover-variable error.
 - **Duplicate definitions** in a module and **duplicate parameters** in a
   signature are errors.
+
+### Type declarations: records, variants, abstract types
+
+`type` declares a nominal type at the top level of a file or a
+`struct` body:
+
+```
+type Env = { attack : Timestamp; release : Timestamp } ;;
+type 'a Voice = { osc : 'a Signal; vel : Scalar } ;;
+type ('a, 'b) Pair = { first : 'a; second : 'b } ;;
+type Wave = | Sine | Saw | Pulse of Scalar ;;
+type Handle ;;                                   (* abstract *)
+```
+
+- **Names and parameters.** Declared type names are uppercase-initial
+  (`list` is the grandfathered lowercase spelling, declared by Core);
+  parameters are written prefix (`'a Voice`, `('a, 'b) Pair`) and
+  applied postfix like the built-in constructors (`Scalar Voice`,
+  `(Scalar, String) Pair`). For a one-parameter type a parenthesized
+  tuple is the argument (`(String, 'a Sample) list` is a list of
+  pairs); for a multi-parameter one it spreads across the parameters.
+  Members may use only the declared parameters; a declaration may
+  reference itself (that is what makes `list` possible), and a
+  declaration must precede its uses, like any definition. Declarations
+  are *nominal*: two structurally identical records are different
+  types, and a declaration travels under its module like a value
+  (`Voices.Voice`, `open Voices`, published by a library's
+  `lib.synth`).
+- **Records.** A literal `{ attack = 5ms; release = 100ms }` names no
+  type; it resolves to the innermost visible record declaration with
+  exactly that field set (two matches in one scope are an ambiguity
+  error — annotate, or reach the value another way). Projection
+  `e.field` and functional update `{ e with field = v; ... }` check
+  against the value's declaration; update keeps the value's type.
+- **Variants.** Constructors are uppercase, carry at most one payload
+  (`of T`; bundle more in a tuple), and resolve like values — bare
+  when their declaration is in scope, or module-qualified with an
+  uppercase leaf (`Shapes.Pulse 0.5`). They are **not first-class**: a
+  payload-carrying constructor must be applied where it is used
+  (`List.map ~f:(fun d:Scalar -> Pulse d)` rather than
+  `List.map ~f:Pulse`). A nullary constructor of a polymorphic variant
+  (`Nil`, `None`-alikes) leaves its parameters to the context, like
+  `[]`.
+- **Abstract types** (`type Handle ;;`) have no visible structure: no
+  literals, no patterns ("type 'Signal' is abstract - it has no
+  constructors to match"). They are the declaration form for
+  engine-backed handles; Core's `Signal` is the canonical one.
+- Editing a declaration invalidates every definition typed by it: type
+  declarations participate in the incremental dependency graph like
+  value definitions.
+
+### `match` and patterns
+
+```
+let osc w:Wave ~freq:Scalar : Scalar Signal =
+  match w with
+  | Sine -> sine ~freq:freq
+  | Saw -> saw ~freq:freq
+  | Pulse duty -> square ~freq:freq * duty
+;;
+```
+
+- **Typing is destructuring, not inference.** The scrutinee's type is
+  already known; patterns only take it apart, so pattern binders carry
+  no annotations. Patterns are: `_`, a lowercase binder, a constructor
+  (with its payload pattern), a tuple, or a record pattern
+  (`{ attack; release = r }` — a subset of the fields, a bare name
+  binding punned under itself). No literal patterns in v1; use `if`
+  for value tests. Matching is only defined at types with structure to
+  match — a rigid `'a` or an abstract type is an error.
+- **Exhaustiveness and redundancy are hard errors.** A non-exhaustive
+  match names a concrete missing example ("for example, Full (Pulse _)
+  is not covered"); an arm the earlier arms already cover is
+  "unreachable".
+- **Arms agree like `if` branches** (unifying when one still carries
+  variables), and **only the taken arm evaluates** — the untaken arms'
+  errors and render effects never fire.
+- Arm bodies extend maximally right; parenthesize a `match` nested in
+  an arm. The scrutinee is evaluated exactly once.
+- **Destructuring let**: `let (lo, hi) : (Scalar, Scalar) = e in body`
+  and `let { attack; release = r } : Env = e in body` bind through a
+  pattern; the pattern must be irrefutable (cover every value of the
+  annotated type), so constructor patterns of multi-constructor
+  variants belong in a `match` instead.
+
+### Recursion (`let rec`)
+
+`let rec` makes the binding's own name visible in its body, at its
+full annotated signature:
+
+```
+let rec fact n:Int : Int = if n <= 1 then 1 else n * fact (n - 1) ;;
+
+let rec sum xs:Scalar list : Scalar =
+  match xs with
+  | Nil -> 0.0
+  | Cons (x, rest) -> x + sum rest
+;;
+```
+
+- Works at the top level and for local functions
+  (`let rec go i:Int : 'a list = ... in go 0`); requires at least one
+  parameter (a recursive constant could never terminate) and, like
+  every binding, a full annotation — which is why typing it needs no
+  inference.
+- Inside the body the name binds like a parameter: its `'a` stays
+  rigid, so a definition cannot call itself at a different type (no
+  polymorphic recursion).
+- *Mutual* recursion (and recursive *signal* feedback) remains out of
+  scope — see §7.
+- Evaluation is not tail-call optimized and guards the build against
+  runaway recursion: beyond 4096 nested calls the build fails with a
+  recursion-limit diagnostic. Recursion over musical-scale lists (one
+  level per element, thousands of elements) is well within the limit.
 
 ### Polymorphic definitions
 
@@ -625,9 +814,10 @@ val Math.round: x:Scalar -> Int
 val Math.floor: x:Scalar -> Int
 val Math.ceil: x:Scalar -> Int
 
-(* Core.List: list combinators & builders *)
+(* Core.List: list combinators & builders - written in SynthGraph
+   (recursive functions over the Cons/Nil variant), not C++ *)
 val List.map    : f:('a -> 'b) -> xs:'a list -> 'b list
-val List.fold   : f:('a -> 'b -> 'a) -> init:'a -> xs:'b list -> 'a
+val List.fold   : f:('a -> 'b -> 'a) -> init:'a -> xs:'b list -> 'a  (* folds left *)
 val List.init   : n:Int -> f:(Int -> 'a) -> 'a list   (* [f 0; ...; f (n-1)] *)
 val List.repeat : n:Int -> x:'a -> 'a list
 
@@ -641,7 +831,9 @@ val Time.jitter: seed:Scalar -> spread:Timestamp -> steps:(Timestamp list) -> Ti
 ```
 
 Counts and indices are Ints, so wholeness is guaranteed by the type
-system; a negative computed count is still a build (evaluation) error.
+system; `List.init`/`List.repeat` treat a negative computed count as
+zero (the empty list), while `time_steps` still rejects one as a build
+(evaluation) error.
 
 `to_sec`/`to_ms`/`to_min` are the computed counterpart of the literal
 suffixes — `to_ms 250.0` is `250ms` — and are what a duration derived
@@ -680,15 +872,20 @@ manage headroom deliberately.
 
 Signal-level branching (comparisons and `if` are build-time only; a
 sample-wise select/gate over signals would be a new signal-producing
-primitive), pattern matching, user-defined types, recursion and feedback
-(IIR-style signal cycles), type *inference* (every binding is still
+primitive), *mutual* recursion and signal feedback
+(IIR-style signal cycles), literal patterns in `match` (use `if` for
+value tests), type *inference* (every binding is still
 annotated; polymorphism is written out, §3), per-definition visibility
 control (a library's `lib.synth` publishes whole modules or re-exported
-values, but a published module exposes all of its definitions), reverse
+values, but a published module exposes all of its definitions —
+type declarations included), reverse
 playback (`resample` reads its source only forward, so a negative rate
 clamps to zero rather than rewinding), cache tuning knobs. See design
 doc §13. (Lambdas, general partial application, cross-directory
 imports/packaging — via libraries, `open` and module aliases —
 user-written polymorphism, inline modules, build-time Booleans with
-`if`/`else`, and native extensions — `external` functions, §5 — were
+`if`/`else`, native extensions — `external` functions, §5 — and
+user-defined types with pattern matching and self-recursion — `type`
+declarations, `match`, `let rec`, with `list` and `Signal`/`Sample`
+now ordinary Core declarations — were
 listed here originally and are now in the language; see §2, §3 and §4.)

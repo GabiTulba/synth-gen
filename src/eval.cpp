@@ -405,16 +405,46 @@ class Interp {
         for (auto& name : paramNames) ordered.push_back((*bound)[name]);
         return callExternal(*f->def, *f->mod, mod, std::move(ordered));
       }
+      ApplyDepthGuard guard(*this, f->def->name);
       Env env;
       for (auto& name : paramNames) env[name] = (*bound)[name];
       return eval(*f->def->body, env, *f->mod);
     }
     // The captured environment plus the bound params (params shadow
     // captures), evaluated in the lambda's defining module.
+    ApplyDepthGuard guard(*this, l->lam->name.empty() ? "<fun>"
+                                                      : l->lam->name);
     Env env = *l->captured;
+    // A recursive local function finds itself under its own name,
+    // reconstructed per call from the lambda's own fields - no cyclic
+    // ownership. Parameters bind after it, so they shadow it as usual.
+    if (!l->lam->name.empty())
+      env[l->lam->name] = Value{LambdaV{l->lam, l->mod, l->captured, nullptr}};
     for (auto& name : paramNames) env[name] = (*bound)[name];
     return eval(*l->lam->items[0], env, *l->mod);
   }
+
+  // Build-time evaluation is recursive (let rec); the depth guard turns
+  // runaway recursion into a diagnostic instead of exhausting the
+  // process stack. The limit is far above anything musical (a recursive
+  // List function recurses once per element).
+  static constexpr int kMaxApplyDepth = 4096;
+  int applyDepth_ = 0;
+  struct ApplyDepthGuard {
+    Interp& in;
+    ApplyDepthGuard(Interp& in, const std::string& name) : in(in) {
+      // Throw before incrementing: the destructor only runs after a
+      // completed constructor, so the counter stays balanced when the
+      // error unwinds to the per-definition handler.
+      if (in.applyDepth_ >= kMaxApplyDepth)
+        throw EvalError(
+            "recursion limit (" + std::to_string(kMaxApplyDepth) +
+            " nested calls) exceeded while evaluating '" + name +
+            "' - likely unbounded recursion (no base case reached)");
+      ++in.applyDepth_;
+    }
+    ~ApplyDepthGuard() { --in.applyDepth_; }
+  };
 
   // Dispatch an external-bodied definition: C++ compiled into a cached
   // shared object on first use - the bundled Core library's

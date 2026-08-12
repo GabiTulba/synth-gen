@@ -2562,3 +2562,86 @@ let _ = render "de" 48000.0 (sample out 0s 10ms) ;;
   CHECK(r.ok);
   CHECK(r.targets[0].ok);
 }
+
+TEST(build_let_rec_evaluates) {
+  TempDir tp;
+  tp.write("song.synth", R"(
+open Core open Core.Osc open Core.Arrange open Core.Render
+let rec fact n:Int : Int = if n <= 1 then 1 else n * fact (n - 1) ;;
+type Chain = | End | Link of (Scalar, Chain) ;;
+let rec total c:Chain : Scalar =
+  match c with
+  | End -> 0.0
+  | Link (x, rest) -> x + total rest ;;
+let gain : Scalar =
+  let rec go n:Int ~acc:Scalar : Scalar =
+    if n <= 0 then acc else go (n - 1) ~acc:(acc / 2.0) in
+  go (fact 3) ~acc:32.0 ;;
+let t : Scalar = total (Link (0.125, Link (0.125, End))) ;;
+let out : Scalar Signal = sine 440.0 * (gain / 2.0 + t) ;;
+let _ = render "rec" 48000.0 (sample out 0s 10ms) ;;
+)");
+  tp.write("build.json", projectManifest("rec-demo", {"song.synth"}));
+  BuildResult r = buildProject(tp.dir.string());
+  for (auto& d : r.diags.items) std::cerr << d.message << "\n";
+  CHECK(r.ok);
+  // fact 3 = 6 halvings of 32.0 -> 0.5; total = 0.25; amp = 0.5.
+  WavData w = readWav((tp.dir / "_build" / "artifacts" / "rec.wav").string());
+  double peak = 0;
+  for (auto s : w.channels[0]) peak = std::max(peak, std::fabs(s));
+  CHECK(peak > 0.45);
+  CHECK(peak < 0.55);
+}
+
+TEST(build_unbounded_recursion_is_diagnosed) {
+  TempDir tp;
+  tp.write("song.synth", R"(
+let rec loop n:Int : Int = loop (n + 1) ;;
+let x : Int = loop 0 ;;
+)");
+  tp.write("build.json", projectManifest("loop-demo", {"song.synth"}));
+  BuildResult r = buildProject(tp.dir.string());
+  CHECK(!r.ok);
+  bool found = false;
+  for (auto& d : r.diags.items)
+    if (d.message.find("recursion limit") != std::string::npos)
+      found = true;
+  CHECK(found);
+}
+
+TEST(build_deep_recursion_within_limit) {
+  // A recursion depth in the thousands (a large musical list) works.
+  TempDir tp;
+  tp.write("song.synth", R"(
+let rec count n:Int ~acc:Int : Int =
+  if n <= 0 then acc else count (n - 1) ~acc:(acc + 1) ;;
+let x : Int = count 3000 ~acc:0 ;;
+)");
+  tp.write("build.json", projectManifest("deep-demo", {"song.synth"}));
+  BuildResult r = buildProject(tp.dir.string());
+  for (auto& d : r.diags.items) std::cerr << d.message << "\n";
+  CHECK(r.ok);
+}
+
+TEST(build_recursive_def_hash_is_stable) {
+  TempDir tp;
+  tp.write("song.synth", R"(
+let rec fact n:Int : Int = if n <= 1 then 1 else n * fact (n - 1) ;;
+let use : Int = fact 5 ;;
+)");
+  DiagnosticBag diags;
+  Program prog = checkProject({(tp.dir / "song.synth").string()}, diags);
+  CHECK(!diags.hasErrors());
+  const CheckedModule* m = nullptr;
+  for (auto& mm : prog.modules)
+    if (mm.libName != "Core") m = &mm;
+  const TopDef *fact = nullptr, *use = nullptr;
+  for (auto& d : m->parsed.defs) {
+    if (d.name == "fact") fact = &d;
+    if (d.name == "use") use = &d;
+  }
+  uint64_t h1 = defClosureHash(prog, *m, *fact);
+  uint64_t h2 = defClosureHash(prog, *m, *fact);
+  CHECK(h1 == h2);  // terminates, deterministically
+  CHECK(defClosureHash(prog, *m, *use) != h1);
+}

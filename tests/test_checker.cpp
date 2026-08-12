@@ -2804,3 +2804,72 @@ let w : Scalar =
     std::cerr << renderDiagnostic(d, prog.modules.back().parsed.source);
   CHECK(!diags.hasErrors());
 }
+
+TEST(checker_let_rec_name_in_scope) {
+  TempProject tp;
+  std::string f = tp.write("t.synth", R"(
+let rec fact n:Int : Int = if n <= 1 then 1 else n * fact (n - 1) ;;
+let x : Int =
+  let rec go n:Int ~acc:Int : Int =
+    if n <= 0 then acc else go (n - 1) ~acc:(acc + n) in
+  go 3 ~acc:0 ;;
+)");
+  DiagnosticBag diags;
+  Program prog = checkProject({f}, diags);
+  for (auto& d : diags.items)
+    std::cerr << renderDiagnostic(d, userMod(prog).parsed.source);
+  CHECK(!diags.hasErrors());
+}
+
+TEST(checker_non_rec_body_does_not_see_its_own_name) {
+  TempProject tp;
+  std::string f = tp.write(
+      "t.synth", "let f n:Int : Int = if n <= 1 then 1 else f (n - 1) ;;");
+  DiagnosticBag diags;
+  checkProject({f}, diags);
+  CHECK(diags.hasErrors());
+}
+
+TEST(checker_rec_variant_walk) {
+  // A recursive function over a recursive variant - the shape every
+  // list operation takes.
+  TempProject tp;
+  std::string f = tp.write("t.synth", R"(
+type Chain = | End | Link of (Scalar, Chain) ;;
+let rec total c:Chain : Scalar =
+  match c with
+  | End -> 0.0
+  | Link (x, rest) -> x + total rest ;;
+let t : Scalar = total (Link (1.0, Link (2.0, End))) ;;
+)");
+  DiagnosticBag diags;
+  Program prog = checkProject({f}, diags);
+  for (auto& d : diags.items)
+    std::cerr << renderDiagnostic(d, userMod(prog).parsed.source);
+  CHECK(!diags.hasErrors());
+}
+
+TEST(checker_rec_polymorphic_self_call_stays_rigid) {
+  // Inside its own body the recursive name keeps rigid 'a: calling
+  // itself at a DIFFERENT type is rejected (no polymorphic recursion).
+  TempProject tp;
+  std::string f = tp.write("t.synth", R"(
+type 'a Box = | Leaf of 'a | Nest of ('a Box, Int) ;;
+let rec depth b:'a Box ~n:Int : Int =
+  match b with
+  | Leaf _ -> n
+  | Nest (inner, _) -> depth inner ~n:(n + 1) ;;
+)");
+  DiagnosticBag ok;
+  Program p = checkProject({f}, ok);
+  for (auto& d : ok.items)
+    std::cerr << renderDiagnostic(d, userMod(p).parsed.source);
+  CHECK(!ok.hasErrors());
+  TempProject tp2;
+  std::string g = tp2.write("t.synth", R"(
+let rec bad x:'a : 'a = bad 1.0 ;;
+)");
+  DiagnosticBag d2;
+  checkProject({g}, d2);
+  CHECK(d2.hasErrors());
+}

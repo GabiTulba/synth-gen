@@ -250,13 +250,31 @@ class Parser {
     return d;
   }
 
+  // `rec` is contextual: it marks a recursive binding only when another
+  // identifier (the actual name) follows, so a binding named `rec`
+  // still works.
+  bool atRecMarker() const {
+    return at(Tok::Ident) && peek().text == "rec" &&
+           peek(1).kind == Tok::Ident;
+  }
+
   TopDef parseLet() {
     TopDef d{};
     d.kind = TopDef::Kind::Let;
     Span lo = advance().span;  // 'let'
+    if (atRecMarker()) {
+      advance();  // 'rec'
+      d.isRec = true;
+    }
     const Token& name = expect(Tok::Ident, "binding name");
     d.name = name.text;
     parseParams(d.params);
+    if (d.isRec && d.params.empty())
+      fail(name.span, "'let rec' needs at least one parameter (a "
+                      "recursive constant could never terminate)");
+    if (d.isRec && d.name == "_")
+      fail(name.span, "'let _' cannot be recursive (there is no name to "
+                      "recurse on)");
     if (at(Tok::Colon)) {
       advance();
       d.retTypeExpr = parseType();
@@ -637,9 +655,17 @@ class Parser {
       e->items.push_back(std::move(body));
       return e;
     }
+    bool isRec = false;
+    if (atRecMarker()) {
+      advance();  // 'rec'
+      isRec = true;
+    }
     const Token& name = expect(Tok::Ident, "binding name");
     std::vector<Param> params;
     parseParams(params);
+    if (isRec && params.empty())
+      fail(name.span, "'let rec' needs at least one parameter (a "
+                      "recursive constant could never terminate)");
     expect(Tok::Colon,
            params.empty()
                ? "':' (local bindings are annotated: "
@@ -662,6 +688,9 @@ class Parser {
           Expr::Kind::Lambda, Span{params.front().span.lo, bound->span.hi});
       lam->params = std::move(params);
       lam->items.push_back(std::move(bound));
+      // A recursive local function's lambda knows its own name: the
+      // evaluator rebinds it to the lambda itself on every call.
+      if (isRec) lam->name = name.text;
       bound = std::move(lam);
     }
     expect(Tok::In, "'in' to close the local binding");
@@ -669,6 +698,7 @@ class Parser {
     auto e = std::make_unique<Expr>(Expr::Kind::Let,
                                     Span{lo.lo, body->span.hi});
     e->name = name.text;
+    e->isRec = isRec;
     e->declTypeExpr = std::move(ty);
     e->items.push_back(std::move(bound));
     e->items.push_back(std::move(body));

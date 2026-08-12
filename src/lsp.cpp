@@ -617,6 +617,9 @@ void collectExprScope(const Expr& e, uint32_t off, Scope& sc) {
       }
       return;
     case Expr::Kind::Let:
+      // A `let rec` name is visible inside its own bound expression.
+      if (e.isRec && e.declType && covers(e.items[0]->span, off))
+        sc.values[e.name] = e.declType;
       collectExprScope(*e.items[0], off, sc);
       if (covers(e.items[1]->span, off)) {
         // The annotation can be unresolved (null) when the enclosing

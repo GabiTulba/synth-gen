@@ -408,6 +408,17 @@ class ModuleChecker {
           fail(p.span, "duplicate parameter '" + p.name + "'");
         env[p.name] = p.type;
       }
+      if (def.isRec) {
+        // The name is in scope in its own body, at its full annotated
+        // signature. Like a parameter, it is NOT instantiated: inside
+        // the body its 'a stays rigid (no polymorphic recursion).
+        if (!def.retType)
+          fail(def.span, "missing return type annotation");
+        if (env.count(def.name))
+          fail(def.span, "a parameter of '" + def.name +
+                             "' shadows the recursive name itself");
+        env[def.name] = defFunType(def);
+      }
       if (def.retType) checkResultVarsAreBound(def);
       if (def.body->kind == Expr::Kind::External) {
         // No body to check: the annotation IS the type.
@@ -832,10 +843,31 @@ class ModuleChecker {
       return true;
     };
 
-    if (ctors.empty()) {
-      // Opaque column: checked patterns can only be wildcards here.
+    if (q0.kind == Pattern::Kind::Wildcard ||
+        q0.kind == Pattern::Kind::Bind) {
+      // Which root constructors do the rows pin down? Only a COMPLETE
+      // signature forces specializing on every constructor; otherwise
+      // the default matrix decides - which is also what guarantees
+      // termination against recursive declarations (wildcards never
+      // unfold a constructor no row mentions).
+      std::set<int> used;
+      for (auto& row : rows)
+        if (row[0]->kind == Pattern::Kind::Ctor)
+          used.insert(row[0]->ctorIndex);
+        else if (row[0]->kind == Pattern::Kind::Tuple ||
+                 row[0]->kind == Pattern::Kind::Record)
+          used.insert(0);
+      if (!ctors.empty() && used.size() == ctors.size()) {
+        for (auto& c : ctors)
+          if (specialized(c, &kWild)) return true;
+        return false;
+      }
+      // Incomplete (or opaque) column: drop it from the wildcard rows.
       std::vector<std::vector<const Pattern*>> defRows;
       for (auto& row : rows) {
+        if (row[0]->kind != Pattern::Kind::Wildcard &&
+            row[0]->kind != Pattern::Kind::Bind)
+          continue;
         std::vector<const Pattern*> r(row.begin() + 1, row.end());
         defRows.push_back(std::move(r));
       }
@@ -845,19 +877,19 @@ class ModuleChecker {
       if (!useful(defRows, rest, restQ, witness ? &subWitness : nullptr))
         return false;
       if (witness) {
+        std::string ex = "_";
+        for (auto& c : ctors) {
+          if (used.count(c.index)) continue;
+          ex = renderCtorWitness(
+              t, c, std::vector<std::string>(c.subTypes.size(), "_"));
+          break;
+        }
         witness->clear();
-        witness->push_back("_");
+        witness->push_back(std::move(ex));
         witness->insert(witness->end(), subWitness.begin(),
                         subWitness.end());
       }
       return true;
-    }
-
-    if (q0.kind == Pattern::Kind::Wildcard ||
-        q0.kind == Pattern::Kind::Bind) {
-      for (auto& c : ctors)
-        if (specialized(c, &kWild)) return true;
-      return false;
     }
     // q rooted at one constructor: only its specialization matters.
     for (auto& c : ctors)
@@ -1159,7 +1191,23 @@ class ModuleChecker {
       case Expr::Kind::Let: {
         if (!e.declType && e.declTypeExpr)
           e.declType = resolveType(*e.declTypeExpr);
+        // `let rec` puts the name in scope for its own bound expression
+        // (at the annotated type); a plain let does not.
+        std::optional<TypePtr> savedRec;
+        bool hadRec = false;
+        if (e.isRec) {
+          auto prev = env.find(e.name);
+          if (prev != env.end()) {
+            hadRec = true;
+            savedRec = prev->second;
+          }
+          env[e.name] = e.declType;
+        }
         TypePtr boundT = check(*e.items[0], env);
+        if (e.isRec) {
+          if (hadRec) env[e.name] = *savedRec;
+          else env.erase(e.name);
+        }
         // Same rule as top-level bindings: a var-carrying partial
         // application resolves against the annotation.
         bool ok;

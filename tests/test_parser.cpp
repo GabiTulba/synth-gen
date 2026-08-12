@@ -797,3 +797,39 @@ TEST(parser_destructuring_let_in) {
   CHECK(m2.patterns[0].items[0].name == "attack");  // punned
   CHECK(m2.patterns[0].items[1].name == "r");       // renamed
 }
+
+TEST(parser_let_rec) {
+  DiagnosticBag diags;
+  auto defs = parseSrc(
+      "let rec fact n:Int : Int = if n <= 1 then 1 else n * fact (n - 1) ;;",
+      diags);
+  CHECK(!diags.hasErrors());
+  CHECK(defs[0].isRec);
+  CHECK(defs[0].name == "fact");
+  // Local rec: the desugared lambda carries its own name.
+  DiagnosticBag d2;
+  auto defs2 = parseSrc(
+      "let x : Int =\n"
+      "  let rec go n:Int : Int = if n <= 0 then 0 else go (n - 1) in\n"
+      "  go 3 ;;",
+      d2);
+  CHECK(!d2.hasErrors());
+  const Expr& let = *defs2[0].body;
+  CHECK(let.kind == Expr::Kind::Let);
+  CHECK(let.isRec);
+  CHECK(let.items[0]->kind == Expr::Kind::Lambda);
+  CHECK(let.items[0]->name == "go");
+}
+
+TEST(parser_rec_requires_params_and_stays_contextual) {
+  DiagnosticBag d1;
+  parseSrc("let rec x : Scalar = x ;;", d1);
+  CHECK(d1.hasErrors());
+  // A binding named `rec` still works.
+  DiagnosticBag d2;
+  auto defs = parseSrc("let rec : Scalar = 1.0 ;;\nlet y : Scalar = rec ;;",
+                       d2);
+  CHECK(!d2.hasErrors());
+  CHECK(defs[0].name == "rec");
+  CHECK(!defs[0].isRec);
+}

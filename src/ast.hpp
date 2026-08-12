@@ -101,8 +101,11 @@ struct Expr {
     If,        // items[0] = condition, items[1] = then, items[2] = else
     ListLit,   // items
     TupleLit,  // items (size >= 2)
-    Let,       // name, declType; items[0] = bound expr, items[1] = body
-    Lambda,    // params; items[0] = body
+    Let,       // name, declType; items[0] = bound expr, items[1] = body.
+               // isRec: the name is in scope in the bound expr too.
+    Lambda,    // params; items[0] = body. name is set (only) when this
+               // is the desugared body of a recursive local function -
+               // the evaluator rebinds it to the lambda itself per call.
     External,  // str = C++ file; whole body of a top-level let only
     RecordLit,     // items = field values, argLabels = field names;
                    // the checked type identifies the declaration
@@ -137,6 +140,8 @@ struct Expr {
   std::vector<Param> params;
   // Match only: one pattern per arm, parallel to items[1..].
   std::vector<Pattern> patterns;
+  // Let only: declared with `let rec`.
+  bool isRec = false;
 
   // Filled in by the type checker.
   TypePtr type;
@@ -171,6 +176,7 @@ struct TopDef {
   TypePtr retType;             // Let: resolved by the checker
   ExprPtr body;                // Let
   std::vector<TopDef> defs;    // ModuleDef body (lets, opens, nested modules)
+  bool isRec = false;          // Let: declared with `let rec`
   TypeFlavor typeFlavor = TypeFlavor::Abstract;   // TypeDecl
   std::vector<std::string> typeParams;            // TypeDecl: 'a names
   std::vector<TypeDeclField> fields;              // TypeDecl: record fields

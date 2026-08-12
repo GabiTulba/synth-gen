@@ -82,11 +82,12 @@ void collectDeps(const Expr& e, const std::set<std::string>& params,
     return;
   }
   if (e.kind == Expr::Kind::Let) {
-    // The bound expression sees the outer scope; the body additionally
-    // sees (and may be shadowed by) the local name.
-    collectDeps(*e.items[0], params, mod, prog, out);
+    // The bound expression sees the outer scope - plus, for `let rec`,
+    // the binding's own name; the body additionally sees (and may be
+    // shadowed by) the local name.
     std::set<std::string> scoped = params;
     scoped.insert(e.name);
+    collectDeps(*e.items[0], e.isRec ? scoped : params, mod, prog, out);
     collectDeps(*e.items[1], scoped, mod, prog, out);
     return;
   }

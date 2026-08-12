@@ -600,9 +600,22 @@ void addOpenedMembers(const Program& prog, const ModEntry& m, Scope& sc) {
 // ModuleChecker::checkDefs: imports, opens, aliases, inline modules and
 // definitions before the cursor bind; inside the definition that covers
 // the cursor, parameters and enclosing locals bind too.
+void collectPatternBinds(const Pattern& p, Scope& sc) {
+  if (p.kind == Pattern::Kind::Bind && p.type) sc.values[p.name] = p.type;
+  for (auto& s : p.items) collectPatternBinds(s, sc);
+}
+
 void collectExprScope(const Expr& e, uint32_t off, Scope& sc) {
   if (!covers(e.span, off)) return;
   switch (e.kind) {
+    case Expr::Kind::Match:
+      collectExprScope(*e.items[0], off, sc);
+      for (size_t a = 0; a + 1 < e.items.size(); a++) {
+        if (!covers(e.items[a + 1]->span, off)) continue;
+        if (a < e.patterns.size()) collectPatternBinds(e.patterns[a], sc);
+        collectExprScope(*e.items[a + 1], off, sc);
+      }
+      return;
     case Expr::Kind::Let:
       collectExprScope(*e.items[0], off, sc);
       if (covers(e.items[1]->span, off)) {

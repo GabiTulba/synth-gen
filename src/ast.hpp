@@ -63,6 +63,30 @@ struct Param {
   Span span{};
 };
 
+// A match/destructuring pattern. Patterns carry no annotations: their
+// types derive from the scrutinee's (already known) type - they only
+// take values apart, no inference happens.
+struct Pattern {
+  enum class Kind {
+    Wildcard,  // _
+    Bind,      // a lowercase name
+    Ctor,      // [Module.]Name [payload pattern in items]
+    Tuple,     // items
+    Record,    // fieldNames + items (a subset of the record's fields;
+               // a punned field { attack } binds under its own name)
+  };
+  Kind kind = Kind::Wildcard;
+  Span span{};
+  std::string moduleName;  // Ctor qualifier, "" if none
+  std::string name;        // Bind / Ctor
+  std::vector<Pattern> items;           // Ctor payload (0/1), Tuple, Record
+  std::vector<std::string> fieldNames;  // Record, parallel to items
+  // Filled by the checker: the type this pattern matches, and for Ctor
+  // the constructor's index in its declaration.
+  TypePtr type;
+  int ctorIndex = -1;
+};
+
 struct Expr {
   enum class Kind {
     NumLit,    // num
@@ -81,11 +105,16 @@ struct Expr {
     Lambda,    // params; items[0] = body
     External,  // str = C++ file; whole body of a top-level let only
     RecordLit,     // items = field values, argLabels = field names;
-                   // moduleName/name = resolved declaration (checker)
+                   // the checked type identifies the declaration
     RecordUpdate,  // items[0] = base, items[1..] = new field values,
-                   // argLabels = their names (parallel to items[1..]);
-                   // moduleName/name = resolved declaration (checker)
+                   // argLabels = their names (parallel to items[1..])
     Project,   // items[0] = record, name = field
+    Ctor,      // moduleName/name; checker fills inum = ctor index and
+               // type = the Named result. Applied via App (items[0] =
+               // this node) - constructors are not first-class values.
+    Match,     // items[0] = scrutinee, items[1..] = arm bodies,
+               // patterns parallel to items[1..]. declType is set when
+               // this is a destructuring let (checked irrefutable).
   };
   Kind kind;
   Span span{};
@@ -106,6 +135,8 @@ struct Expr {
   TypePtr declType;
   // Lambda only: the anonymous function's parameters.
   std::vector<Param> params;
+  // Match only: one pattern per arm, parallel to items[1..].
+  std::vector<Pattern> patterns;
 
   // Filled in by the type checker.
   TypePtr type;

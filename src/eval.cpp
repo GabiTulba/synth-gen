@@ -115,6 +115,17 @@ class Interp {
         return eval(*e.items[c->v ? 1 : 2], env, mod);
       }
       case Expr::Kind::App: {
+        // A constructor application builds its variant directly - the
+        // constructor is not a function value.
+        if (e.items[0]->kind == Expr::Kind::Ctor) {
+          const Expr& c = *e.items[0];
+          const TypeDecl* decl = c.type ? c.type->decl : nullptr;
+          if (!decl)
+            throw EvalError("internal error: unresolved constructor");
+          return Value{VariantV{
+              decl, (int)c.inum,
+              std::make_shared<Value>(eval(*e.items[1], env, mod))}};
+        }
         std::vector<std::pair<std::string, Value>> args;  // label, value
         for (size_t i = 1; i < e.items.size(); i++) {
           std::string label =
@@ -229,11 +240,82 @@ class Interp {
           if (rec->decl->fields[k].name == e.name) return rec->fields[k];
         throw EvalError("record has no field '" + e.name + "'");
       }
+      case Expr::Kind::Ctor: {
+        const TypeDecl* decl = e.type ? e.type->decl : nullptr;
+        if (!decl)
+          throw EvalError("internal error: unresolved constructor");
+        return Value{VariantV{decl, (int)e.inum, nullptr}};
+      }
+      case Expr::Kind::Match: {
+        // The scrutinee evaluates once; only the taken arm's body runs
+        // (same rule as `if`: untaken arms' render effects never fire).
+        Value scr = eval(*e.items[0], env, mod);
+        for (size_t a = 0; a < e.patterns.size(); a++) {
+          Env binds;
+          if (!matchPattern(e.patterns[a], scr, binds)) continue;
+          std::vector<std::pair<std::string, std::optional<Value>>> saved;
+          for (auto& [n, v] : binds) {
+            auto prev = env.find(n);
+            saved.emplace_back(n, prev != env.end()
+                                      ? std::optional<Value>(prev->second)
+                                      : std::nullopt);
+            env[n] = v;
+          }
+          Value out = eval(*e.items[a + 1], env, mod);
+          for (auto it = saved.rbegin(); it != saved.rend(); ++it) {
+            if (it->second) env[it->first] = std::move(*it->second);
+            else env.erase(it->first);
+          }
+          return out;
+        }
+        // The checker proved exhaustiveness; this is defense in depth.
+        throw EvalError("no pattern matched the value at build time");
+      }
       case Expr::Kind::External:
         // evalDefs and applyValue dispatch external bodies before eval.
         throw EvalError("internal error: external body evaluated directly");
     }
     throw EvalError("internal error: unknown expression kind");
+  }
+
+  // Structural pattern match; collects the bound names on success. The
+  // checker resolved constructor indexes and field names already.
+  bool matchPattern(const Pattern& p, const Value& v, Env& binds) {
+    switch (p.kind) {
+      case Pattern::Kind::Wildcard:
+        return true;
+      case Pattern::Kind::Bind:
+        binds[p.name] = v;
+        return true;
+      case Pattern::Kind::Tuple: {
+        const TupleV* t = std::get_if<TupleV>(&v.v);
+        if (!t || t->items.size() != p.items.size()) return false;
+        for (size_t i = 0; i < p.items.size(); i++)
+          if (!matchPattern(p.items[i], t->items[i], binds)) return false;
+        return true;
+      }
+      case Pattern::Kind::Record: {
+        const RecordV* r = std::get_if<RecordV>(&v.v);
+        if (!r) return false;
+        for (size_t i = 0; i < p.fieldNames.size(); i++) {
+          const Value* field = nullptr;
+          for (size_t k = 0; k < r->decl->fields.size(); k++)
+            if (r->decl->fields[k].name == p.fieldNames[i])
+              field = &r->fields[k];
+          if (!field || !matchPattern(p.items[i], *field, binds))
+            return false;
+        }
+        return true;
+      }
+      case Pattern::Kind::Ctor: {
+        const VariantV* var = std::get_if<VariantV>(&v.v);
+        if (!var || var->ctor != p.ctorIndex) return false;
+        if (p.items.empty()) return true;
+        if (!var->payload) return false;
+        return matchPattern(p.items[0], *var->payload, binds);
+      }
+    }
+    return false;
   }
 
   Value lookup(const Expr& ident, Env& env, const CheckedModule& mod) {

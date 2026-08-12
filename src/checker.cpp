@@ -74,6 +74,8 @@ class ModuleChecker {
     // Type declarations in scope, by surface name. Same position-ordered
     // shadowing as values.
     std::map<std::string, const TypeDecl*> types;
+    // Variant constructors in scope: name -> (declaration, index).
+    std::map<std::string, std::pair<const TypeDecl*, int>> ctors;
   };
   std::vector<Frame> frames_;
 
@@ -83,6 +85,20 @@ class ModuleChecker {
       if (v != it->types.end()) return v->second;
     }
     return nullptr;
+  }
+
+  const std::pair<const TypeDecl*, int>* lookupCtor(
+      const std::string& name) const {
+    for (auto it = frames_.rbegin(); it != frames_.rend(); ++it) {
+      auto v = it->ctors.find(name);
+      if (v != it->ctors.end()) return &v->second;
+    }
+    return nullptr;
+  }
+
+  static void bindDeclCtors(Frame& frame, const TypeDecl* decl) {
+    for (size_t i = 0; i < decl->ctors.size(); i++)
+      frame.ctors[decl->ctors[i].name] = {decl, (int)i};
   }
 
   const ScopeVal* lookupValue(const std::string& name) const {
@@ -177,8 +193,8 @@ class ModuleChecker {
       decl->params.push_back(p);
       decl->paramVars.push_back(v);
     }
-    // Register before resolving members: the declaration may refer to
-    // itself. Registration is what makes it visible to later
+    // Register the name before resolving members: the declaration may
+    // refer to itself. Registration is what makes it visible to later
     // definitions, too (shadowing any opened name, like a let).
     mod_.typeDecls[stored] = decl;
     frames_.back().types[def.name] = decl.get();
@@ -201,6 +217,9 @@ class ModuleChecker {
           {c.name, c.type ? resolveType(*c.type) : nullptr});
     }
     declTypeVarsOnly_ = false;
+    // Constructor names enter scope once the list is complete (their
+    // scope entries carry indexes into it).
+    bindDeclCtors(frames_.back(), decl.get());
   }
   // Signature variables ('a) are rigid ids (negative); every use site
   // instantiates a stored signature with fresh non-negative ids so two
@@ -516,6 +535,389 @@ class ModuleChecker {
          "no record type in scope has exactly the fields { " + fs + " }");
   }
 
+  // Resolve a (possibly qualified) constructor reference to its
+  // declaration and index. Unqualified names resolve through the scope
+  // frames; qualified ones search the named module's variant
+  // declarations.
+  std::pair<const TypeDecl*, int> resolveCtor(const std::string& moduleName,
+                                              const std::string& name,
+                                              Span span) {
+    if (moduleName.empty()) {
+      if (const auto* c = lookupCtor(name)) return *c;
+      fail(span, "unknown constructor '" + name + "'");
+    }
+    ModRef r = resolveModulePath(moduleName, span);
+    const CheckedModule* host = &mod_;
+    if (!r.moduleId.empty()) {
+      host = prog_.find(r.moduleId);
+      if (!host) fail(span, "module '" + r.moduleId + "' was not checked");
+    }
+    const TypeDecl* found = nullptr;
+    int foundIdx = -1;
+    std::string pre = r.prefix.empty() ? "" : r.prefix + ".";
+    for (auto& [dn, decl] : host->typeDecls) {
+      if (!pre.empty() && (dn.rfind(pre, 0) != 0 ||
+                           dn.find('.', pre.size()) != std::string::npos))
+        continue;
+      if (pre.empty() && dn.find('.') != std::string::npos) continue;
+      for (size_t i = 0; i < decl->ctors.size(); i++) {
+        if (decl->ctors[i].name != name) continue;
+        if (found)
+          fail(span, "constructor '" + name + "' is ambiguous in module '" +
+                         moduleName + "' ('" + found->name + "' and '" +
+                         decl->name + "' both declare it)");
+        found = decl.get();
+        foundIdx = (int)i;
+      }
+    }
+    if (!found)
+      fail(span, "module '" + moduleName + "' has no constructor named '" +
+                     name + "'");
+    return {found, foundIdx};
+  }
+
+  // Constructor application through the ordinary App node: exactly one
+  // positional argument (tuples carry more). Constructors are not
+  // first-class - a bare payload-carrying constructor is an error, so
+  // this is the only path an applied one takes.
+  TypePtr checkCtorApp(Expr& e, std::map<std::string, TypePtr>& env) {
+    Expr& callee = *e.items[0];
+    auto [decl, idx] = resolveCtor(callee.moduleName, callee.name,
+                                   callee.span);
+    callee.inum = idx;
+    const TypeDecl::Ctor& c = decl->ctors[idx];
+    if (!c.payload)
+      fail(e.span, "constructor '" + callee.name + "' takes no argument");
+    if (e.items.size() != 2 ||
+        (!e.argLabels.empty() && !e.argLabels[0].empty()))
+      fail(e.span, "constructor '" + callee.name +
+                       "' takes exactly one (positional) argument; bundle "
+                       "several as a tuple");
+    TypePtr argT = check(*e.items[1], env);
+    Subst freshening;
+    for (auto& pv : decl->paramVars)
+      freshening[pv->var] = tVar(nextFreshVar_++, pv->varName);
+    TypePtr sig = applySubst(c.payload, freshening);
+    Subst subst;
+    if (!unify(sig, argT, subst))
+      fail(e.items[1]->span,
+           "constructor '" + callee.name + "' expects " +
+               typeName(applySubst(sig, subst)) + ", got " + typeName(argT));
+    std::vector<TypePtr> args;
+    for (auto& pv : decl->paramVars)
+      args.push_back(applySubst(freshening.at(pv->var), subst));
+    TypePtr result = tNamed(decl, std::move(args));
+    callee.type = result;  // the evaluator reads decl and index from here
+    return result;
+  }
+
+  // Bind a pattern against the type it matches, collecting the names it
+  // introduces. Patterns destructure - every type here comes from the
+  // scrutinee, no inference happens.
+  void bindPattern(Pattern& p, const TypePtr& t,
+                   std::map<std::string, TypePtr>& binds) {
+    p.type = t;
+    switch (p.kind) {
+      case Pattern::Kind::Wildcard:
+        return;
+      case Pattern::Kind::Bind:
+        if (binds.count(p.name))
+          fail(p.span, "duplicate name '" + p.name + "' in pattern");
+        binds[p.name] = t;
+        return;
+      case Pattern::Kind::Tuple: {
+        if (t->kind != Type::Kind::Tuple)
+          fail(p.span, "this pattern destructures a tuple, but the value "
+                       "has type " + typeName(t));
+        if (t->items.size() != p.items.size())
+          fail(p.span, "tuple pattern has " +
+                           std::to_string(p.items.size()) +
+                           " element(s) but the value has " +
+                           std::to_string(t->items.size()));
+        for (size_t i = 0; i < p.items.size(); i++)
+          bindPattern(p.items[i], t->items[i], binds);
+        return;
+      }
+      case Pattern::Kind::Record: {
+        if (t->kind != Type::Kind::Named ||
+            t->decl->flavor != TypeDecl::Flavor::Record)
+          fail(p.span, "this pattern destructures a record, but the value "
+                       "has type " + typeName(t));
+        Subst args = declSubst(t->decl, t->items);
+        for (size_t i = 0; i < p.fieldNames.size(); i++) {
+          for (size_t j = 0; j < i; j++)
+            if (p.fieldNames[i] == p.fieldNames[j])
+              fail(p.items[i].span,
+                   "duplicate field '" + p.fieldNames[i] + "' in pattern");
+          const TypeDecl::Field* f = t->decl->findField(p.fieldNames[i]);
+          if (!f)
+            fail(p.items[i].span, "type '" + t->decl->name +
+                                      "' has no field '" + p.fieldNames[i] +
+                                      "'");
+          bindPattern(p.items[i], applySubst(f->type, args), binds);
+        }
+        return;
+      }
+      case Pattern::Kind::Ctor: {
+        if (t->kind != Type::Kind::Named ||
+            t->decl->flavor != TypeDecl::Flavor::Variant) {
+          if (t->kind == Type::Kind::Named &&
+              t->decl->flavor == TypeDecl::Flavor::Abstract)
+            fail(p.span, "type '" + t->decl->name +
+                             "' is abstract - it has no constructors to "
+                             "match");
+          fail(p.span, "this pattern matches a constructor, but the value "
+                       "has type " + typeName(t));
+        }
+        const TypeDecl::Ctor* c = t->decl->findCtor(p.name);
+        if (!c)
+          fail(p.span, "type '" + t->decl->name +
+                           "' has no constructor '" + p.name + "'");
+        for (size_t i = 0; i < t->decl->ctors.size(); i++)
+          if (&t->decl->ctors[i] == c) p.ctorIndex = (int)i;
+        if (!c->payload && !p.items.empty())
+          fail(p.span, "constructor '" + p.name + "' takes no argument");
+        if (c->payload && p.items.empty())
+          fail(p.span, "constructor '" + p.name + "' carries a value; "
+                       "match it too ('" + p.name + " _' at least)");
+        if (c->payload)
+          bindPattern(p.items[0],
+                      applySubst(c->payload, declSubst(t->decl, t->items)),
+                      binds);
+        return;
+      }
+    }
+  }
+
+  // --- Match usefulness (exhaustiveness + redundancy) ---------------------
+  //
+  // Classic pattern-matrix usefulness (Maranget), simplified by the
+  // pattern language: no literal or or-patterns, so every column is
+  // either an opaque type (wildcards only), a tuple/record (one
+  // constructor), or a variant (a small closed constructor set). The
+  // witness built alongside makes "not exhaustive" errors concrete.
+
+  // The single-constructor sub-columns of `t` (empty for opaque types).
+  struct ColCtor {
+    int index = 0;                 // variant ctor index (0 otherwise)
+    std::vector<TypePtr> subTypes; // its argument columns
+    std::string display;           // witness rendering, %s per sub
+  };
+
+  static std::vector<ColCtor> columnCtors(const TypePtr& t) {
+    std::vector<ColCtor> out;
+    if (t->kind == Type::Kind::Tuple) {
+      ColCtor c;
+      c.subTypes = t->items;
+      out.push_back(std::move(c));
+      return out;
+    }
+    if (t->kind != Type::Kind::Named) return out;
+    if (t->decl->flavor == TypeDecl::Flavor::Record) {
+      ColCtor c;
+      Subst args = declSubst(t->decl, t->items);
+      for (auto& f : t->decl->fields)
+        c.subTypes.push_back(applySubst(f.type, args));
+      out.push_back(std::move(c));
+      return out;
+    }
+    if (t->decl->flavor == TypeDecl::Flavor::Variant) {
+      Subst args = declSubst(t->decl, t->items);
+      for (size_t i = 0; i < t->decl->ctors.size(); i++) {
+        ColCtor c;
+        c.index = (int)i;
+        if (t->decl->ctors[i].payload)
+          c.subTypes.push_back(applySubst(t->decl->ctors[i].payload, args));
+        out.push_back(std::move(c));
+      }
+      return out;
+    }
+    return out;
+  }
+
+  // Does row-pattern `p` cover constructor `k` of its column? Wildcards
+  // and binds cover everything; a ctor pattern covers its own index;
+  // tuple/record patterns cover their single constructor.
+  static bool coversCtor(const Pattern& p, int k) {
+    switch (p.kind) {
+      case Pattern::Kind::Wildcard:
+      case Pattern::Kind::Bind:
+        return true;
+      case Pattern::Kind::Ctor:
+        return p.ctorIndex == k;
+      case Pattern::Kind::Tuple:
+      case Pattern::Kind::Record:
+        return true;
+    }
+    return false;
+  }
+
+  // The sub-patterns `p` contributes for constructor `k` (arity n).
+  // Record patterns list a subset of fields in any order; expand them to
+  // the declaration's full field list.
+  static void subPatterns(const Pattern& p, const TypePtr& t, size_t n,
+                          std::vector<const Pattern*>& out) {
+    static const Pattern kWild{};
+    switch (p.kind) {
+      case Pattern::Kind::Wildcard:
+      case Pattern::Kind::Bind:
+        out.insert(out.end(), n, &kWild);
+        return;
+      case Pattern::Kind::Ctor:
+        for (auto& s : p.items) out.push_back(&s);
+        out.insert(out.end(), n - p.items.size(), &kWild);
+        return;
+      case Pattern::Kind::Tuple:
+        for (auto& s : p.items) out.push_back(&s);
+        return;
+      case Pattern::Kind::Record: {
+        for (auto& f : t->decl->fields) {
+          const Pattern* sub = &kWild;
+          for (size_t i = 0; i < p.fieldNames.size(); i++)
+            if (p.fieldNames[i] == f.name) sub = &p.items[i];
+          out.push_back(sub);
+        }
+        return;
+      }
+    }
+  }
+
+  // Is pattern-vector `q` useful (matches something no row matches)?
+  // On success `witness` (when asked for) receives one example value
+  // per column that `q` matches and the rows miss.
+  bool useful(const std::vector<std::vector<const Pattern*>>& rows,
+              const std::vector<TypePtr>& types,
+              const std::vector<const Pattern*>& q,
+              std::vector<std::string>* witness) {
+    if (types.empty()) return rows.empty();
+    static const Pattern kWild{};
+    const Pattern& q0 = *q[0];
+    const TypePtr& t = types[0];
+    std::vector<ColCtor> ctors = columnCtors(t);
+
+    auto specialized = [&](const ColCtor& c, const Pattern* head)
+        -> std::optional<bool> {
+      // Build the specialized problem for constructor `c`, with `head`
+      // as q's first pattern (a wildcard expands to sub-wildcards).
+      std::vector<std::vector<const Pattern*>> subRows;
+      for (auto& row : rows) {
+        if (!coversCtor(*row[0], c.index)) continue;
+        std::vector<const Pattern*> r;
+        subPatterns(*row[0], t, c.subTypes.size(), r);
+        r.insert(r.end(), row.begin() + 1, row.end());
+        subRows.push_back(std::move(r));
+      }
+      std::vector<TypePtr> subTypes = c.subTypes;
+      subTypes.insert(subTypes.end(), types.begin() + 1, types.end());
+      std::vector<const Pattern*> subQ;
+      subPatterns(*head, t, c.subTypes.size(), subQ);
+      subQ.insert(subQ.end(), q.begin() + 1, q.end());
+      std::vector<std::string> subWitness;
+      if (!useful(subRows, subTypes, subQ,
+                  witness ? &subWitness : nullptr))
+        return std::nullopt;
+      if (witness) {
+        // Render this column's example from the constructor + its subs.
+        std::string s = renderCtorWitness(
+            t, c,
+            std::vector<std::string>(subWitness.begin(),
+                                     subWitness.begin() +
+                                         (long)c.subTypes.size()));
+        witness->clear();
+        witness->push_back(std::move(s));
+        witness->insert(witness->end(),
+                        subWitness.begin() + (long)c.subTypes.size(),
+                        subWitness.end());
+      }
+      return true;
+    };
+
+    if (ctors.empty()) {
+      // Opaque column: checked patterns can only be wildcards here.
+      std::vector<std::vector<const Pattern*>> defRows;
+      for (auto& row : rows) {
+        std::vector<const Pattern*> r(row.begin() + 1, row.end());
+        defRows.push_back(std::move(r));
+      }
+      std::vector<TypePtr> rest(types.begin() + 1, types.end());
+      std::vector<const Pattern*> restQ(q.begin() + 1, q.end());
+      std::vector<std::string> subWitness;
+      if (!useful(defRows, rest, restQ, witness ? &subWitness : nullptr))
+        return false;
+      if (witness) {
+        witness->clear();
+        witness->push_back("_");
+        witness->insert(witness->end(), subWitness.begin(),
+                        subWitness.end());
+      }
+      return true;
+    }
+
+    if (q0.kind == Pattern::Kind::Wildcard ||
+        q0.kind == Pattern::Kind::Bind) {
+      for (auto& c : ctors)
+        if (specialized(c, &kWild)) return true;
+      return false;
+    }
+    // q rooted at one constructor: only its specialization matters.
+    for (auto& c : ctors)
+      if (coversCtor(q0, c.index)) return specialized(c, &q0).has_value();
+    return false;
+  }
+
+  static std::string renderCtorWitness(const TypePtr& t, const ColCtor& c,
+                                       const std::vector<std::string>& subs) {
+    if (t->kind == Type::Kind::Tuple) {
+      std::string s = "(";
+      for (size_t i = 0; i < subs.size(); i++)
+        s += (i ? ", " : "") + subs[i];
+      return s + ")";
+    }
+    if (t->kind == Type::Kind::Named &&
+        t->decl->flavor == TypeDecl::Flavor::Record) {
+      std::string s = "{ ";
+      for (size_t i = 0; i < subs.size(); i++)
+        s += (i ? "; " : "") + t->decl->fields[i].name + " = " + subs[i];
+      return s + " }";
+    }
+    const std::string& name = t->decl->ctors[(size_t)c.index].name;
+    if (subs.empty()) return name;
+    std::string payload = subs[0];
+    if (payload.find(' ') != std::string::npos && payload[0] != '(' &&
+        payload[0] != '{')
+      payload = "(" + payload + ")";
+    return name + " " + payload;
+  }
+
+  // Exhaustiveness and redundancy for a checked match.
+  void checkMatchCoverage(Expr& e, const TypePtr& scrT) {
+    static const Pattern kWild{};
+    std::vector<std::vector<const Pattern*>> rows;
+    std::vector<TypePtr> types{scrT};
+    for (size_t a = 0; a < e.patterns.size(); a++) {
+      std::vector<const Pattern*> q{&e.patterns[a]};
+      if (!useful(rows, types, q, nullptr)) {
+        if (!e.declType)  // pure duplication, not a destructuring let
+          fail(e.patterns[a].span,
+               "this match case is unreachable (the cases above already "
+               "cover it)");
+      }
+      rows.push_back(std::move(q));
+    }
+    std::vector<std::string> witness;
+    std::vector<const Pattern*> q{&kWild};
+    if (useful(rows, types, q, &witness)) {
+      std::string ex = witness.empty() ? "_" : witness[0];
+      if (e.declType)
+        fail(e.patterns[0].span,
+             "this pattern must match every value of " + typeName(scrT) +
+                 ", but " + ex + " is not covered (use 'match' for "
+                 "refutable patterns)");
+      fail(e.span, "this match is not exhaustive: for example, " + ex +
+                       " is not covered");
+    }
+  }
+
   TypePtr checkInner(Expr& e, std::map<std::string, TypePtr>& env) {
     switch (e.kind) {
       case Expr::Kind::NumLit: return tScalar();
@@ -653,6 +1055,88 @@ class ModuleChecker {
                      typeName(got));
         }
         return baseT;
+      }
+      case Expr::Kind::Ctor: {
+        auto [decl, idx] = resolveCtor(e.moduleName, e.name, e.span);
+        e.inum = idx;
+        const TypeDecl::Ctor& c = decl->ctors[(size_t)idx];
+        if (c.payload)
+          fail(e.span, "constructor '" + e.name + "' takes an argument "
+                       "(constructors are not functions; write '" + e.name +
+                       " <value>')");
+        Subst freshening;
+        for (auto& pv : decl->paramVars)
+          freshening[pv->var] = tVar(nextFreshVar_++, pv->varName);
+        std::vector<TypePtr> args;
+        for (auto& pv : decl->paramVars)
+          args.push_back(freshening.at(pv->var));
+        // Leftover free arguments resolve against the annotation or the
+        // surrounding call, exactly like a partial application.
+        return tNamed(decl, std::move(args));
+      }
+      case Expr::Kind::Match: {
+        if (!e.declType && e.declTypeExpr)
+          e.declType = resolveType(*e.declTypeExpr);
+        TypePtr scrT = check(*e.items[0], env);
+        if (e.declType) {
+          // A destructuring let: the annotation pins the scrutinee, the
+          // same way an ordinary local binding's annotation does.
+          bool ok;
+          if (containsAnyVar(scrT)) {
+            Subst subst;
+            ok = unify(scrT, e.declType, subst);
+          } else {
+            ok = typeEquals(scrT, e.declType);
+          }
+          if (!ok)
+            fail(e.items[0]->span,
+                 "this binding has type " + typeName(scrT) +
+                     " but is annotated as " + typeName(e.declType));
+          scrT = e.declType;
+        }
+        if (scrT->kind == Type::Kind::Var)
+          fail(e.items[0]->span,
+               "cannot match on a value whose type is not determined "
+               "here (" + typeName(scrT) + ")");
+        TypePtr result;
+        for (size_t a = 0; a < e.patterns.size(); a++) {
+          std::map<std::string, TypePtr> binds;
+          bindPattern(e.patterns[a], scrT, binds);
+          // Bind (shadowing) for this arm's body only, then restore.
+          std::vector<std::pair<std::string, std::optional<TypePtr>>> saved;
+          for (auto& [n, t] : binds) {
+            auto prev = env.find(n);
+            saved.emplace_back(n, prev != env.end()
+                                      ? std::optional<TypePtr>(prev->second)
+                                      : std::nullopt);
+            env[n] = t;
+          }
+          TypePtr armT = check(*e.items[a + 1], env);
+          for (auto it = saved.rbegin(); it != saved.rend(); ++it) {
+            if (it->second) env[it->first] = *it->second;
+            else env.erase(it->first);
+          }
+          if (!result) {
+            result = armT;
+            continue;
+          }
+          // Arms agree like `if` branches: unify when either side still
+          // carries variables, structural equality otherwise.
+          if (containsAnyVar(result) || containsAnyVar(armT)) {
+            Subst subst;
+            if (!unify(result, armT, subst))
+              fail(e.items[a + 1]->span,
+                   "match cases have different types: " + typeName(result) +
+                       " vs " + typeName(armT));
+            result = applySubst(result, subst);
+          } else if (!typeEquals(result, armT)) {
+            fail(e.items[a + 1]->span,
+                 "match cases have different types: " + typeName(result) +
+                     " vs " + typeName(armT));
+          }
+        }
+        checkMatchCoverage(e, scrT);
+        return result;
       }
       case Expr::Kind::Project: {
         TypePtr t = check(*e.items[0], env);
@@ -840,8 +1324,10 @@ class ModuleChecker {
             frame.modules[p.substr(pre.size())] = {r.moduleId, p};
         for (auto& [name, decl] : host->typeDecls)
           if (name.rfind(pre, 0) == 0 &&
-              name.find('.', pre.size()) == std::string::npos)
+              name.find('.', pre.size()) == std::string::npos) {
             frame.types[name.substr(pre.size())] = decl.get();
+            bindDeclCtors(frame, decl.get());
+          }
         return;
       }
       for (auto& [name, type] : host->defTypes) {
@@ -854,8 +1340,10 @@ class ModuleChecker {
         if (p.find('.') == std::string::npos)
           frame.modules[p] = {r.moduleId, p};
       for (auto& [name, decl] : host->typeDecls)
-        if (name.find('.') == std::string::npos)
+        if (name.find('.') == std::string::npos) {
           frame.types[name] = decl.get();
+          bindDeclCtors(frame, decl.get());
+        }
       for (auto& [name, target] : host->exportedModules)
         frame.modules[name] = {target, ""};
     } catch (const Abort&) {
@@ -1017,6 +1505,7 @@ class ModuleChecker {
 
   TypePtr checkApp(Expr& e, std::map<std::string, TypePtr>& env) {
     Expr& callee = *e.items[0];
+    if (callee.kind == Expr::Kind::Ctor) return checkCtorApp(e, env);
 
     // Check arguments first. Most are concrete; the ones that are not - a
     // nested partial application of a polymorphic callee, or a value of

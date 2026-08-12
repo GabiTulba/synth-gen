@@ -428,7 +428,146 @@ class Parser {
     if (at(Tok::Let)) return parseLetIn();
     if (at(Tok::Fun)) return parseLambda();
     if (at(Tok::If)) return parseIf();
+    if (at(Tok::Match)) return parseMatch();
     return parsePipe();
+  }
+
+  // match e with | P1 -> e1 | P2 -> e2. Arm bodies extend maximally
+  // right (like lambda and if), so a match nested inside an arm must be
+  // parenthesized - otherwise the outer arms would read as its own.
+  ExprPtr parseMatch() {
+    Span lo = advance().span;  // 'match'
+    ExprPtr scr = parseExpr();
+    expect(Tok::With, "'with' after the match scrutinee");
+    auto e = std::make_unique<Expr>(Expr::Kind::Match, lo);
+    e->items.push_back(std::move(scr));
+    if (at(Tok::Bar)) advance();  // optional leading '|'
+    for (;;) {
+      e->patterns.push_back(parsePattern());
+      expect(Tok::Arrow, "'->' after the pattern");
+      ExprPtr body = parseExpr();
+      e->span = {lo.lo, body->span.hi};
+      e->items.push_back(std::move(body));
+      if (!at(Tok::Bar)) break;
+      advance();
+    }
+    return e;
+  }
+
+  // A (possibly dotted) constructor path: UpIdent { "." UpIdent }. The
+  // final segment is the constructor, leading ones its module path.
+  void parseCtorPath(std::string& moduleName, std::string& name,
+                     Span& span) {
+    const Token& first = expect(Tok::UpIdent, "constructor name");
+    name = first.text;
+    span = first.span;
+    while (at(Tok::Dot) && peek(1).kind == Tok::UpIdent) {
+      advance();  // '.'
+      const Token& seg = advance();
+      moduleName += (moduleName.empty() ? "" : ".") + name;
+      name = seg.text;
+      span.hi = seg.span.hi;
+    }
+  }
+
+  // Top-level pattern: a constructor may take its payload here
+  // (Cons (x, rest), Pulse duty); everywhere nested, parenthesize.
+  Pattern parsePattern() {
+    if (at(Tok::UpIdent)) {
+      Pattern p;
+      p.kind = Pattern::Kind::Ctor;
+      parseCtorPath(p.moduleName, p.name, p.span);
+      if (startsPatternAtom()) {
+        Pattern payload = parsePatternAtom();
+        p.span.hi = payload.span.hi;
+        p.items.push_back(std::move(payload));
+      }
+      return p;
+    }
+    return parsePatternAtom();
+  }
+
+  bool startsPatternAtom() const {
+    switch (peek().kind) {
+      case Tok::Ident:
+      case Tok::UpIdent:
+      case Tok::LParen:
+      case Tok::LBrace:
+        return true;
+      default:
+        return false;
+    }
+  }
+
+  Pattern parsePatternAtom() {
+    const Token& t = peek();
+    switch (t.kind) {
+      case Tok::Ident: {
+        advance();
+        Pattern p;
+        p.kind = t.text == "_" ? Pattern::Kind::Wildcard
+                               : Pattern::Kind::Bind;
+        p.name = t.text;
+        p.span = t.span;
+        return p;
+      }
+      case Tok::UpIdent: {
+        // In atom position a constructor cannot take a payload;
+        // parenthesize (Some (Pulse d)).
+        Pattern p;
+        p.kind = Pattern::Kind::Ctor;
+        parseCtorPath(p.moduleName, p.name, p.span);
+        return p;
+      }
+      case Tok::LParen: {
+        Span lo = advance().span;
+        Pattern first = parsePattern();
+        if (at(Tok::Comma)) {
+          Pattern tup;
+          tup.kind = Pattern::Kind::Tuple;
+          tup.items.push_back(std::move(first));
+          while (at(Tok::Comma)) {
+            advance();
+            tup.items.push_back(parsePattern());
+          }
+          const Token& close = expect(Tok::RParen, "')'");
+          tup.span = {lo.lo, close.span.hi};
+          return tup;
+        }
+        const Token& close = expect(Tok::RParen, "')'");
+        first.span = {lo.lo, close.span.hi};
+        return first;
+      }
+      case Tok::LBrace: {
+        // { attack; release } or { attack = a; ... }: a subset of the
+        // record's fields; a bare field name binds under its own name.
+        Span lo = advance().span;
+        Pattern rec;
+        rec.kind = Pattern::Kind::Record;
+        for (;;) {
+          const Token& fn = expect(Tok::Ident, "field name");
+          rec.fieldNames.push_back(fn.text);
+          if (at(Tok::Equals)) {
+            advance();
+            rec.items.push_back(parsePattern());
+          } else {
+            Pattern bind;
+            bind.kind = Pattern::Kind::Bind;
+            bind.name = fn.text;
+            bind.span = fn.span;
+            rec.items.push_back(std::move(bind));
+          }
+          if (!at(Tok::Semi)) break;
+          advance();
+        }
+        const Token& close = expect(Tok::RBrace, "'}'");
+        rec.span = {lo.lo, close.span.hi};
+        return rec;
+      }
+      default:
+        fail(t.span, std::string("expected a pattern, found ") +
+                         tokenName(t.kind));
+    }
   }
 
   // Conditional: if cond then e1 else e2 - a build-time expression, so
@@ -478,6 +617,26 @@ class Parser {
   // `let f : T -> R = fun ...` spelled out by hand, labels included.
   ExprPtr parseLetIn() {
     Span lo = advance().span;  // 'let'
+    // Destructuring: let (lo, hi) : T = e in body / let { f; g } : T =
+    // e in body. Represented as a single-arm match carrying the
+    // annotation; the checker requires the arm irrefutable.
+    if (at(Tok::LParen) || at(Tok::LBrace)) {
+      Pattern p = parsePatternAtom();
+      expect(Tok::Colon, "':' (destructuring bindings are annotated: "
+                         "let (a, b) : Type = ... in ...)");
+      TypeExprPtr ty = parseType();
+      expect(Tok::Equals, "'='");
+      ExprPtr bound = parseExpr();
+      expect(Tok::In, "'in' to close the local binding");
+      ExprPtr body = parseExpr();
+      auto e = std::make_unique<Expr>(Expr::Kind::Match,
+                                      Span{lo.lo, body->span.hi});
+      e->declTypeExpr = std::move(ty);
+      e->items.push_back(std::move(bound));
+      e->patterns.push_back(std::move(p));
+      e->items.push_back(std::move(body));
+      return e;
+    }
     const Token& name = expect(Tok::Ident, "binding name");
     std::vector<Param> params;
     parseParams(params);
@@ -731,24 +890,39 @@ class Parser {
         return e;
       }
       case Tok::UpIdent: {
-        // Qualified reference: Module.name or Lib.File.name. All dotted
-        // UpIdent segments form the module path; the final lowercase
-        // identifier is the definition name (unambiguous: definitions
-        // are lowercase-initial).
+        // A dotted path. A lowercase leaf is a qualified value
+        // (Module.name, Lib.File.name); an uppercase leaf - including a
+        // bare capitalized name - is a constructor reference
+        // (definitions are lowercase-initial, so this is unambiguous).
         advance();
-        std::string qual = t.text;
-        expect(Tok::Dot, "'.' after module name");
-        while (at(Tok::UpIdent)) {
-          const Token& seg = advance();
-          qual += "." + seg.text;
-          expect(Tok::Dot, "'.' after module name");
+        std::string qual;
+        std::string last = t.text;
+        uint32_t hi = t.span.hi;
+        for (;;) {
+          if (at(Tok::Dot) && peek(1).kind == Tok::UpIdent) {
+            advance();  // '.'
+            const Token& seg = advance();
+            qual += (qual.empty() ? "" : ".") + last;
+            last = seg.text;
+            hi = seg.span.hi;
+            continue;
+          }
+          if (at(Tok::Dot) && peek(1).kind == Tok::Ident) {
+            advance();  // '.'
+            const Token& n = advance();
+            qual += (qual.empty() ? "" : ".") + last;
+            auto e = std::make_unique<Expr>(Expr::Kind::Ident,
+                                            Span{t.span.lo, n.span.hi});
+            e->moduleName = std::move(qual);
+            e->name = n.text;
+            return e;
+          }
+          auto e = std::make_unique<Expr>(Expr::Kind::Ctor,
+                                          Span{t.span.lo, hi});
+          e->moduleName = std::move(qual);
+          e->name = std::move(last);
+          return e;
         }
-        const Token& n = expect(Tok::Ident, "identifier after '.'");
-        auto e = std::make_unique<Expr>(Expr::Kind::Ident,
-                                        Span{t.span.lo, n.span.hi});
-        e->moduleName = std::move(qual);
-        e->name = n.text;
-        return e;
       }
       case Tok::LParen: {
         Span lo = advance().span;

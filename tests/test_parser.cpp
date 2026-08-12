@@ -718,3 +718,82 @@ TEST(parser_qualified_type_name) {
   CHECK(defs[0].retTypeExpr->name == "Voice");
   CHECK(defs[0].retTypeExpr->args[0]->name == "Scalar");
 }
+
+TEST(parser_match_expression) {
+  DiagnosticBag diags;
+  auto defs = parseSrc(
+      "let f w:Wave : Scalar =\n"
+      "  match w with\n"
+      "  | Sine -> 1.0\n"
+      "  | Pulse duty -> duty ;;",
+      diags);
+  CHECK(!diags.hasErrors());
+  const Expr& m = *defs[0].body;
+  CHECK(m.kind == Expr::Kind::Match);
+  CHECK(m.items.size() == 3);
+  CHECK(m.patterns.size() == 2);
+  CHECK(m.patterns[0].kind == Pattern::Kind::Ctor);
+  CHECK(m.patterns[0].name == "Sine");
+  CHECK(m.patterns[0].items.empty());
+  CHECK(m.patterns[1].name == "Pulse");
+  CHECK(m.patterns[1].items.size() == 1);
+  CHECK(m.patterns[1].items[0].kind == Pattern::Kind::Bind);
+  CHECK(m.patterns[1].items[0].name == "duty");
+}
+
+TEST(parser_match_patterns) {
+  DiagnosticBag diags;
+  auto defs = parseSrc(
+      "let f x:Note : Scalar =\n"
+      "  match x with\n"
+      "  | Play (freq, _) -> freq\n"
+      "  | Rest -> 0.0 ;;",
+      diags);
+  CHECK(!diags.hasErrors());
+  const Expr& m = *defs[0].body;
+  CHECK(m.patterns[0].items[0].kind == Pattern::Kind::Tuple);
+  CHECK(m.patterns[0].items[0].items[0].kind == Pattern::Kind::Bind);
+  CHECK(m.patterns[0].items[0].items[1].kind == Pattern::Kind::Wildcard);
+}
+
+TEST(parser_bare_and_qualified_ctor_expressions) {
+  DiagnosticBag diags;
+  auto defs = parseSrc(
+      "let a : Wave = Sine ;;\n"
+      "let b : Wave = Pulse 0.25 ;;\n"
+      "let c : Wave = Shapes.Sine ;;\n"
+      "let d : Scalar = Shapes.gain ;;",
+      diags);
+  CHECK(!diags.hasErrors());
+  CHECK(defs[0].body->kind == Expr::Kind::Ctor);
+  CHECK(defs[0].body->name == "Sine");
+  CHECK(defs[1].body->kind == Expr::Kind::App);
+  CHECK(defs[1].body->items[0]->kind == Expr::Kind::Ctor);
+  CHECK(defs[2].body->kind == Expr::Kind::Ctor);
+  CHECK(defs[2].body->moduleName == "Shapes");
+  CHECK(defs[2].body->name == "Sine");
+  CHECK(defs[3].body->kind == Expr::Kind::Ident);
+  CHECK(defs[3].body->moduleName == "Shapes");
+}
+
+TEST(parser_destructuring_let_in) {
+  DiagnosticBag diags;
+  auto defs = parseSrc(
+      "let x : Scalar =\n"
+      "  let (lo, hi) : (Scalar, Scalar) = bounds in lo + hi ;;\n"
+      "let y : Timestamp =\n"
+      "  let { attack; release = r } : Env = env in r ;;",
+      diags);
+  CHECK(!diags.hasErrors());
+  const Expr& m1 = *defs[0].body;
+  CHECK(m1.kind == Expr::Kind::Match);
+  CHECK(m1.declTypeExpr != nullptr);
+  CHECK(m1.patterns.size() == 1);
+  CHECK(m1.patterns[0].kind == Pattern::Kind::Tuple);
+  const Expr& m2 = *defs[1].body;
+  CHECK(m2.patterns[0].kind == Pattern::Kind::Record);
+  CHECK(m2.patterns[0].fieldNames.size() == 2);
+  CHECK(m2.patterns[0].items[0].kind == Pattern::Kind::Bind);
+  CHECK(m2.patterns[0].items[0].name == "attack");  // punned
+  CHECK(m2.patterns[0].items[1].name == "r");       // renamed
+}

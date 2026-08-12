@@ -2572,3 +2572,235 @@ let out : Scalar Signal = v.osc * v.vel ;;
   CHECK(!diags.hasErrors());
   CHECK(typeEquals(userMod(prog).defTypes.at("out"), tSignal(tScalar())));
 }
+
+TEST(checker_variant_and_match) {
+  TempProject tp;
+  std::string f = tp.write("t.synth", R"(
+type Wave = | Sine | Saw | Pulse of Scalar ;;
+let width w:Wave : Scalar =
+  match w with
+  | Sine -> 0.0
+  | Saw -> 0.5
+  | Pulse duty -> duty ;;
+let a : Scalar = width Sine ;;
+let b : Scalar = width (Pulse 0.25) ;;
+)");
+  DiagnosticBag diags;
+  Program prog = checkProject({f}, diags);
+  for (auto& d : diags.items)
+    std::cerr << renderDiagnostic(d, userMod(prog).parsed.source);
+  CHECK(!diags.hasErrors());
+  CHECK(typeEquals(userMod(prog).defTypes.at("a"), tScalar()));
+}
+
+TEST(checker_match_not_exhaustive) {
+  TempProject tp;
+  std::string f = tp.write("t.synth", R"(
+type Wave = | Sine | Saw | Pulse of Scalar ;;
+let width w:Wave : Scalar =
+  match w with
+  | Sine -> 0.0
+  | Pulse duty -> duty ;;
+)");
+  DiagnosticBag diags;
+  checkProject({f}, diags);
+  CHECK(diags.hasErrors());
+  bool found = false;
+  for (auto& d : diags.items)
+    if (d.message.find("not exhaustive") != std::string::npos &&
+        d.message.find("Saw") != std::string::npos)
+      found = true;
+  CHECK(found);
+}
+
+TEST(checker_match_redundant_case) {
+  TempProject tp;
+  std::string f = tp.write("t.synth", R"(
+type Wave = | Sine | Saw ;;
+let width w:Wave : Scalar =
+  match w with
+  | Sine -> 0.0
+  | _ -> 0.5
+  | Saw -> 1.0 ;;
+)");
+  DiagnosticBag diags;
+  checkProject({f}, diags);
+  CHECK(diags.hasErrors());
+  bool found = false;
+  for (auto& d : diags.items)
+    if (d.message.find("unreachable") != std::string::npos) found = true;
+  CHECK(found);
+}
+
+TEST(checker_match_nested_exhaustiveness) {
+  // Nested payload coverage: Pulse's payload is opaque (Scalar), so a
+  // bare `Pulse` arm set covers it only through a wildcard/bind.
+  TempProject tp;
+  std::string f = tp.write("t.synth", R"(
+type Wave = | Sine | Pulse of Scalar ;;
+type Slot = | Empty | Full of Wave ;;
+let f s:Slot : Scalar =
+  match s with
+  | Empty -> 0.0
+  | Full Sine -> 1.0 ;;
+)");
+  DiagnosticBag d1;
+  checkProject({f}, d1);
+  CHECK(d1.hasErrors());
+  bool found = false;
+  for (auto& d : d1.items)
+    if (d.message.find("not exhaustive") != std::string::npos &&
+        d.message.find("Full (Pulse _)") != std::string::npos)
+      found = true;
+  CHECK(found);
+  TempProject tp2;
+  std::string g = tp2.write("t.synth", R"(
+type Wave = | Sine | Pulse of Scalar ;;
+type Slot = | Empty | Full of Wave ;;
+let f s:Slot : Scalar =
+  match s with
+  | Empty -> 0.0
+  | Full Sine -> 1.0
+  | Full (Pulse d) -> d ;;
+)");
+  DiagnosticBag d2;
+  Program p2 = checkProject({g}, d2);
+  for (auto& d : d2.items)
+    std::cerr << renderDiagnostic(d, userMod(p2).parsed.source);
+  CHECK(!d2.hasErrors());
+}
+
+TEST(checker_match_arm_type_mismatch_and_abstract) {
+  TempProject tp;
+  std::string f = tp.write("t.synth", R"(
+type Wave = | Sine | Saw ;;
+let f w:Wave : Scalar =
+  match w with
+  | Sine -> 1.0
+  | Saw -> 500ms ;;
+)");
+  DiagnosticBag d1;
+  checkProject({f}, d1);
+  CHECK(d1.hasErrors());
+  TempProject tp2;
+  std::string g = tp2.write("t.synth", R"(
+type Handle ;;
+let f h:Handle : Scalar =
+  match h with
+  | Open -> 1.0 ;;
+)");
+  DiagnosticBag d2;
+  checkProject({g}, d2);
+  CHECK(d2.hasErrors());
+  bool found = false;
+  for (auto& d : d2.items)
+    if (d.message.find("abstract") != std::string::npos) found = true;
+  CHECK(found);
+}
+
+TEST(checker_polymorphic_variant) {
+  TempProject tp;
+  std::string f = tp.write("t.synth", R"(
+type 'a Option = | None | Some of 'a ;;
+let get x:Scalar Option ~fallback:Scalar : Scalar =
+  match x with
+  | None -> fallback
+  | Some v -> v ;;
+let a : Scalar = get (Some 2.0) ~fallback:0.0 ;;
+let b : Scalar Option = None ;;
+let or_else x:'a Option ~fallback:'a : 'a =
+  match x with
+  | None -> fallback
+  | Some v -> v ;;
+let c : Timestamp = or_else (Some 5ms) ~fallback:0s ;;
+)");
+  DiagnosticBag diags;
+  Program prog = checkProject({f}, diags);
+  for (auto& d : diags.items)
+    std::cerr << renderDiagnostic(d, userMod(prog).parsed.source);
+  CHECK(!diags.hasErrors());
+  CHECK(typeEquals(userMod(prog).defTypes.at("c"), tTimestamp()));
+}
+
+TEST(checker_destructuring_let) {
+  TempProject tp;
+  std::string f = tp.write("t.synth", R"(
+type Env = { attack : Timestamp; release : Timestamp } ;;
+let bounds : (Scalar, Scalar) = (0.1, 0.9) ;;
+let mid : Scalar =
+  let (lo, hi) : (Scalar, Scalar) = bounds in (lo + hi) / 2.0 ;;
+let env : Env = { attack = 5ms; release = 100ms } ;;
+let a : Timestamp =
+  let { attack; release = r } : Env = env in
+  if attack < r then attack else r ;;
+)");
+  DiagnosticBag diags;
+  Program prog = checkProject({f}, diags);
+  for (auto& d : diags.items)
+    std::cerr << renderDiagnostic(d, userMod(prog).parsed.source);
+  CHECK(!diags.hasErrors());
+  CHECK(typeEquals(userMod(prog).defTypes.at("mid"), tScalar()));
+}
+
+TEST(checker_destructuring_let_must_be_irrefutable) {
+  TempProject tp;
+  std::string f = tp.write("t.synth", R"(
+type 'a Option = | None | Some of 'a ;;
+let x : Scalar Option = Some 1.0 ;;
+let y : Scalar =
+  match x with
+  | Some v -> v
+  | None -> 0.0 ;;
+)");
+  DiagnosticBag ok;
+  checkProject({f}, ok);
+  CHECK(!ok.hasErrors());
+  // Tuple pattern against a non-tuple: rejected.
+  TempProject tp2;
+  std::string g = tp2.write("t.synth",
+                            "let y : Scalar =\n"
+                            "  let (a, b) : Scalar = 1.0 in a ;;");
+  DiagnosticBag d2;
+  checkProject({g}, d2);
+  CHECK(d2.hasErrors());
+}
+
+TEST(checker_ctor_not_first_class) {
+  TempProject tp;
+  std::string f = tp.write("t.synth", R"(
+type Wave = | Sine | Pulse of Scalar ;;
+let p : Wave = Pulse ;;
+)");
+  DiagnosticBag d1;
+  checkProject({f}, d1);
+  CHECK(d1.hasErrors());
+  TempProject tp2;
+  std::string g = tp2.write("t.synth", R"(
+type Wave = | Sine | Pulse of Scalar ;;
+let p : Wave = Sine 1.0 ;;
+)");
+  DiagnosticBag d2;
+  checkProject({g}, d2);
+  CHECK(d2.hasErrors());
+}
+
+TEST(checker_ctor_across_modules) {
+  TempProject tp;
+  tp.write("shapes.synth", R"(
+type Wave = | Sine | Pulse of Scalar ;;
+)");
+  std::string f = tp.write("song.synth", R"(
+import Shapes
+let a : Shapes.Wave = Shapes.Sine ;;
+let b : Shapes.Wave = Shapes.Pulse 0.5 ;;
+let w : Scalar =
+  match b with
+  | Shapes.Sine -> 0.0
+  | Shapes.Pulse d -> d ;;
+)");
+  DiagnosticBag diags;
+  Program prog = checkProject({f}, diags);
+  for (auto& d : diags.items)
+    std::cerr << renderDiagnostic(d, prog.modules.back().parsed.source);
+  CHECK(!diags.hasErrors());
+}

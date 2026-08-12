@@ -63,6 +63,11 @@ void forEachLet(const std::vector<TopDef>& defs, Fn&& fn) {
 using DepMap =
     std::map<std::string, std::pair<const CheckedModule*, const TopDef*>>;
 
+void collectPatternNames(const Pattern& p, std::set<std::string>& into) {
+  if (p.kind == Pattern::Kind::Bind) into.insert(p.name);
+  for (auto& s : p.items) collectPatternNames(s, into);
+}
+
 void collectDeps(const Expr& e, const std::set<std::string>& params,
                  const CheckedModule& mod, const Program& prog, DepMap& out) {
   if (e.kind == Expr::Kind::Ident) {
@@ -92,6 +97,16 @@ void collectDeps(const Expr& e, const std::set<std::string>& params,
     std::set<std::string> scoped = params;
     for (auto& p : e.params) scoped.insert(p.name);
     collectDeps(*e.items[0], scoped, mod, prog, out);
+    return;
+  }
+  if (e.kind == Expr::Kind::Match) {
+    // Pattern-bound names shadow defs inside their own arm's body only.
+    collectDeps(*e.items[0], params, mod, prog, out);
+    for (size_t a = 0; a + 1 < e.items.size(); a++) {
+      std::set<std::string> scoped = params;
+      if (a < e.patterns.size()) collectPatternNames(e.patterns[a], scoped);
+      collectDeps(*e.items[a + 1], scoped, mod, prog, out);
+    }
     return;
   }
   for (auto& child : e.items) collectDeps(*child, params, mod, prog, out);

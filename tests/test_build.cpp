@@ -2484,3 +2484,81 @@ let use b:Box : Inner = b.v ;;
   // changed, two hops away in the type-dependency chain.
   CHECK(hScalar != hVector);
 }
+
+TEST(build_variants_and_match_evaluate) {
+  TempDir tp;
+  tp.write("song.synth", R"(
+open Core open Core.Osc open Core.Arrange open Core.Render
+type Wave = | Sine | Pulse of Scalar ;;
+let osc w:Wave ~freq:Scalar : Scalar Signal =
+  match w with
+  | Sine -> sine ~freq:freq
+  | Pulse duty -> square ~freq:freq * duty ;;
+let out : Scalar Signal = osc Sine ~freq:440.0 + osc (Pulse 0.25) ~freq:220.0 ;;
+let _ = render "waves" 48000.0 (sample out 0s 50ms) ;;
+)");
+  tp.write("build.json", projectManifest("waves-demo", {"song.synth"}));
+  BuildResult r = buildProject(tp.dir.string());
+  for (auto& d : r.diags.items) std::cerr << d.message << "\n";
+  CHECK(r.ok);
+  CHECK(r.targets.size() == 1);
+  CHECK(r.targets[0].ok);
+}
+
+TEST(build_untaken_match_arm_does_not_render) {
+  // Render effects in untaken arms never fire (same rule as `if`).
+  TempDir tp;
+  tp.write("song.synth", R"(
+open Core open Core.Osc open Core.Arrange open Core.Render
+type Mode = | On | Off ;;
+let mode : Mode = On ;;
+let _ =
+  match mode with
+  | On -> render "on" 48000.0 (sample (sine 440.0) 0s 10ms)
+  | Off -> render "off" 48000.0 (sample (sine 220.0) 0s 10ms) ;;
+)");
+  tp.write("build.json", projectManifest("mode-demo", {"song.synth"}));
+  BuildResult r = buildProject(tp.dir.string());
+  for (auto& d : r.diags.items) std::cerr << d.message << "\n";
+  CHECK(r.ok);
+  CHECK(r.targets.size() == 1);
+  CHECK(r.targets[0].name == "on");
+}
+
+TEST(build_variant_through_external_boundary) {
+  // Variants round-trip opaquely through polymorphic externals.
+  TempDir tp;
+  tp.write("song.synth", R"(
+open Core open Core.Osc open Core.Arrange open Core.Render
+type Wave = | Sine | Pulse of Scalar ;;
+let waves : Wave list = List.map ~f:(fun d:Scalar -> Pulse d) ~xs:[0.25; 0.5] ;;
+let toSig w:Wave : Scalar Signal =
+  match w with
+  | Sine -> sine 440.0
+  | Pulse d -> square ~freq:110.0 * d ;;
+let out : Scalar Signal = mix_all (List.map ~f:toSig ~xs:waves) ;;
+let _ = render "vw" 48000.0 (sample out 0s 20ms) ;;
+)");
+  tp.write("build.json", projectManifest("vw-demo", {"song.synth"}));
+  BuildResult r = buildProject(tp.dir.string());
+  for (auto& d : r.diags.items) std::cerr << d.message << "\n";
+  CHECK(r.ok);
+  CHECK(r.targets[0].ok);
+}
+
+TEST(build_destructuring_let_evaluates) {
+  TempDir tp;
+  tp.write("song.synth", R"(
+open Core open Core.Osc open Core.Arrange open Core.Render
+type Env = { freq : Scalar; gain : Scalar } ;;
+let e : Env = { freq = 440.0; gain = 0.5 } ;;
+let out : Scalar Signal =
+  let { freq; gain = g } : Env = e in sine freq * g ;;
+let _ = render "de" 48000.0 (sample out 0s 10ms) ;;
+)");
+  tp.write("build.json", projectManifest("de-demo", {"song.synth"}));
+  BuildResult r = buildProject(tp.dir.string());
+  for (auto& d : r.diags.items) std::cerr << d.message << "\n";
+  CHECK(r.ok);
+  CHECK(r.targets[0].ok);
+}

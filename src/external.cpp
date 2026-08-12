@@ -32,8 +32,29 @@ std::string readFileOrEmpty(const fs::path& p) {
   return ss.str();
 }
 
-ext::Value toExt(const Value& v) {
+ext::Value toExt(const Value& v, const ExtServices& svc) {
+  const CoreListInfo& list = svc.coreList;
   ext::Value out;
+  // A Core list value (a Cons/Nil chain) flattens to an ext-level list,
+  // so implementations keep seeing plain vectors.
+  if (auto* var = std::get_if<VariantV>(&v.v);
+      var && list && var->decl == list.decl) {
+    out.kind = ext::Value::Kind::List;
+    const VariantV* cur = var;
+    for (;;) {
+      if (cur->ctor == list.nilIndex) break;
+      const TupleV* cell =
+          cur->payload ? std::get_if<TupleV>(&cur->payload->v) : nullptr;
+      if (!cell || cell->items.size() != 2)
+        throw EvalError("internal error: malformed list value");
+      out.items.push_back(toExt(cell->items[0], svc));
+      const VariantV* next = std::get_if<VariantV>(&cell->items[1].v);
+      if (!next)
+        throw EvalError("internal error: malformed list value");
+      cur = next;
+    }
+    return out;
+  }
   if (std::holds_alternative<UnitV>(v.v)) {
     out.kind = ext::Value::Kind::Unit;
   } else if (auto* s = std::get_if<ScalarV>(&v.v)) {
@@ -59,18 +80,23 @@ ext::Value toExt(const Value& v) {
       e.num = c;
       out.items.push_back(std::move(e));
     }
-  } else if (auto* list = std::get_if<ListV>(&v.v)) {
-    out.kind = ext::Value::Kind::List;
-    for (auto& x : list->items) out.items.push_back(toExt(x));
   } else if (auto* tup = std::get_if<TupleV>(&v.v)) {
     out.kind = ext::Value::Kind::Tuple;
-    for (auto& x : tup->items) out.items.push_back(toExt(x));
+    for (auto& x : tup->items) out.items.push_back(toExt(x, svc));
   } else if (auto* sig = std::get_if<SigPtr>(&v.v)) {
     out.kind = ext::Value::Kind::Signal;
     out.sig = *sig;
-  } else if (auto* samp = std::get_if<SampleV>(&v.v)) {
+  } else if (auto* rec = std::get_if<RecordV>(&v.v);
+             rec && svc.coreSample && rec->decl == svc.coreSample.decl) {
+    // A Core Sample record becomes the engine-level sample.
+    const CoreSampleInfo& cs = svc.coreSample;
+    const SigPtr* sig = std::get_if<SigPtr>(&rec->fields[(size_t)cs.sigField].v);
+    const TimeV* from = std::get_if<TimeV>(&rec->fields[(size_t)cs.fromField].v);
+    const TimeV* to = std::get_if<TimeV>(&rec->fields[(size_t)cs.toField].v);
+    if (!sig || !from || !to)
+      throw EvalError("internal error: malformed Sample value");
     out.kind = ext::Value::Kind::Sample;
-    out.samp = ext::Sample{samp->sig, samp->from, samp->to};
+    out.samp = ext::Sample{*sig, from->seconds, to->seconds};
   } else {
     // Functions (and any future kind): an opaque box the implementation
     // can apply through ctx or hand back unchanged.
@@ -80,7 +106,8 @@ ext::Value toExt(const Value& v) {
   return out;
 }
 
-Value fromExt(const ext::Value& v) {
+Value fromExt(const ext::Value& v, const ExtServices& svc) {
+  const CoreListInfo& list = svc.coreList;
   switch (v.kind) {
     case ext::Value::Kind::Unit: return Value{UnitV{}};
     case ext::Value::Kind::Scalar: return Value{ScalarV{v.num}};
@@ -94,22 +121,41 @@ Value fromExt(const ext::Value& v) {
       return Value{std::move(out)};
     }
     case ext::Value::Kind::List: {
-      ListV out;
-      for (auto& x : v.items) out.items.push_back(fromExt(x));
-      return Value{std::move(out)};
+      if (!list)
+        throw EvalError("internal error: Core's list type is not loaded");
+      Value out{VariantV{list.decl, list.nilIndex, nullptr}};
+      for (auto it = v.items.rbegin(); it != v.items.rend(); ++it) {
+        TupleV cell;
+        cell.items.push_back(fromExt(*it, svc));
+        cell.items.push_back(std::move(out));
+        out = Value{VariantV{list.decl, list.consIndex,
+                             std::make_shared<Value>(
+                                 Value{std::move(cell)})}};
+      }
+      return out;
     }
     case ext::Value::Kind::Tuple: {
       TupleV out;
-      for (auto& x : v.items) out.items.push_back(fromExt(x));
+      for (auto& x : v.items) out.items.push_back(fromExt(x, svc));
       return Value{std::move(out)};
     }
     case ext::Value::Kind::Signal:
       if (!v.sig) throw EvalError("external: returned a null Signal");
       return Value{v.sig};
-    case ext::Value::Kind::Sample:
+    case ext::Value::Kind::Sample: {
       if (!v.samp.signal)
         throw EvalError("external: returned a Sample with a null Signal");
-      return Value{SampleV{v.samp.signal, v.samp.from, v.samp.to}};
+      if (!svc.coreSample)
+        throw EvalError("internal error: Core's Sample type is not loaded");
+      const CoreSampleInfo& cs = svc.coreSample;
+      RecordV rec;
+      rec.decl = cs.decl;
+      rec.fields.resize(3);
+      rec.fields[(size_t)cs.sigField] = Value{v.samp.signal};
+      rec.fields[(size_t)cs.fromField] = Value{TimeV{v.samp.from}};
+      rec.fields[(size_t)cs.toField] = Value{TimeV{v.samp.to}};
+      return Value{std::move(rec)};
+    }
     case ext::Value::Kind::Opaque:
       if (!v.opaque)
         throw EvalError("external: returned an empty opaque value");
@@ -251,8 +297,8 @@ ExternalFn loadUserExternal(const std::string& cppPath,
                        std::vector<ext::Value> a) -> ext::Value {
       std::vector<Value> hostArgs;
       hostArgs.reserve(a.size());
-      for (auto& x : a) hostArgs.push_back(fromExt(x));
-      return toExt(svc.apply(fromExt(fn), std::move(hostArgs)));
+      for (auto& x : a) hostArgs.push_back(fromExt(x, svc));
+      return toExt(svc.apply(fromExt(fn, svc), std::move(hostArgs)), svc);
     };
     ctx.loadAudio = svc.loadAudio;
     ctx.render = [&svc](ext::RenderDecl d) {
@@ -263,7 +309,7 @@ ExternalFn loadUserExternal(const std::string& cppPath,
 
     std::vector<ext::Value> extArgs;
     extArgs.reserve(args.size());
-    for (auto& a : args) extArgs.push_back(toExt(a));
+    for (auto& a : args) extArgs.push_back(toExt(a, svc));
     ext::Value result;
     std::string error;
     bool ok;
@@ -279,7 +325,7 @@ ExternalFn loadUserExternal(const std::string& cppPath,
       throw EvalError("external '" + name + "' (" + cppPath + "): " +
                       (error.empty() ? "implementation reported failure"
                                      : error));
-    return fromExt(result);
+    return fromExt(result, svc);
   };
 }
 

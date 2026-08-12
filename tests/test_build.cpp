@@ -1147,18 +1147,20 @@ let _ = mix_all (List.repeat 1 (sine 1.0)) |> sample ~from:0s ~to:10ms
   CHECK(!rb.ok);
   CHECK(rb.diags.hasErrors());
 
-  // A negative count types fine and is still a build (evaluation) error.
+  // A negative count types fine and yields the empty list (List.init
+  // counts up from 0, so nothing below n=1 produces an element).
   TempDir neg;
   neg.write("p.synth", R"(
 open Core open Core.Osc open Core.Fx open Core.Arrange open Core.Render open Core.Io open Core.Time open Core.Sig open Core.Math
 let xs : Scalar list = List.repeat (0 - 2) 1.0 ;;
-let _ = mix_all (List.repeat 1 (sine 1.0)) |> sample ~from:0s ~to:10ms
+let n : Int = List.fold ~f:(fun acc:Int x:Scalar -> acc + 1) ~init:0 ~xs:xs ;;
+let _ = mix_all (List.repeat (n + 1) (sine 1.0)) |> sample ~from:0s ~to:10ms
         |> render ~name:"x" ~rate:8000.0 ;;
 )");
   neg.write("build.json", projectManifest("negrep", {"p.synth"}));
   BuildResult rn = buildProject(neg.dir.string());
-  CHECK(!rn.ok);
-  CHECK(rn.diags.hasErrors());
+  for (auto& d : rn.diags.items) std::cerr << d.message << "\n";
+  CHECK(rn.ok);
 }
 
 TEST(build_let_in_matches_flat_version) {
@@ -2402,4 +2404,333 @@ let _ = layers |> sample ~from:0s ~to:100ms
   double peak = 0;
   for (double v : w.channels[0]) peak = std::max(peak, std::fabs(v));
   CHECK_NEAR(peak, 0.4, 0.01);
+}
+
+TEST(build_records_evaluate_and_render) {
+  // Records built, updated, projected and passed through an external
+  // (mix_all's list elements come out of record fields).
+  TempDir tp;
+  tp.write("song.synth", R"(
+open Core open Core.Osc open Core.Fx open Core.Arrange open Core.Render
+type Voice = { osc : Scalar Signal; vel : Scalar } ;;
+let v : Voice = { osc = sine 440.0; vel = 0.5 } ;;
+let quiet : Voice = { v with vel = 0.25 } ;;
+let mixed : Scalar Signal = v.osc * v.vel + quiet.osc * quiet.vel ;;
+let _ = render "rec" 48000.0 (sample mixed 0s 100ms) ;;
+)");
+  tp.write("build.json", projectManifest("rec-demo", {"song.synth"}));
+  BuildResult r = buildProject(tp.dir.string());
+  for (auto& d : r.diags.items) std::cerr << d.message << "\n";
+  CHECK(r.ok);
+  CHECK(r.targets.size() == 1);
+  CHECK(r.targets[0].ok);
+  WavData w = readWav((tp.dir / "_build" / "artifacts" / "rec.wav").string());
+  CHECK(w.frames() == 4800);
+  // 0.75 * sine(440) peaks around 0.75.
+  double peak = 0;
+  for (auto s : w.channels[0]) peak = std::max(peak, std::fabs(s));
+  CHECK(peak > 0.7);
+  CHECK(peak < 0.8);
+}
+
+TEST(build_record_through_external_boundary) {
+  // A record round-trips opaquely through a polymorphic external:
+  // List.map carries Voice values through C++ and back.
+  TempDir tp;
+  tp.write("song.synth", R"(
+open Core open Core.Osc open Core.Arrange open Core.Render
+type Voice = { osc : Scalar Signal; vel : Scalar } ;;
+let mk f:Scalar : Voice = { osc = sine f; vel = 0.5 } ;;
+let flatten v:Voice : Scalar Signal = v.osc * v.vel ;;
+let voices : Voice list = List.map ~f:mk ~xs:[220.0; 440.0] ;;
+let out : Scalar Signal = mix_all (List.map ~f:flatten ~xs:voices) ;;
+let _ = render "vox" 48000.0 (sample out 0s 50ms) ;;
+)");
+  tp.write("build.json", projectManifest("vox-demo", {"song.synth"}));
+  BuildResult r = buildProject(tp.dir.string());
+  for (auto& d : r.diags.items) std::cerr << d.message << "\n";
+  CHECK(r.ok);
+  CHECK(r.targets[0].ok);
+}
+
+TEST(build_type_decl_edit_invalidates_dependents) {
+  // Changing a type declaration changes the closure hash of every
+  // definition typed by it - even transitively, and even when the
+  // dependent definitions' own source text is unchanged.
+  auto check = [](const char* innerField, uint64_t* outHash) {
+    TempDir tp;
+    tp.write("song.synth", std::string(R"(
+type Inner = { x : )") + innerField + R"( } ;;
+type Box = { v : Inner } ;;
+let use b:Box : Inner = b.v ;;
+)");
+    DiagnosticBag diags;
+    Program prog = checkProject({(tp.dir / "song.synth").string()}, diags);
+    CHECK(!diags.hasErrors());
+    const CheckedModule* m = nullptr;
+    for (auto& mm : prog.modules)
+      if (mm.libName != "Core") m = &mm;
+    const TopDef* use = nullptr;
+    for (auto& d : m->parsed.defs)
+      if (d.kind == TopDef::Kind::Let && d.name == "use") use = &d;
+    // Stable across repeated hashing of one program.
+    CHECK(defClosureHash(prog, *m, *use) == defClosureHash(prog, *m, *use));
+    *outHash = defClosureHash(prog, *m, *use);
+  };
+  uint64_t hScalar = 0, hScalar2 = 0, hVector = 0;
+  check("Scalar", &hScalar);
+  check("Scalar", &hScalar2);
+  check("Vector", &hVector);
+  CHECK(hScalar == hScalar2);  // same sources -> same hash across runs
+  // `use` and `Box` texts are identical in both programs; only Inner
+  // changed, two hops away in the type-dependency chain.
+  CHECK(hScalar != hVector);
+}
+
+TEST(build_variants_and_match_evaluate) {
+  TempDir tp;
+  tp.write("song.synth", R"(
+open Core open Core.Osc open Core.Arrange open Core.Render
+type Wave = | Sine | Pulse of Scalar ;;
+let osc w:Wave ~freq:Scalar : Scalar Signal =
+  match w with
+  | Sine -> sine ~freq:freq
+  | Pulse duty -> square ~freq:freq * duty ;;
+let out : Scalar Signal = osc Sine ~freq:440.0 + osc (Pulse 0.25) ~freq:220.0 ;;
+let _ = render "waves" 48000.0 (sample out 0s 50ms) ;;
+)");
+  tp.write("build.json", projectManifest("waves-demo", {"song.synth"}));
+  BuildResult r = buildProject(tp.dir.string());
+  for (auto& d : r.diags.items) std::cerr << d.message << "\n";
+  CHECK(r.ok);
+  CHECK(r.targets.size() == 1);
+  CHECK(r.targets[0].ok);
+}
+
+TEST(build_untaken_match_arm_does_not_render) {
+  // Render effects in untaken arms never fire (same rule as `if`).
+  TempDir tp;
+  tp.write("song.synth", R"(
+open Core open Core.Osc open Core.Arrange open Core.Render
+type Mode = | On | Off ;;
+let mode : Mode = On ;;
+let _ =
+  match mode with
+  | On -> render "on" 48000.0 (sample (sine 440.0) 0s 10ms)
+  | Off -> render "off" 48000.0 (sample (sine 220.0) 0s 10ms) ;;
+)");
+  tp.write("build.json", projectManifest("mode-demo", {"song.synth"}));
+  BuildResult r = buildProject(tp.dir.string());
+  for (auto& d : r.diags.items) std::cerr << d.message << "\n";
+  CHECK(r.ok);
+  CHECK(r.targets.size() == 1);
+  CHECK(r.targets[0].name == "on");
+}
+
+TEST(build_variant_through_external_boundary) {
+  // Variants round-trip opaquely through polymorphic externals.
+  TempDir tp;
+  tp.write("song.synth", R"(
+open Core open Core.Osc open Core.Arrange open Core.Render
+type Wave = | Sine | Pulse of Scalar ;;
+let waves : Wave list = List.map ~f:(fun d:Scalar -> Pulse d) ~xs:[0.25; 0.5] ;;
+let toSig w:Wave : Scalar Signal =
+  match w with
+  | Sine -> sine 440.0
+  | Pulse d -> square ~freq:110.0 * d ;;
+let out : Scalar Signal = mix_all (List.map ~f:toSig ~xs:waves) ;;
+let _ = render "vw" 48000.0 (sample out 0s 20ms) ;;
+)");
+  tp.write("build.json", projectManifest("vw-demo", {"song.synth"}));
+  BuildResult r = buildProject(tp.dir.string());
+  for (auto& d : r.diags.items) std::cerr << d.message << "\n";
+  CHECK(r.ok);
+  CHECK(r.targets[0].ok);
+}
+
+TEST(build_destructuring_let_evaluates) {
+  TempDir tp;
+  tp.write("song.synth", R"(
+open Core open Core.Osc open Core.Arrange open Core.Render
+type Env = { freq : Scalar; gain : Scalar } ;;
+let e : Env = { freq = 440.0; gain = 0.5 } ;;
+let out : Scalar Signal =
+  let { freq; gain = g } : Env = e in sine freq * g ;;
+let _ = render "de" 48000.0 (sample out 0s 10ms) ;;
+)");
+  tp.write("build.json", projectManifest("de-demo", {"song.synth"}));
+  BuildResult r = buildProject(tp.dir.string());
+  for (auto& d : r.diags.items) std::cerr << d.message << "\n";
+  CHECK(r.ok);
+  CHECK(r.targets[0].ok);
+}
+
+TEST(build_let_rec_evaluates) {
+  TempDir tp;
+  tp.write("song.synth", R"(
+open Core open Core.Osc open Core.Arrange open Core.Render
+let rec fact n:Int : Int = if n <= 1 then 1 else n * fact (n - 1) ;;
+type Chain = | End | Link of (Scalar, Chain) ;;
+let rec total c:Chain : Scalar =
+  match c with
+  | End -> 0.0
+  | Link (x, rest) -> x + total rest ;;
+let gain : Scalar =
+  let rec go n:Int ~acc:Scalar : Scalar =
+    if n <= 0 then acc else go (n - 1) ~acc:(acc / 2.0) in
+  go (fact 3) ~acc:32.0 ;;
+let t : Scalar = total (Link (0.125, Link (0.125, End))) ;;
+let out : Scalar Signal = sine 440.0 * (gain / 2.0 + t) ;;
+let _ = render "rec" 48000.0 (sample out 0s 10ms) ;;
+)");
+  tp.write("build.json", projectManifest("rec-demo", {"song.synth"}));
+  BuildResult r = buildProject(tp.dir.string());
+  for (auto& d : r.diags.items) std::cerr << d.message << "\n";
+  CHECK(r.ok);
+  // fact 3 = 6 halvings of 32.0 -> 0.5; total = 0.25; amp = 0.5.
+  WavData w = readWav((tp.dir / "_build" / "artifacts" / "rec.wav").string());
+  double peak = 0;
+  for (auto s : w.channels[0]) peak = std::max(peak, std::fabs(s));
+  CHECK(peak > 0.45);
+  CHECK(peak < 0.55);
+}
+
+TEST(build_unbounded_recursion_is_diagnosed) {
+  TempDir tp;
+  tp.write("song.synth", R"(
+let rec loop n:Int : Int = loop (n + 1) ;;
+let x : Int = loop 0 ;;
+)");
+  tp.write("build.json", projectManifest("loop-demo", {"song.synth"}));
+  BuildResult r = buildProject(tp.dir.string());
+  CHECK(!r.ok);
+  bool found = false;
+  for (auto& d : r.diags.items)
+    if (d.message.find("recursion limit") != std::string::npos)
+      found = true;
+  CHECK(found);
+}
+
+TEST(build_deep_recursion_within_limit) {
+  // A recursion depth in the thousands (a large musical list) works.
+  TempDir tp;
+  tp.write("song.synth", R"(
+let rec count n:Int ~acc:Int : Int =
+  if n <= 0 then acc else count (n - 1) ~acc:(acc + 1) ;;
+let x : Int = count 3000 ~acc:0 ;;
+)");
+  tp.write("build.json", projectManifest("deep-demo", {"song.synth"}));
+  BuildResult r = buildProject(tp.dir.string());
+  for (auto& d : r.diags.items) std::cerr << d.message << "\n";
+  CHECK(r.ok);
+}
+
+TEST(build_recursive_def_hash_is_stable) {
+  TempDir tp;
+  tp.write("song.synth", R"(
+let rec fact n:Int : Int = if n <= 1 then 1 else n * fact (n - 1) ;;
+let use : Int = fact 5 ;;
+)");
+  DiagnosticBag diags;
+  Program prog = checkProject({(tp.dir / "song.synth").string()}, diags);
+  CHECK(!diags.hasErrors());
+  const CheckedModule* m = nullptr;
+  for (auto& mm : prog.modules)
+    if (mm.libName != "Core") m = &mm;
+  const TopDef *fact = nullptr, *use = nullptr;
+  for (auto& d : m->parsed.defs) {
+    if (d.name == "fact") fact = &d;
+    if (d.name == "use") use = &d;
+  }
+  uint64_t h1 = defClosureHash(prog, *m, *fact);
+  uint64_t h2 = defClosureHash(prog, *m, *fact);
+  CHECK(h1 == h2);  // terminates, deterministically
+  CHECK(defClosureHash(prog, *m, *use) != h1);
+}
+
+TEST(build_synthgraph_list_functions) {
+  // The List module is written in SynthGraph; map/fold/init/repeat all
+  // evaluate, lists cross the external boundary both ways, and match
+  // takes them apart.
+  TempDir tp;
+  tp.write("song.synth", R"(
+open Core open Core.Osc open Core.Arrange open Core.Render open Core.Time open Core.Math
+let rec sum xs:Scalar list : Scalar =
+  match xs with
+  | Nil -> 0.0
+  | Cons (x, rest) -> x + sum rest ;;
+let doubled : Scalar list = List.map ~f:(fun x:Scalar -> x * 2.0) ~xs:[1.0; 2.0; 3.0] ;;
+let total : Scalar = sum doubled ;;
+let folded : Scalar = List.fold ~f:(fun a:Scalar x:Scalar -> a + x) ~init:0.0 ~xs:doubled ;;
+let harmonics : Scalar Signal list =
+  List.init ~n:3 ~f:(fun i:Int -> sine (110.0 * (to_scalar i + 1.0))) ;;
+let steps : Timestamp list = time_steps ~start:0s ~step:100ms ~count:3 ;;
+let first_step : Timestamp =
+  match steps with
+  | Nil -> 0s
+  | Cons (t, _) -> t ;;
+let amp : Scalar = (total + folded) / 24.0 ;;
+let out : Scalar Signal = mix_all harmonics * amp ;;
+let _ = render "lists" 48000.0 (sample out first_step 50ms) ;;
+)");
+  tp.write("build.json", projectManifest("lists-demo", {"song.synth"}));
+  BuildResult r = buildProject(tp.dir.string());
+  for (auto& d : r.diags.items) std::cerr << d.message << "\n";
+  CHECK(r.ok);
+  CHECK(r.targets.size() == 1);
+  CHECK(r.targets[0].ok);
+  // total = 12, folded = 12 -> amp = 1.0; three sines peak near 3.0
+  // scaled by 1.0 via mix_all's normalization behavior - just require
+  // non-silence.
+  WavData w =
+      readWav((tp.dir / "_build" / "artifacts" / "lists.wav").string());
+  double peak = 0;
+  for (auto s : w.channels[0]) peak = std::max(peak, std::fabs(s));
+  CHECK(peak > 0.1);
+}
+
+TEST(build_long_list_map_within_recursion_limit) {
+  // A list in the thousands maps fine (each element is one recursion
+  // level in the SynthGraph List.map).
+  TempDir tp;
+  tp.write("song.synth", R"(
+open Core open Core.Time
+let steps : Timestamp list = time_steps ~start:0s ~step:1ms ~count:2000 ;;
+let same : Timestamp list = List.map ~f:(fun t:Timestamp -> t) ~xs:steps ;;
+let n : Int = List.fold ~f:(fun a:Int x:Timestamp -> a + 1) ~init:0 ~xs:same ;;
+)");
+  tp.write("build.json", projectManifest("long-demo", {"song.synth"}));
+  BuildResult r = buildProject(tp.dir.string());
+  for (auto& d : r.diags.items) std::cerr << d.message << "\n";
+  CHECK(r.ok);
+}
+
+TEST(build_sample_record_projection_and_update) {
+  // Cutting a window by record update renders byte-identically to
+  // cutting it with Arrange.sample directly.
+  TempDir viaUpdate, direct;
+  viaUpdate.write("p.synth", R"(
+open Core open Core.Osc open Core.Arrange open Core.Render
+let whole : Scalar Sample = sample (sine 440.0) 0s 200ms ;;
+let cut : Scalar Sample = { whole with from = 50ms; to = 150ms } ;;
+let start : Timestamp = cut.from ;;
+let _ = render "w" 48000.0 (sample (place cut start) 0s 200ms) ;;
+)");
+  viaUpdate.write("build.json", projectManifest("upd", {"p.synth"}));
+  direct.write("p.synth", R"(
+open Core open Core.Osc open Core.Arrange open Core.Render
+let cut : Scalar Sample = sample (sine 440.0) 50ms 150ms ;;
+let _ = render "w" 48000.0 (sample (place cut 50ms) 0s 200ms) ;;
+)");
+  direct.write("build.json", projectManifest("dir", {"p.synth"}));
+  BuildResult r1 = buildProject(viaUpdate.dir.string());
+  for (auto& d : r1.diags.items) std::cerr << d.message << "\n";
+  BuildResult r2 = buildProject(direct.dir.string());
+  for (auto& d : r2.diags.items) std::cerr << d.message << "\n";
+  CHECK(r1.ok);
+  CHECK(r2.ok);
+  std::string a = slurp(viaUpdate.dir / "_build" / "artifacts" / "w.wav");
+  std::string b = slurp(direct.dir / "_build" / "artifacts" / "w.wav");
+  CHECK(!a.empty());
+  CHECK(a == b);
 }

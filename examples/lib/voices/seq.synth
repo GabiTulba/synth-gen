@@ -1,7 +1,10 @@
 (* Sequencing helpers: a hit repeated on a regular grid, straight
    (`pattern`) or with humanizing timing jitter (`humanized`). The hit is
    an 'a Sample - the grid does not care whether it places mono or
-   multi-channel material, so the signatures say so. *)
+   multi-channel material, so the signatures say so.
+
+   The timing feel is a variant: one grid builder matches on it, and
+   the two public entry points are thin wrappers over the two shapes. *)
 
 open Core
 open Core.Osc
@@ -13,13 +16,26 @@ open Core.Time
 open Core.Sig
 open Core.Math
 
+type Feel = | Straight | Humanized of (Scalar, Timestamp) ;;
+
+let steps ~start:Timestamp ~step:Timestamp ~count:Int ~feel:Feel
+    : Timestamp list =
+  let grid : Timestamp list =
+    time_steps ~start:start ~step:step ~count:count in
+  match feel with
+  | Straight -> grid
+  | Humanized (seed, spread) ->
+      jitter ~seed:seed ~spread:spread ~steps:grid
+;;
+
 let pattern hit:'a Sample ~start:Timestamp ~step:Timestamp ~count:Int
     : 'a Signal =
-  place_multi hit (time_steps ~start:start ~step:step ~count:count)
+  place_multi hit (steps ~start:start ~step:step ~count:count
+                     ~feel:Straight)
 ;;
 
 let humanized hit:'a Sample ~start:Timestamp ~step:Timestamp
               ~count:Int ~seed:Scalar ~spread:Timestamp : 'a Signal =
-  place_multi hit (time_steps ~start:start ~step:step ~count:count
-                     |> jitter ~seed:seed ~spread:spread)
+  place_multi hit (steps ~start:start ~step:step ~count:count
+                     ~feel:(Humanized (seed, spread)))
 ;;

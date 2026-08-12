@@ -17,6 +17,8 @@ enum class Tok {
   If,
   Then,
   Else,
+  Match,
+  With,
   Ident,      // lowercase-initial identifier or `_`
   UpIdent,    // uppercase-initial identifier (types, module names)
   TypeVar,    // 'a — a type variable in an annotation; text is the name
@@ -33,11 +35,14 @@ enum class Tok {
   RParen,
   LBracket,
   RBracket,
+  LBrace,     // {
+  RBrace,     // }
   Comma,
   Dot,
   Arrow,      // ->
   Tilde,      // ~ (labeled parameter/argument marker)
   PipeGt,     // |>
+  Bar,        // | (variant declarations and match arms)
   Plus,
   Minus,
   Star,

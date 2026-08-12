@@ -29,6 +29,10 @@ struct TimeV { double seconds = 0; };
 struct BoolV { bool v = false; };
 struct StringV { std::string s; };
 struct VectorV { std::vector<double> v; };
+// A sample as the render pipeline consumes it: a signal plus the window
+// to cut. At the language level a Sample is an ordinary Core RECORD
+// value ({ sig; from; to }); this plain struct survives only inside
+// RenderTarget, after evaluation.
 struct SampleV {
   SigPtr sig;
   double from = 0, to = 0;
@@ -50,13 +54,46 @@ struct LambdaV {
   std::shared_ptr<const std::map<std::string, Value>> captured;
   std::shared_ptr<std::map<std::string, Value>> bound;  // by param name
 };
-struct ListV { std::vector<Value> items; };
 struct TupleV { std::vector<Value> items; };
+// A record value: fields in DECLARATION order (projection is by index
+// into the declaration's field list, whatever order a literal wrote).
+struct RecordV {
+  const TypeDecl* decl = nullptr;
+  std::vector<Value> fields;
+};
+// A variant value: which constructor (an index into the declaration's
+// constructor list) and its payload, if the constructor takes one.
+struct VariantV {
+  const TypeDecl* decl = nullptr;
+  int ctor = 0;
+  std::shared_ptr<Value> payload;  // null for a payload-less constructor
+};
 
 struct Value {
   std::variant<UnitV, ScalarV, IntV, TimeV, BoolV, StringV, VectorV, SigPtr,
-               SampleV, ListV, TupleV, FunV, LambdaV>
+               TupleV, FunV, LambdaV, RecordV, VariantV>
       v;
+};
+
+// Core's list declaration and its constructor indexes: lists are
+// ordinary Cons/Nil variant values, and the external boundary flattens
+// them to (and rebuilds them from) ext-level lists with this.
+struct CoreListInfo {
+  const TypeDecl* decl = nullptr;
+  int nilIndex = 0;
+  int consIndex = 1;
+  explicit operator bool() const { return decl != nullptr; }
+};
+
+// Core's Sample declaration and its field indexes: samples are ordinary
+// record values ({ sig; from; to }), and the external boundary converts
+// them to (and from) the engine-level ext::Sample with this.
+struct CoreSampleInfo {
+  const TypeDecl* decl = nullptr;
+  int sigField = 0;
+  int fromField = 1;
+  int toField = 2;
+  explicit operator bool() const { return decl != nullptr; }
 };
 
 // A build target collected from a `render` call (§5.2): the name is the

@@ -4,11 +4,13 @@
 
 #include <filesystem>
 #include <fstream>
+#include <sstream>
 #include <string>
 #include <vector>
 
 #include "checker.hpp"
 #include "json.hpp"
+#include "library.hpp"
 #include "test_framework.hpp"
 
 using namespace synth;
@@ -690,4 +692,70 @@ TEST(lsp_unsaved_buffer_overrides_disk) {
   const json::Value* diags = note.get("params")->get("diagnostics");
   CHECK(diags != nullptr);
   CHECK(diags->array.empty());
+}
+
+TEST(lsp_formatting_record_and_type_syntax) {
+  TempDir tmp;
+  fs::path p = tmp.write("song.synth", "");
+  std::string uri = uriFor(p);
+  std::string text =
+      "type Env = {attack : Timestamp;release : Timestamp} ;;\n"
+      "type Wave = |Sine|Pulse of Scalar ;;\n"
+      "let e : Env = { attack=5ms;   release =100ms } ;;\n"
+      "let q : Env = {e with attack = 1ms} ;;\n"
+      "let a : Timestamp = e . attack ;;\n";
+  LspServer server;
+  server.onMessage(didOpen(uri, text));
+  json::Value edits =
+      resultOf(server, docRequest(2, "textDocument/formatting", uri));
+  CHECK(edits.array.size() == 1);
+  std::string formatted = edits.array[0].getString("newText");
+  CHECK(formatted ==
+        "type Env = { attack : Timestamp; release : Timestamp } ;;\n"
+        "type Wave = | Sine | Pulse of Scalar ;;\n"
+        "let e : Env = { attack = 5ms; release = 100ms } ;;\n"
+        "let q : Env = { e with attack = 1ms } ;;\n"
+        "let a : Timestamp = e.attack ;;\n");
+  // The result is a fixed point.
+  json::Value note = parseOne(server.onMessage(
+      R"({"jsonrpc":"2.0","method":"textDocument/didChange","params":{)"
+      R"("textDocument":{"uri":")" + uri + R"("},)"
+      R"("contentChanges":[{"text":)" + json::serialize([&] {
+        return json::makeString(formatted);
+      }()) + R"(}]}})"));
+  json::Value clean =
+      resultOf(server, docRequest(3, "textDocument/formatting", uri));
+  CHECK(clean.array.empty());
+}
+
+TEST(lsp_formatting_stdlib_and_examples_are_a_fixed_point) {
+  // docs/tooling.md: the shipped stdlib and the examples tree are
+  // already formatted - the formatter must propose no edits for them.
+  std::vector<fs::path> files;
+  files.push_back(fs::path(bundledStdlibDir()) / "core" /
+                  kLibraryInterfaceFile);
+  fs::path examples = fs::path(bundledStdlibDir()) / ".." / "examples";
+  std::error_code ec;
+  if (fs::exists(examples, ec))
+    for (auto& e : fs::recursive_directory_iterator(examples, ec))
+      if (e.path().extension() == ".synth" &&
+          e.path().string().find("_build") == std::string::npos)
+        files.push_back(e.path());
+  CHECK(files.size() >= 1);
+  int reqId = 2;
+  for (auto& f : files) {
+    std::ifstream in(f);
+    std::stringstream ss;
+    ss << in.rdbuf();
+    std::string text = ss.str();
+    CHECK(!text.empty());
+    std::string uri = uriFor(f);
+    LspServer server;
+    server.onMessage(didOpen(uri, text));
+    json::Value edits =
+        resultOf(server, docRequest(reqId++, "textDocument/formatting", uri));
+    if (!edits.array.empty())
+      std::cerr << "formatter is not a fixed point on " << f << "\n";
+    CHECK(edits.array.empty());
+  }
 }

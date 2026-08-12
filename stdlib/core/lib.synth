@@ -1,13 +1,30 @@
 (* SynthGraph Core - the standard library.
-   Every definition here is an `external` binding to a C++ implementation
-   in the file it names, sitting beside this one - the same mechanism any
-   library with external implementations uses. This file is the single
-   source of truth for Core's names and signatures.
+   Most definitions here are `external` bindings to C++ implementations
+   in the files they name, sitting beside this one - the same mechanism
+   any library with external implementations uses; the List module is
+   written in SynthGraph itself. This file is the single source of truth
+   for Core's names and signatures.
 
    Core is organized into functional submodules and must be brought into
    scope explicitly: `import Core` for qualified access
    (Core.Osc.sine), `open Core` for module-qualified access (Osc.sine),
    or `open Core.Osc` for bare names (sine). *)
+
+(* --- The core types ---------------------------------------------------
+   Declared here, ambient everywhere (like the built-in type names - no
+   import needed to write an annotation).
+
+   `list` is an ordinary recursive variant: `[a; b; c]` literals are
+   sugar for Cons chains, and `match` takes lists apart.
+
+   `Signal` is abstract - an engine-backed handle with no structure to
+   observe; the element type is Scalar (mono) or Vector (multichannel).
+   A `Sample` is a plain record: a signal plus the window to cut from
+   it, so `s.from` and `{ s with to = ... }` work like on any record. *)
+
+type 'a list = | Nil | Cons of ('a, 'a list) ;;
+type 'a Signal ;;
+type 'a Sample = { sig : 'a Signal; from : Timestamp; to : Timestamp } ;;
 
 (* --- Oscillators & modulation (oscillators.cpp) ---------------------- *)
 
@@ -88,16 +105,27 @@ module Io = struct
   let load_multi ~path:String : Vector Signal = external "io.cpp" ;;
 end ;;
 
-(* --- List functions (lists.cpp) -------------------------------------- *)
+(* --- List functions - written in SynthGraph ----------------------------
+   Lists are Cons chains, so these are plain recursive functions; both
+   map and fold walk the list front to back. *)
 
 module List = struct
-  let map ~f:('a -> 'b) ~xs:'a list : 'b list = external "lists.cpp" ;;
-  let fold ~f:('a -> 'b -> 'a) ~init:'a ~xs:'b list : 'a =
-    external "lists.cpp" ;;
+  let rec map ~f:('a -> 'b) ~xs:'a list : 'b list =
+    match xs with
+    | Nil -> Nil
+    | Cons (x, rest) -> Cons (f x, map ~f:f ~xs:rest) ;;
+  let rec fold ~f:('a -> 'b -> 'a) ~init:'a ~xs:'b list : 'a =
+    match xs with
+    | Nil -> init
+    | Cons (x, rest) -> fold ~f:f ~init:(f init x) ~xs:rest ;;
   (* init builds [f 0; f 1; ...; f (n-1)]; counts are Ints, so the type
-     system guarantees they are whole (negatives are a build error). *)
-  let init ~n:Int ~f:(Int -> 'a) : 'a list = external "lists.cpp" ;;
-  let repeat ~n:Int ~x:'a : 'a list = external "lists.cpp" ;;
+     system guarantees they are whole (negatives yield the empty list). *)
+  let init ~n:Int ~f:(Int -> 'a) : 'a list =
+    let rec go i:Int : 'a list =
+      if i >= n then Nil else Cons (f i, go (i + 1)) in
+    go 0 ;;
+  let repeat ~n:Int ~x:'a : 'a list =
+    init ~n:n ~f:(fun i:Int -> x) ;;
 end ;;
 
 (* --- Time: conversions and Timestamp sequences ------------------------

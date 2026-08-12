@@ -26,10 +26,12 @@ class Parser {
           defs.push_back(parseModuleDef(/*insideStruct=*/false));
         } else if (at(Tok::Let)) {
           defs.push_back(parseLet());
+        } else if (atTypeDecl()) {
+          defs.push_back(parseTypeDecl());
         } else {
           fail(peek().span,
-               std::string(
-                   "expected 'let', 'import', 'open' or 'module', found ") +
+               std::string("expected 'let', 'type', 'import', 'open' or "
+                           "'module', found ") +
                    tokenName(peek().kind));
         }
       } catch (const Recover&) {
@@ -48,13 +50,6 @@ class Parser {
   const std::string& file_;
   DiagnosticBag& diags_;
   size_t pos_ = 0;
-  // Type variables are scoped to one top-level definition: every 'a in its
-  // parameters, return type, lambda parameters and local annotations is the
-  // same variable, and the next definition starts over. Ids stay unique
-  // file-wide anyway (nextTypeVarSeq_ never resets) so a stored signature
-  // can never be confused with another definition's.
-  std::map<std::string, TypePtr> typeVars_;
-  int nextTypeVarSeq_ = 0;
 
   const Token& peek(int ahead = 0) const {
     size_t i = pos_ + ahead;
@@ -165,10 +160,12 @@ class Parser {
           defs.push_back(parseModuleDef(/*insideStruct=*/true));
         } else if (at(Tok::Let)) {
           defs.push_back(parseLet());
+        } else if (atTypeDecl()) {
+          defs.push_back(parseTypeDecl());
         } else {
           fail(peek().span,
-               std::string("expected 'let', 'open', 'module' or 'end', "
-                           "found ") + tokenName(peek().kind));
+               std::string("expected 'let', 'type', 'open', 'module' or "
+                           "'end', found ") + tokenName(peek().kind));
         }
       } catch (const Recover&) {
         // Recover within the body: skip past the next ';;' but never past
@@ -182,17 +179,110 @@ class Parser {
     return defs;
   }
 
+  // type [params] Name ;;                       (abstract)
+  // type [params] Name = { f : T; g : T } ;;    (record)
+  // type [params] Name = | A | B of T ;;        (variant)
+  // params: 'a or ('a, 'b). `type` and `of` are contextual (ordinary
+  // identifiers elsewhere), following `struct`/`end`/`external`.
+  bool atTypeDecl() const { return at(Tok::Ident) && peek().text == "type"; }
+
+  TopDef parseTypeDecl() {
+    TopDef d{};
+    d.kind = TopDef::Kind::TypeDecl;
+    Span lo = advance().span;  // 'type'
+    if (at(Tok::TypeVar)) {
+      d.typeParams.push_back(advance().text);
+    } else if (at(Tok::LParen)) {
+      advance();
+      d.typeParams.push_back(expect(Tok::TypeVar, "type parameter").text);
+      while (at(Tok::Comma)) {
+        advance();
+        d.typeParams.push_back(expect(Tok::TypeVar, "type parameter").text);
+      }
+      expect(Tok::RParen, "')' after type parameters");
+    }
+    // Declared type names are capitalized; `list` is the grandfathered
+    // lowercase spelling (Core declares it).
+    if (!at(Tok::UpIdent) && !(at(Tok::Ident) && peek().text == "list"))
+      fail(peek().span, std::string("expected a type name (capitalized), "
+                                    "found ") + tokenName(peek().kind));
+    const Token& name = advance();
+    d.name = name.text;
+    for (size_t i = 0; i < d.typeParams.size(); i++)
+      for (size_t j = 0; j < i; j++)
+        if (d.typeParams[i] == d.typeParams[j])
+          fail(name.span,
+               "duplicate type parameter '" + d.typeParams[i] + "'");
+    if (at(Tok::Equals)) {
+      advance();
+      if (at(Tok::LBrace)) {
+        d.typeFlavor = TopDef::TypeFlavor::Record;
+        advance();  // '{'
+        for (;;) {
+          const Token& fn = expect(Tok::Ident, "field name");
+          expect(Tok::Colon, "':' after field name");
+          TypeExprPtr ft = parseType();
+          d.fields.push_back({fn.text, ft, Span{fn.span.lo, ft->span.hi}});
+          if (!at(Tok::Semi)) break;
+          advance();
+        }
+        expect(Tok::RBrace, "'}' to close the record declaration");
+        if (d.fields.empty())
+          fail(name.span, "a record needs at least one field");
+      } else if (at(Tok::Bar) || at(Tok::UpIdent)) {
+        d.typeFlavor = TopDef::TypeFlavor::Variant;
+        if (at(Tok::Bar)) advance();  // optional leading '|'
+        for (;;) {
+          const Token& cn = expect(Tok::UpIdent, "constructor name");
+          TypeExprPtr payload;
+          uint32_t hi = cn.span.hi;
+          if (at(Tok::Ident) && peek().text == "of") {
+            advance();
+            payload = parseType();
+            hi = payload->span.hi;
+          }
+          d.ctors.push_back({cn.text, payload, Span{cn.span.lo, hi}});
+          if (!at(Tok::Bar)) break;
+          advance();
+        }
+      } else {
+        fail(peek().span,
+             "expected '{' (a record) or a constructor list after '='");
+      }
+    }
+    const Token& end = expect(Tok::SemiSemi, "';;' to end type declaration");
+    d.span = {lo.lo, end.span.hi};
+    return d;
+  }
+
+  // `rec` is contextual: it marks a recursive binding only when another
+  // identifier (the actual name) follows, so a binding named `rec`
+  // still works.
+  bool atRecMarker() const {
+    return at(Tok::Ident) && peek().text == "rec" &&
+           peek(1).kind == Tok::Ident;
+  }
+
   TopDef parseLet() {
     TopDef d{};
     d.kind = TopDef::Kind::Let;
     Span lo = advance().span;  // 'let'
-    typeVars_.clear();         // 'a is scoped to this definition
+    if (atRecMarker()) {
+      advance();  // 'rec'
+      d.isRec = true;
+    }
     const Token& name = expect(Tok::Ident, "binding name");
     d.name = name.text;
     parseParams(d.params);
+    if (d.isRec && d.params.empty())
+      fail(name.span, "'let rec' needs at least one parameter (a "
+                      "recursive constant could never terminate)");
+    if (d.isRec && d.name == "_")
+      fail(name.span, "'let _' cannot be recursive (there is no name to "
+                      "recurse on)");
     if (at(Tok::Colon)) {
       advance();
-      d.retType = parseType();
+      d.retTypeExpr = parseType();
     } else if (d.name != "_") {
       fail(peek().span, "missing return type annotation (every binding "
                         "except 'let _' must be annotated)");
@@ -232,90 +322,121 @@ class Parser {
       const Token& pn = expect(Tok::Ident, "parameter name");
       p.name = pn.text;
       expect(Tok::Colon, "':' after parameter name");
-      p.type = parseParamType();
+      p.typeExpr = parseParamType();
       p.span = {pn.span.lo, peek().span.lo};
       out.push_back(std::move(p));
     }
   }
 
   // --- Types -------------------------------------------------------------
+  //
+  // The parser records type annotations as surface TypeExprs; name
+  // resolution (builtins, 'a scoping, and - later - user declarations)
+  // happens in the checker, which knows what is in scope.
 
   // Parameter annotations: postfix types only; function types must be
   // parenthesized: f:(Scalar -> Scalar Signal).
-  TypePtr parseParamType() { return parsePostfixType(); }
+  TypeExprPtr parseParamType() { return parsePostfixType(); }
 
   // Full type; arrows allowed (right-associative).
-  TypePtr parseType() {
-    TypePtr left = parsePostfixType();
+  TypeExprPtr parseType() {
+    TypeExprPtr left = parsePostfixType();
     if (at(Tok::Arrow)) {
       advance();
-      TypePtr right = parseType();
+      TypeExprPtr right = parseType();
+      Span span{left->span.lo, right->span.hi};
+      auto fn = std::make_shared<TypeExpr>(TypeExpr::Kind::Fun, span);
+      fn->items.push_back(std::move(left));
       // Flatten right-nested arrows into a single Fun.
-      if (right->kind == Type::Kind::Fun) {
-        std::vector<TypePtr> params{left};
-        for (auto& p : right->items) params.push_back(p);
-        return tFun(std::move(params), right->ret);
+      if (right->kind == TypeExpr::Kind::Fun && right->labels.empty()) {
+        for (auto& p : right->items) fn->items.push_back(p);
+        fn->ret = right->ret;
+      } else {
+        fn->ret = std::move(right);
       }
-      return tFun({left}, right);
+      return fn;
     }
     return left;
   }
 
-  TypePtr parsePostfixType() {
-    TypePtr t = parseAtomType();
+  // A (possibly qualified) type name: UpIdent { "." UpIdent }. The final
+  // segment is the type name; any leading ones are its module path.
+  TypeExprPtr parseTypeNameRef() {
+    const Token& first = expect(Tok::UpIdent, "type name");
+    std::vector<std::string> segs{first.text};
+    uint32_t hi = first.span.hi;
+    while (at(Tok::Dot) && peek(1).kind == Tok::UpIdent) {
+      advance();  // '.'
+      const Token& seg = advance();
+      segs.push_back(seg.text);
+      hi = seg.span.hi;
+    }
+    auto n = std::make_shared<TypeExpr>(TypeExpr::Kind::Name,
+                                        Span{first.span.lo, hi});
+    n->name = segs.back();
+    for (size_t i = 0; i + 1 < segs.size(); i++)
+      n->moduleName += (i ? "." : "") + segs[i];
+    return n;
+  }
+
+  TypeExprPtr parsePostfixType() {
+    TypeExprPtr t = parseAtomType();
     for (;;) {
-      if (at(Tok::UpIdent) && peek().text == "Signal") {
-        advance();
-        t = tSignal(t);
-      } else if (at(Tok::UpIdent) && peek().text == "Sample") {
-        advance();
-        t = tSample(t);
+      // A postfix constructor: `Scalar Signal`, `'a list`, `Scalar Voice`.
+      // Any uppercase name (possibly qualified) applies; the only
+      // lowercase spelling is the grandfathered `list`. A lowercase
+      // identifier here otherwise belongs to what follows the type (the
+      // next parameter, for one).
+      if (at(Tok::UpIdent)) {
+        TypeExprPtr head = parseTypeNameRef();
+        auto n = std::make_shared<TypeExpr>(TypeExpr::Kind::Name,
+                                            Span{t->span.lo, head->span.hi});
+        n->moduleName = head->moduleName;
+        n->name = head->name;
+        n->args.push_back(std::move(t));
+        t = std::move(n);
       } else if (at(Tok::Ident) && peek().text == "list") {
-        advance();
-        t = tList(t);
+        const Token& kw = advance();
+        auto n = std::make_shared<TypeExpr>(TypeExpr::Kind::Name,
+                                            Span{t->span.lo, kw.span.hi});
+        n->name = "list";
+        n->args.push_back(std::move(t));
+        t = std::move(n);
       } else {
         return t;
       }
     }
   }
 
-  // 'a: the same name is the same variable throughout one top-level
-  // definition, so `~x:'a ... : 'a` ties the result to the argument.
-  TypePtr typeVarFor(const std::string& name) {
-    auto it = typeVars_.find(name);
-    if (it != typeVars_.end()) return it->second;
-    TypePtr t = tRigidVar(nextTypeVarSeq_++, name);
-    typeVars_.emplace(name, t);
-    return t;
-  }
-
-  TypePtr parseAtomType() {
-    if (at(Tok::TypeVar)) return typeVarFor(advance().text);
-    if (at(Tok::UpIdent)) {
+  TypeExprPtr parseAtomType() {
+    if (at(Tok::TypeVar)) {
       const Token& t = advance();
-      if (t.text == "Scalar") return tScalar();
-      if (t.text == "Int") return tInt();
-      if (t.text == "Vector") return tVector();
-      if (t.text == "Timestamp") return tTimestamp();
-      if (t.text == "String") return tString();
-      if (t.text == "Bool") return tBool();
-      fail(t.span, "unknown type '" + t.text + "'");
+      auto v = std::make_shared<TypeExpr>(TypeExpr::Kind::Var, t.span);
+      v->name = t.text;
+      return v;
     }
+    if (at(Tok::UpIdent)) return parseTypeNameRef();
     if (at(Tok::Ident) && peek().text == "unit") {
-      advance();
-      return tUnit();
+      const Token& t = advance();
+      auto n = std::make_shared<TypeExpr>(TypeExpr::Kind::Name, t.span);
+      n->name = "unit";
+      return n;
     }
     if (at(Tok::LParen)) {
-      advance();
-      TypePtr first = parseType();
+      Span lo = advance().span;
+      TypeExprPtr first = parseType();
       if (at(Tok::Comma)) {
-        std::vector<TypePtr> items{first};
+        std::vector<TypeExprPtr> items;
+        items.push_back(std::move(first));
         while (at(Tok::Comma)) {
           advance();
           items.push_back(parseType());
         }
-        expect(Tok::RParen, "')'");
-        return tTuple(std::move(items));
+        const Token& close = expect(Tok::RParen, "')'");
+        auto tup = std::make_shared<TypeExpr>(TypeExpr::Kind::Tuple,
+                                              Span{lo.lo, close.span.hi});
+        tup->items = std::move(items);
+        return tup;
       }
       expect(Tok::RParen, "')'");
       return first;
@@ -330,7 +451,146 @@ class Parser {
     if (at(Tok::Let)) return parseLetIn();
     if (at(Tok::Fun)) return parseLambda();
     if (at(Tok::If)) return parseIf();
+    if (at(Tok::Match)) return parseMatch();
     return parsePipe();
+  }
+
+  // match e with | P1 -> e1 | P2 -> e2. Arm bodies extend maximally
+  // right (like lambda and if), so a match nested inside an arm must be
+  // parenthesized - otherwise the outer arms would read as its own.
+  ExprPtr parseMatch() {
+    Span lo = advance().span;  // 'match'
+    ExprPtr scr = parseExpr();
+    expect(Tok::With, "'with' after the match scrutinee");
+    auto e = std::make_unique<Expr>(Expr::Kind::Match, lo);
+    e->items.push_back(std::move(scr));
+    if (at(Tok::Bar)) advance();  // optional leading '|'
+    for (;;) {
+      e->patterns.push_back(parsePattern());
+      expect(Tok::Arrow, "'->' after the pattern");
+      ExprPtr body = parseExpr();
+      e->span = {lo.lo, body->span.hi};
+      e->items.push_back(std::move(body));
+      if (!at(Tok::Bar)) break;
+      advance();
+    }
+    return e;
+  }
+
+  // A (possibly dotted) constructor path: UpIdent { "." UpIdent }. The
+  // final segment is the constructor, leading ones its module path.
+  void parseCtorPath(std::string& moduleName, std::string& name,
+                     Span& span) {
+    const Token& first = expect(Tok::UpIdent, "constructor name");
+    name = first.text;
+    span = first.span;
+    while (at(Tok::Dot) && peek(1).kind == Tok::UpIdent) {
+      advance();  // '.'
+      const Token& seg = advance();
+      moduleName += (moduleName.empty() ? "" : ".") + name;
+      name = seg.text;
+      span.hi = seg.span.hi;
+    }
+  }
+
+  // Top-level pattern: a constructor may take its payload here
+  // (Cons (x, rest), Pulse duty); everywhere nested, parenthesize.
+  Pattern parsePattern() {
+    if (at(Tok::UpIdent)) {
+      Pattern p;
+      p.kind = Pattern::Kind::Ctor;
+      parseCtorPath(p.moduleName, p.name, p.span);
+      if (startsPatternAtom()) {
+        Pattern payload = parsePatternAtom();
+        p.span.hi = payload.span.hi;
+        p.items.push_back(std::move(payload));
+      }
+      return p;
+    }
+    return parsePatternAtom();
+  }
+
+  bool startsPatternAtom() const {
+    switch (peek().kind) {
+      case Tok::Ident:
+      case Tok::UpIdent:
+      case Tok::LParen:
+      case Tok::LBrace:
+        return true;
+      default:
+        return false;
+    }
+  }
+
+  Pattern parsePatternAtom() {
+    const Token& t = peek();
+    switch (t.kind) {
+      case Tok::Ident: {
+        advance();
+        Pattern p;
+        p.kind = t.text == "_" ? Pattern::Kind::Wildcard
+                               : Pattern::Kind::Bind;
+        p.name = t.text;
+        p.span = t.span;
+        return p;
+      }
+      case Tok::UpIdent: {
+        // In atom position a constructor cannot take a payload;
+        // parenthesize (Some (Pulse d)).
+        Pattern p;
+        p.kind = Pattern::Kind::Ctor;
+        parseCtorPath(p.moduleName, p.name, p.span);
+        return p;
+      }
+      case Tok::LParen: {
+        Span lo = advance().span;
+        Pattern first = parsePattern();
+        if (at(Tok::Comma)) {
+          Pattern tup;
+          tup.kind = Pattern::Kind::Tuple;
+          tup.items.push_back(std::move(first));
+          while (at(Tok::Comma)) {
+            advance();
+            tup.items.push_back(parsePattern());
+          }
+          const Token& close = expect(Tok::RParen, "')'");
+          tup.span = {lo.lo, close.span.hi};
+          return tup;
+        }
+        const Token& close = expect(Tok::RParen, "')'");
+        first.span = {lo.lo, close.span.hi};
+        return first;
+      }
+      case Tok::LBrace: {
+        // { attack; release } or { attack = a; ... }: a subset of the
+        // record's fields; a bare field name binds under its own name.
+        Span lo = advance().span;
+        Pattern rec;
+        rec.kind = Pattern::Kind::Record;
+        for (;;) {
+          const Token& fn = expect(Tok::Ident, "field name");
+          rec.fieldNames.push_back(fn.text);
+          if (at(Tok::Equals)) {
+            advance();
+            rec.items.push_back(parsePattern());
+          } else {
+            Pattern bind;
+            bind.kind = Pattern::Kind::Bind;
+            bind.name = fn.text;
+            bind.span = fn.span;
+            rec.items.push_back(std::move(bind));
+          }
+          if (!at(Tok::Semi)) break;
+          advance();
+        }
+        const Token& close = expect(Tok::RBrace, "'}'");
+        rec.span = {lo.lo, close.span.hi};
+        return rec;
+      }
+      default:
+        fail(t.span, std::string("expected a pattern, found ") +
+                         tokenName(t.kind));
+    }
   }
 
   // Conditional: if cond then e1 else e2 - a build-time expression, so
@@ -380,30 +640,62 @@ class Parser {
   // `let f : T -> R = fun ...` spelled out by hand, labels included.
   ExprPtr parseLetIn() {
     Span lo = advance().span;  // 'let'
+    // Destructuring: let (lo, hi) : T = e in body / let { f; g } : T =
+    // e in body. Represented as a single-arm match carrying the
+    // annotation; the checker requires the arm irrefutable.
+    if (at(Tok::LParen) || at(Tok::LBrace)) {
+      Pattern p = parsePatternAtom();
+      expect(Tok::Colon, "':' (destructuring bindings are annotated: "
+                         "let (a, b) : Type = ... in ...)");
+      TypeExprPtr ty = parseType();
+      expect(Tok::Equals, "'='");
+      ExprPtr bound = parseExpr();
+      expect(Tok::In, "'in' to close the local binding");
+      ExprPtr body = parseExpr();
+      auto e = std::make_unique<Expr>(Expr::Kind::Match,
+                                      Span{lo.lo, body->span.hi});
+      e->declTypeExpr = std::move(ty);
+      e->items.push_back(std::move(bound));
+      e->patterns.push_back(std::move(p));
+      e->items.push_back(std::move(body));
+      return e;
+    }
+    bool isRec = false;
+    if (atRecMarker()) {
+      advance();  // 'rec'
+      isRec = true;
+    }
     const Token& name = expect(Tok::Ident, "binding name");
     std::vector<Param> params;
     parseParams(params);
+    if (isRec && params.empty())
+      fail(name.span, "'let rec' needs at least one parameter (a "
+                      "recursive constant could never terminate)");
     expect(Tok::Colon,
            params.empty()
                ? "':' (local bindings are annotated: "
                  "let name : Type = ... in ...)"
                : "':' for the return type (local functions are annotated: "
                  "let name params : Type = ... in ...)");
-    TypePtr ty = parseType();
+    TypeExprPtr ty = parseType();
     expect(Tok::Equals, "'='");
     ExprPtr bound = parseExpr();
     if (!params.empty()) {
-      std::vector<TypePtr> ps;
-      std::vector<std::string> labels;
+      auto fn = std::make_shared<TypeExpr>(
+          TypeExpr::Kind::Fun, Span{params.front().span.lo, ty->span.hi});
       for (auto& p : params) {
-        ps.push_back(p.type);
-        labels.push_back(p.labeled ? p.name : "");
+        fn->items.push_back(p.typeExpr);
+        fn->labels.push_back(p.labeled ? p.name : "");
       }
-      ty = tFun(std::move(ps), std::move(labels), std::move(ty));
+      fn->ret = std::move(ty);
+      ty = std::move(fn);
       auto lam = std::make_unique<Expr>(
           Expr::Kind::Lambda, Span{params.front().span.lo, bound->span.hi});
       lam->params = std::move(params);
       lam->items.push_back(std::move(bound));
+      // A recursive local function's lambda knows its own name: the
+      // evaluator rebinds it to the lambda itself on every call.
+      if (isRec) lam->name = name.text;
       bound = std::move(lam);
     }
     expect(Tok::In, "'in' to close the local binding");
@@ -411,7 +703,8 @@ class Parser {
     auto e = std::make_unique<Expr>(Expr::Kind::Let,
                                     Span{lo.lo, body->span.hi});
     e->name = name.text;
-    e->declType = std::move(ty);
+    e->isRec = isRec;
+    e->declTypeExpr = std::move(ty);
     e->items.push_back(std::move(bound));
     e->items.push_back(std::move(body));
     return e;
@@ -569,13 +862,30 @@ class Parser {
       case Tok::UpIdent:
       case Tok::LParen:
       case Tok::LBracket:
+      case Tok::LBrace:
         return true;
       default:
         return false;
     }
   }
 
+  // An atom plus any postfix projections: r.field, (f x).field.a - the
+  // dot binds tighter than application, so `f r.x` is `f (r.x)`.
   ExprPtr parseAtom() {
+    ExprPtr e = parseAtomBase();
+    while (at(Tok::Dot) && peek(1).kind == Tok::Ident) {
+      advance();  // '.'
+      const Token& f = advance();
+      auto p = std::make_unique<Expr>(Expr::Kind::Project,
+                                      Span{e->span.lo, f.span.hi});
+      p->name = f.text;
+      p->items.push_back(std::move(e));
+      e = std::move(p);
+    }
+    return e;
+  }
+
+  ExprPtr parseAtomBase() {
     const Token& t = peek();
     switch (t.kind) {
       case Tok::Number: {
@@ -615,24 +925,39 @@ class Parser {
         return e;
       }
       case Tok::UpIdent: {
-        // Qualified reference: Module.name or Lib.File.name. All dotted
-        // UpIdent segments form the module path; the final lowercase
-        // identifier is the definition name (unambiguous: definitions
-        // are lowercase-initial).
+        // A dotted path. A lowercase leaf is a qualified value
+        // (Module.name, Lib.File.name); an uppercase leaf - including a
+        // bare capitalized name - is a constructor reference
+        // (definitions are lowercase-initial, so this is unambiguous).
         advance();
-        std::string qual = t.text;
-        expect(Tok::Dot, "'.' after module name");
-        while (at(Tok::UpIdent)) {
-          const Token& seg = advance();
-          qual += "." + seg.text;
-          expect(Tok::Dot, "'.' after module name");
+        std::string qual;
+        std::string last = t.text;
+        uint32_t hi = t.span.hi;
+        for (;;) {
+          if (at(Tok::Dot) && peek(1).kind == Tok::UpIdent) {
+            advance();  // '.'
+            const Token& seg = advance();
+            qual += (qual.empty() ? "" : ".") + last;
+            last = seg.text;
+            hi = seg.span.hi;
+            continue;
+          }
+          if (at(Tok::Dot) && peek(1).kind == Tok::Ident) {
+            advance();  // '.'
+            const Token& n = advance();
+            qual += (qual.empty() ? "" : ".") + last;
+            auto e = std::make_unique<Expr>(Expr::Kind::Ident,
+                                            Span{t.span.lo, n.span.hi});
+            e->moduleName = std::move(qual);
+            e->name = n.text;
+            return e;
+          }
+          auto e = std::make_unique<Expr>(Expr::Kind::Ctor,
+                                          Span{t.span.lo, hi});
+          e->moduleName = std::move(qual);
+          e->name = std::move(last);
+          return e;
         }
-        const Token& n = expect(Tok::Ident, "identifier after '.'");
-        auto e = std::make_unique<Expr>(Expr::Kind::Ident,
-                                        Span{t.span.lo, n.span.hi});
-        e->moduleName = std::move(qual);
-        e->name = n.text;
-        return e;
       }
       case Tok::LParen: {
         Span lo = advance().span;
@@ -653,6 +978,33 @@ class Parser {
         const Token& close = expect(Tok::RParen, "')'");
         first->span = {lo.lo, close.span.hi};
         return first;
+      }
+      case Tok::LBrace: {
+        // { f = e; ... } is a record literal; { e with f = e; ... } a
+        // record update. A leading `ident =` commits to the literal.
+        Span lo = advance().span;
+        std::unique_ptr<Expr> e;
+        if (at(Tok::Ident) && peek(1).kind == Tok::Equals) {
+          e = std::make_unique<Expr>(Expr::Kind::RecordLit, lo);
+        } else {
+          ExprPtr base = parseExpr();
+          expect(Tok::With,
+                 "'with' ({ record with field = ... }) or 'field = ...' "
+                 "(a record literal)");
+          e = std::make_unique<Expr>(Expr::Kind::RecordUpdate, lo);
+          e->items.push_back(std::move(base));
+        }
+        for (;;) {
+          const Token& fn = expect(Tok::Ident, "field name");
+          expect(Tok::Equals, "'=' after field name");
+          e->items.push_back(parseExpr());
+          e->argLabels.push_back(fn.text);
+          if (!at(Tok::Semi)) break;
+          advance();
+        }
+        const Token& close = expect(Tok::RBrace, "'}'");
+        e->span = {lo.lo, close.span.hi};
+        return e;
       }
       case Tok::LBracket: {
         Span lo = advance().span;

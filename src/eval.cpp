@@ -47,6 +47,37 @@ class Interp {
   std::string extCacheDir_;                        // user external .so cache
   std::map<std::string, Env> globals_;             // module -> name -> value
   std::map<std::string, SigPtr> fileCache_;        // absolute path -> signal
+  mutable CoreListInfo coreList_;                  // resolved on first use
+  mutable CoreSampleInfo coreSample_;              // resolved on first use
+
+  const CoreListInfo& coreList() const {
+    if (!coreList_) {
+      const TypeDecl* d = prog_.coreTypeDecl("list");
+      if (!d)
+        throw EvalError("internal error: Core's list type is not loaded");
+      coreList_.decl = d;
+      for (size_t i = 0; i < d->ctors.size(); i++) {
+        if (d->ctors[i].name == "Nil") coreList_.nilIndex = (int)i;
+        if (d->ctors[i].name == "Cons") coreList_.consIndex = (int)i;
+      }
+    }
+    return coreList_;
+  }
+
+  const CoreSampleInfo& coreSample() const {
+    if (!coreSample_) {
+      const TypeDecl* d = prog_.coreTypeDecl("Sample");
+      if (!d)
+        throw EvalError("internal error: Core's Sample type is not loaded");
+      coreSample_.decl = d;
+      for (size_t i = 0; i < d->fields.size(); i++) {
+        if (d->fields[i].name == "sig") coreSample_.sigField = (int)i;
+        if (d->fields[i].name == "from") coreSample_.fromField = (int)i;
+        if (d->fields[i].name == "to") coreSample_.toField = (int)i;
+      }
+    }
+    return coreSample_;
+  }
   // Resolved user externals, one compile+load per definition per build.
   std::map<const TopDef*, ExternalFn> userExternals_;
 
@@ -115,6 +146,17 @@ class Interp {
         return eval(*e.items[c->v ? 1 : 2], env, mod);
       }
       case Expr::Kind::App: {
+        // A constructor application builds its variant directly - the
+        // constructor is not a function value.
+        if (e.items[0]->kind == Expr::Kind::Ctor) {
+          const Expr& c = *e.items[0];
+          const TypeDecl* decl = c.type ? c.type->decl : nullptr;
+          if (!decl)
+            throw EvalError("internal error: unresolved constructor");
+          return Value{VariantV{
+              decl, (int)c.inum,
+              std::make_shared<Value>(eval(*e.items[1], env, mod))}};
+        }
         std::vector<std::pair<std::string, Value>> args;  // label, value
         for (size_t i = 1; i < e.items.size(); i++) {
           std::string label =
@@ -160,9 +202,21 @@ class Interp {
         throw EvalError("unary '-' applied to a non-numeric value");
       }
       case Expr::Kind::ListLit: {
-        ListV out;
-        for (auto& x : e.items) out.items.push_back(eval(*x, env, mod));
-        return Value{std::move(out)};
+        // Sugar for a Cons chain. Elements evaluate left to right; the
+        // chain builds back to front.
+        const CoreListInfo& list = coreList();
+        std::vector<Value> items;
+        for (auto& x : e.items) items.push_back(eval(*x, env, mod));
+        Value out{VariantV{list.decl, list.nilIndex, nullptr}};
+        for (auto it = items.rbegin(); it != items.rend(); ++it) {
+          TupleV cell;
+          cell.items.push_back(std::move(*it));
+          cell.items.push_back(std::move(out));
+          out = Value{VariantV{list.decl, list.consIndex,
+                               std::make_shared<Value>(
+                                   Value{std::move(cell)})}};
+        }
+        return out;
       }
       case Expr::Kind::TupleLit: {
         TupleV out;
@@ -184,11 +238,127 @@ class Interp {
         // Capture the local environment by value; the AST is owned by the
         // Program for the whole build, so the Expr pointer stays valid.
         return Value{LambdaV{&e, &mod, std::make_shared<Env>(env), nullptr}};
+      case Expr::Kind::RecordLit: {
+        // The checker stamped the resolved record type on the node;
+        // fields evaluate in source order but store in declaration order,
+        // so projection is a plain index.
+        const TypeDecl* decl = e.type ? e.type->decl : nullptr;
+        if (!decl)
+          throw EvalError("internal error: unresolved record literal");
+        RecordV out;
+        out.decl = decl;
+        out.fields.resize(decl->fields.size());
+        for (size_t i = 0; i < e.items.size(); i++) {
+          Value v = eval(*e.items[i], env, mod);
+          for (size_t k = 0; k < decl->fields.size(); k++)
+            if (decl->fields[k].name == e.argLabels[i]) {
+              out.fields[k] = std::move(v);
+              break;
+            }
+        }
+        return Value{std::move(out)};
+      }
+      case Expr::Kind::RecordUpdate: {
+        Value base = eval(*e.items[0], env, mod);
+        auto* rec = std::get_if<RecordV>(&base.v);
+        if (!rec)
+          throw EvalError("record update applied to a non-record value");
+        RecordV out = *rec;  // copy, then overwrite the named fields
+        for (size_t i = 0; i + 1 < e.items.size(); i++) {
+          Value v = eval(*e.items[i + 1], env, mod);
+          for (size_t k = 0; k < out.decl->fields.size(); k++)
+            if (out.decl->fields[k].name == e.argLabels[i]) {
+              out.fields[k] = std::move(v);
+              break;
+            }
+        }
+        return Value{std::move(out)};
+      }
+      case Expr::Kind::Project: {
+        Value base = eval(*e.items[0], env, mod);
+        auto* rec = std::get_if<RecordV>(&base.v);
+        if (!rec)
+          throw EvalError("field access applied to a non-record value");
+        for (size_t k = 0; k < rec->decl->fields.size(); k++)
+          if (rec->decl->fields[k].name == e.name) return rec->fields[k];
+        throw EvalError("record has no field '" + e.name + "'");
+      }
+      case Expr::Kind::Ctor: {
+        const TypeDecl* decl = e.type ? e.type->decl : nullptr;
+        if (!decl)
+          throw EvalError("internal error: unresolved constructor");
+        return Value{VariantV{decl, (int)e.inum, nullptr}};
+      }
+      case Expr::Kind::Match: {
+        // The scrutinee evaluates once; only the taken arm's body runs
+        // (same rule as `if`: untaken arms' render effects never fire).
+        Value scr = eval(*e.items[0], env, mod);
+        for (size_t a = 0; a < e.patterns.size(); a++) {
+          Env binds;
+          if (!matchPattern(e.patterns[a], scr, binds)) continue;
+          std::vector<std::pair<std::string, std::optional<Value>>> saved;
+          for (auto& [n, v] : binds) {
+            auto prev = env.find(n);
+            saved.emplace_back(n, prev != env.end()
+                                      ? std::optional<Value>(prev->second)
+                                      : std::nullopt);
+            env[n] = v;
+          }
+          Value out = eval(*e.items[a + 1], env, mod);
+          for (auto it = saved.rbegin(); it != saved.rend(); ++it) {
+            if (it->second) env[it->first] = std::move(*it->second);
+            else env.erase(it->first);
+          }
+          return out;
+        }
+        // The checker proved exhaustiveness; this is defense in depth.
+        throw EvalError("no pattern matched the value at build time");
+      }
       case Expr::Kind::External:
         // evalDefs and applyValue dispatch external bodies before eval.
         throw EvalError("internal error: external body evaluated directly");
     }
     throw EvalError("internal error: unknown expression kind");
+  }
+
+  // Structural pattern match; collects the bound names on success. The
+  // checker resolved constructor indexes and field names already.
+  bool matchPattern(const Pattern& p, const Value& v, Env& binds) {
+    switch (p.kind) {
+      case Pattern::Kind::Wildcard:
+        return true;
+      case Pattern::Kind::Bind:
+        binds[p.name] = v;
+        return true;
+      case Pattern::Kind::Tuple: {
+        const TupleV* t = std::get_if<TupleV>(&v.v);
+        if (!t || t->items.size() != p.items.size()) return false;
+        for (size_t i = 0; i < p.items.size(); i++)
+          if (!matchPattern(p.items[i], t->items[i], binds)) return false;
+        return true;
+      }
+      case Pattern::Kind::Record: {
+        const RecordV* r = std::get_if<RecordV>(&v.v);
+        if (!r) return false;
+        for (size_t i = 0; i < p.fieldNames.size(); i++) {
+          const Value* field = nullptr;
+          for (size_t k = 0; k < r->decl->fields.size(); k++)
+            if (r->decl->fields[k].name == p.fieldNames[i])
+              field = &r->fields[k];
+          if (!field || !matchPattern(p.items[i], *field, binds))
+            return false;
+        }
+        return true;
+      }
+      case Pattern::Kind::Ctor: {
+        const VariantV* var = std::get_if<VariantV>(&v.v);
+        if (!var || var->ctor != p.ctorIndex) return false;
+        if (p.items.empty()) return true;
+        if (!var->payload) return false;
+        return matchPattern(p.items[0], *var->payload, binds);
+      }
+    }
+    return false;
   }
 
   Value lookup(const Expr& ident, Env& env, const CheckedModule& mod) {
@@ -278,16 +448,51 @@ class Interp {
         for (auto& name : paramNames) ordered.push_back((*bound)[name]);
         return callExternal(*f->def, *f->mod, mod, std::move(ordered));
       }
+      ApplyDepthGuard guard(*this, f->def->name);
       Env env;
+      // A recursive definition finds itself under its own (surface)
+      // name - required for members of inline modules, whose stored
+      // names are dotted and unreachable from an unqualified lookup.
+      if (f->def->isRec)
+        env[f->def->name] = Value{FunV{f->def, f->mod, nullptr}};
       for (auto& name : paramNames) env[name] = (*bound)[name];
       return eval(*f->def->body, env, *f->mod);
     }
     // The captured environment plus the bound params (params shadow
     // captures), evaluated in the lambda's defining module.
+    ApplyDepthGuard guard(*this, l->lam->name.empty() ? "<fun>"
+                                                      : l->lam->name);
     Env env = *l->captured;
+    // A recursive local function finds itself under its own name,
+    // reconstructed per call from the lambda's own fields - no cyclic
+    // ownership. Parameters bind after it, so they shadow it as usual.
+    if (!l->lam->name.empty())
+      env[l->lam->name] = Value{LambdaV{l->lam, l->mod, l->captured, nullptr}};
     for (auto& name : paramNames) env[name] = (*bound)[name];
     return eval(*l->lam->items[0], env, *l->mod);
   }
+
+  // Build-time evaluation is recursive (let rec); the depth guard turns
+  // runaway recursion into a diagnostic instead of exhausting the
+  // process stack. The limit is far above anything musical (a recursive
+  // List function recurses once per element).
+  static constexpr int kMaxApplyDepth = 4096;
+  int applyDepth_ = 0;
+  struct ApplyDepthGuard {
+    Interp& in;
+    ApplyDepthGuard(Interp& in, const std::string& name) : in(in) {
+      // Throw before incrementing: the destructor only runs after a
+      // completed constructor, so the counter stays balanced when the
+      // error unwinds to the per-definition handler.
+      if (in.applyDepth_ >= kMaxApplyDepth)
+        throw EvalError(
+            "recursion limit (" + std::to_string(kMaxApplyDepth) +
+            " nested calls) exceeded while evaluating '" + name +
+            "' - likely unbounded recursion (no base case reached)");
+      ++in.applyDepth_;
+    }
+    ~ApplyDepthGuard() { --in.applyDepth_; }
+  };
 
   // Dispatch an external-bodied definition: C++ compiled into a cached
   // shared object on first use - the bundled Core library's
@@ -321,6 +526,8 @@ class Interp {
                .first;
     }
     ExtServices svc;
+    svc.coreList = coreList();
+    svc.coreSample = coreSample();
     svc.apply = [this, &callerMod](const Value& fn, std::vector<Value> a) {
       return apply(fn, std::move(a), callerMod);
     };

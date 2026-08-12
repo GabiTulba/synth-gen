@@ -35,6 +35,8 @@ const char* tokenName(Tok t) {
     case Tok::If: return "'if'";
     case Tok::Then: return "'then'";
     case Tok::Else: return "'else'";
+    case Tok::Match: return "'match'";
+    case Tok::With: return "'with'";
     case Tok::Ident: return "identifier";
     case Tok::UpIdent: return "capitalized identifier";
     case Tok::TypeVar: return "type variable";
@@ -51,11 +53,14 @@ const char* tokenName(Tok t) {
     case Tok::RParen: return "')'";
     case Tok::LBracket: return "'['";
     case Tok::RBracket: return "']'";
+    case Tok::LBrace: return "'{'";
+    case Tok::RBrace: return "'}'";
     case Tok::Comma: return "','";
     case Tok::Dot: return "'.'";
     case Tok::Arrow: return "'->'";
     case Tok::Tilde: return "'~'";
     case Tok::PipeGt: return "'|>'";
+    case Tok::Bar: return "'|'";
     case Tok::Plus: return "'+'";
     case Tok::Minus: return "'-'";
     case Tok::Star: return "'*'";
@@ -142,6 +147,10 @@ std::vector<Token> lex(const std::string& src, const std::string& file,
         push(Tok::Then, lo, i);
       else if (word == "else")
         push(Tok::Else, lo, i);
+      else if (word == "match")
+        push(Tok::Match, lo, i);
+      else if (word == "with")
+        push(Tok::With, lo, i);
       else if (word == "true")
         push(Tok::Bool, lo, i, {}, 1.0);
       else if (word == "false")
@@ -278,6 +287,11 @@ std::vector<Token> lex(const std::string& src, const std::string& file,
       case ')': push(Tok::RParen, lo, i); break;
       case '[': push(Tok::LBracket, lo, i); break;
       case ']': push(Tok::RBracket, lo, i); break;
+      case '{': push(Tok::LBrace, lo, i); break;
+      case '}': push(Tok::RBrace, lo, i); break;
+      // `|>` and `||` were consumed above, so a lone '|' is a variant/
+      // match bar.
+      case '|': push(Tok::Bar, lo, i); break;
       case ',': push(Tok::Comma, lo, i); break;
       case '.': push(Tok::Dot, lo, i); break;
       case '~': push(Tok::Tilde, lo, i); break;

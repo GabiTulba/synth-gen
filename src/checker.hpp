@@ -18,6 +18,9 @@ struct CheckedModule {
   // A definition inside an inline module (`module A = struct ... end`)
   // appears under its dotted path from the file root: "A.x", "A.B.y".
   std::map<std::string, TypePtr> defTypes;
+  // Type declarations, keyed like defTypes by dotted path from the file
+  // root. The module owns the declarations; Named types point into them.
+  std::map<std::string, std::shared_ptr<TypeDecl>> typeDecls;
   // Dotted paths (from the file root) of every inline module this file
   // defines: "A", "A.B". Lets qualified references and `open` reach into
   // them, here and from other modules.
@@ -51,6 +54,15 @@ struct Program {
     for (auto& m : modules)
       if (m.parsed.name == name) return &m;
     return nullptr;
+  }
+
+  // A type the compiler itself knows from the bundled Core library
+  // (`list` today): its declaration once Core is checked.
+  const TypeDecl* coreTypeDecl(const std::string& name) const {
+    const CheckedModule* core = find("Core");
+    if (!core) return nullptr;
+    auto it = core->typeDecls.find(name);
+    return it != core->typeDecls.end() ? it->second.get() : nullptr;
   }
 };
 

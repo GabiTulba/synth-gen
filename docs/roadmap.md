@@ -10,15 +10,23 @@ the documentation describes only what is.
 - **Signal-level branching.** Comparisons and `if` are build-time only.
   A sample-wise select/gate over signals would be a new signal-producing
   primitive (e.g. threshold gates, envelope followers driving choices).
-- **Pattern matching** and **user-defined types** — today the only
-  aggregate types are lists and tuples, consumed positionally.
-- **Recursion.** Definitions must precede use and cannot be (mutually)
-  recursive. Lifting this interacts with the "no feedback" rule below
-  and with incremental hashing, so it needs its own design pass.
+- **Mutual recursion.** `let rec` covers self-recursion (and recursive
+  type declarations cover `list`-like shapes), but a group of
+  definitions cannot refer to each other: definitions still precede
+  use, which the checker's scope replay, the evaluator's ordering, the
+  incremental dependency graph, and the LSP all lean on. An
+  `and`-group form could lift this without breaking existing syntax.
+- **Literal patterns.** `match` covers constructors, tuples, records,
+  binders and wildcards; matching on a literal value (`| 0 -> ...`)
+  is deliberately absent — use `if` — and would need a design for
+  exhaustiveness over open domains.
+- **Per-declaration visibility for types.** A published module exposes
+  its type declarations like its values; abstract-on-export (hiding a
+  record's fields outside its library) is unexplored.
 - **Type inference.** Every binding is fully annotated; polymorphism is
   written out. Local inference (return types, `let ... in` annotations,
-  lambda parameters) would remove most annotation weight without
-  changing the checked language.
+  lambda parameters, `match` scrutinee-directed shortcuts) would remove
+  most annotation weight without changing the checked language.
 - **Per-definition visibility control.** A library's `lib.synth`
   publishes whole modules or re-exported values, but a published module
   exposes all of its definitions — there is no `private` below module

@@ -1,12 +1,16 @@
 # The Core library
 
 All primitives live in **`Core`** — a real library bundled with the
-compiler. Its interface is `stdlib/core/lib.synth`, where every
-definition is an `external` binding to a C++ implementation shipped
-beside it (`stdlib/core/*.cpp`), compiled at build time by the same
-mechanism user externals use. So `open Core` genuinely imports a
-library rather than triggering compiler magic: primitive signatures live
-in synth source, their bodies in library C++, and the same `external`
+compiler. Its interface is `stdlib/core/lib.synth`, which opens with
+the ambient type declarations (`'a list`, the abstract `'a Signal`,
+and the `'a Sample` record) and then declares the primitives. Nearly
+every definition is an `external` binding to a C++ implementation
+shipped beside it (`stdlib/core/*.cpp`), compiled at build time by the
+same mechanism user externals use; the `List` module is written in
+SynthGraph itself — plain recursive functions over the Cons/Nil
+variant. So `open Core` genuinely imports a library rather than
+triggering compiler magic: primitive signatures live in synth source,
+their bodies in library C++ (or synth), and the same `external`
 mechanism is available to users (see below).
 
 Core is always discoverable, always an allowed dependency (no manifest
@@ -134,7 +138,8 @@ the whole story:
 - **Counts and indices** (`List.init`, `List.repeat`, `time_steps`) are
   `Int`s: wholeness is guaranteed by the type system, and `List.init`
   hands its function an Int index (`fun i:Int -> ...`). A negative
-  *computed* count is still a build error. `Math.to_scalar` takes an
+  *computed* count yields the empty list from `List.init`/`List.repeat`
+  and is a build error in `time_steps`. `Math.to_scalar` takes an
   Int into Scalar arithmetic exactly; `Math.round`/`floor`/`ceil` come
   back from a Scalar with an explicit fraction policy.
 

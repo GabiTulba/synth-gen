@@ -34,24 +34,15 @@ TypePtr tUnit() {
   static TypePtr t = make(Type::Kind::Unit);
   return t;
 }
-TypePtr tSignal(TypePtr elem) {
-  auto t = std::make_shared<Type>(Type::Kind::Signal);
-  t->elem = std::move(elem);
-  return t;
-}
-TypePtr tSample(TypePtr elem) {
-  auto t = std::make_shared<Type>(Type::Kind::Sample);
-  t->elem = std::move(elem);
-  return t;
-}
-TypePtr tList(TypePtr elem) {
-  auto t = std::make_shared<Type>(Type::Kind::List);
-  t->elem = std::move(elem);
-  return t;
-}
 TypePtr tTuple(std::vector<TypePtr> items) {
   auto t = std::make_shared<Type>(Type::Kind::Tuple);
   t->items = std::move(items);
+  return t;
+}
+TypePtr tNamed(const TypeDecl* decl, std::vector<TypePtr> args) {
+  auto t = std::make_shared<Type>(Type::Kind::Named);
+  t->decl = decl;
+  t->items = std::move(args);
   return t;
 }
 TypePtr tFun(std::vector<TypePtr> params, TypePtr ret) {
@@ -93,12 +84,9 @@ bool anyVar(const TypePtr& t, Pred pred) {
   switch (t->kind) {
     case Type::Kind::Var:
       return pred(t->var);
-    case Type::Kind::Signal:
-    case Type::Kind::Sample:
-    case Type::Kind::List:
-      return anyVar(t->elem, pred);
     case Type::Kind::Tuple:
-    case Type::Kind::Fun: {
+    case Type::Kind::Fun:
+    case Type::Kind::Named: {
       for (auto& x : t->items)
         if (anyVar(x, pred)) return true;
       return t->ret && anyVar(t->ret, pred);
@@ -131,10 +119,6 @@ bool typeEquals(const TypePtr& a, const TypePtr& b) {
     case Type::Kind::Bool:
     case Type::Kind::Unit:
       return true;
-    case Type::Kind::Signal:
-    case Type::Kind::Sample:
-    case Type::Kind::List:
-      return typeEquals(a->elem, b->elem);
     case Type::Kind::Tuple:
       if (a->items.size() != b->items.size()) return false;
       for (size_t i = 0; i < a->items.size(); i++)
@@ -147,14 +131,23 @@ bool typeEquals(const TypePtr& a, const TypePtr& b) {
       return typeEquals(a->ret, b->ret);
     case Type::Kind::Var:
       return a->var == b->var;
+    case Type::Kind::Named:
+      // Nominal: the same declaration, argument-wise equal. Recursive
+      // declarations never unfold, so this terminates.
+      if (a->decl != b->decl || a->items.size() != b->items.size())
+        return false;
+      for (size_t i = 0; i < a->items.size(); i++)
+        if (!typeEquals(a->items[i], b->items[i])) return false;
+      return true;
   }
   return false;
 }
 
 namespace {
-// A function type in a nested position — a parameter of another function
-// type or the element of Signal/Sample/list — is parenthesized, matching
-// where the source grammar itself requires parentheses.
+// A function type in a nested position - a parameter of another function
+// type or the argument of a postfix constructor (Scalar Signal,
+// 'a list) - is parenthesized, matching where the source grammar itself
+// requires parentheses.
 std::string nestedTypeName(const TypePtr& t) {
   std::string s = typeName(t);
   return t->kind == Type::Kind::Fun ? "(" + s + ")" : s;
@@ -170,9 +163,6 @@ std::string typeName(const TypePtr& t) {
     case Type::Kind::String: return "String";
     case Type::Kind::Bool: return "Bool";
     case Type::Kind::Unit: return "unit";
-    case Type::Kind::Signal: return nestedTypeName(t->elem) + " Signal";
-    case Type::Kind::Sample: return nestedTypeName(t->elem) + " Sample";
-    case Type::Kind::List: return nestedTypeName(t->elem) + " list";
     case Type::Kind::Tuple: {
       std::string s = "(";
       for (size_t i = 0; i < t->items.size(); i++) {
@@ -196,6 +186,19 @@ std::string typeName(const TypePtr& t) {
       // letter, so a diagnostic still reads 'a -> 'a rather than '?.
       if (!t->varName.empty()) return "'" + t->varName;
       return std::string("'") + char('a' + (t->var < 0 ? -t->var : t->var) % 26);
+    case Type::Kind::Named: {
+      // Postfix like the built-in constructors: `Scalar Voice`,
+      // `(Scalar, String) Pair`, bare `Env`.
+      if (t->items.empty()) return t->decl->name;
+      if (t->items.size() == 1)
+        return nestedTypeName(t->items[0]) + " " + t->decl->name;
+      std::string s = "(";
+      for (size_t i = 0; i < t->items.size(); i++) {
+        if (i) s += ", ";
+        s += typeName(t->items[i]);
+      }
+      return s + ") " + t->decl->name;
+    }
   }
   return "?";
 }
@@ -210,12 +213,9 @@ bool occurs(int v, const TypePtr& t, const Subst& subst) {
       auto it = subst.find(t->var);
       return it != subst.end() && occurs(v, it->second, subst);
     }
-    case Type::Kind::Signal:
-    case Type::Kind::Sample:
-    case Type::Kind::List:
-      return occurs(v, t->elem, subst);
     case Type::Kind::Tuple:
-    case Type::Kind::Fun: {
+    case Type::Kind::Fun:
+    case Type::Kind::Named: {
       for (auto& x : t->items)
         if (occurs(v, x, subst)) return true;
       return t->ret && occurs(v, t->ret, subst);
@@ -265,10 +265,6 @@ bool unify(const TypePtr& sig, const TypePtr& concrete, Subst& subst) {
     case Type::Kind::Bool:
     case Type::Kind::Unit:
       return true;
-    case Type::Kind::Signal:
-    case Type::Kind::Sample:
-    case Type::Kind::List:
-      return unify(sig->elem, concrete->elem, subst);
     case Type::Kind::Tuple:
       if (sig->items.size() != concrete->items.size()) return false;
       for (size_t i = 0; i < sig->items.size(); i++)
@@ -281,6 +277,14 @@ bool unify(const TypePtr& sig, const TypePtr& concrete, Subst& subst) {
       return unify(sig->ret, concrete->ret, subst);
     case Type::Kind::Var:
       return false;  // unreachable
+    case Type::Kind::Named:
+      // Nominal, like typeEquals: same declaration, then unify arguments.
+      if (sig->decl != concrete->decl ||
+          sig->items.size() != concrete->items.size())
+        return false;
+      for (size_t i = 0; i < sig->items.size(); i++)
+        if (!unify(sig->items[i], concrete->items[i], subst)) return false;
+      return true;
   }
   return false;
 }
@@ -293,9 +297,6 @@ TypePtr applySubst(const TypePtr& t, const Subst& subst) {
       auto it = subst.find(t->var);
       return it != subst.end() ? applySubst(it->second, subst) : t;
     }
-    case Type::Kind::Signal: return tSignal(applySubst(t->elem, subst));
-    case Type::Kind::Sample: return tSample(applySubst(t->elem, subst));
-    case Type::Kind::List: return tList(applySubst(t->elem, subst));
     case Type::Kind::Tuple: {
       std::vector<TypePtr> items;
       for (auto& x : t->items) items.push_back(applySubst(x, subst));
@@ -305,6 +306,11 @@ TypePtr applySubst(const TypePtr& t, const Subst& subst) {
       std::vector<TypePtr> params;
       for (auto& x : t->items) params.push_back(applySubst(x, subst));
       return tFun(std::move(params), t->labels, applySubst(t->ret, subst));
+    }
+    case Type::Kind::Named: {
+      std::vector<TypePtr> args;
+      for (auto& x : t->items) args.push_back(applySubst(x, subst));
+      return tNamed(t->decl, std::move(args));
     }
     default:
       return t;

@@ -17,11 +17,18 @@ import Voices
 (* Forwarded so consumers can keep reaching it as Basic.Piano.strike. *)
 let strike root:Scalar : Scalar Signal = Voices.Keys.strike root ;;
 
+(* The room is a record: one value carries the reverb settings, and the
+   send reads them back by projection. *)
+type Room = { decay : Timestamp; damping : Scalar; mix : Scalar } ;;
+
+let small_room : Room = { decay = 500ms; damping = 0.5; mix = 0.2 } ;;
+
 let piano : Scalar Signal =
   let env : Scalar Signal =
     adsr ~attack:4ms ~decay:900ms ~sustain:0.12 ~release:600ms ~hold:1200ms in
   let note : Scalar Signal = (strike 261.63 + strike 261.9 * 0.35) * env in
-  note * 0.5 |> reverb ~decay:500ms ~damping:0.5 ~mix:0.2
+  note * 0.5 |> reverb ~decay:small_room.decay ~damping:small_room.damping
+                       ~mix:small_room.mix
 ;;
 
 let _ =

@@ -34,16 +34,6 @@ TypePtr tUnit() {
   static TypePtr t = make(Type::Kind::Unit);
   return t;
 }
-TypePtr tSignal(TypePtr elem) {
-  auto t = std::make_shared<Type>(Type::Kind::Signal);
-  t->elem = std::move(elem);
-  return t;
-}
-TypePtr tSample(TypePtr elem) {
-  auto t = std::make_shared<Type>(Type::Kind::Sample);
-  t->elem = std::move(elem);
-  return t;
-}
 TypePtr tTuple(std::vector<TypePtr> items) {
   auto t = std::make_shared<Type>(Type::Kind::Tuple);
   t->items = std::move(items);
@@ -94,9 +84,6 @@ bool anyVar(const TypePtr& t, Pred pred) {
   switch (t->kind) {
     case Type::Kind::Var:
       return pred(t->var);
-    case Type::Kind::Signal:
-    case Type::Kind::Sample:
-      return anyVar(t->elem, pred);
     case Type::Kind::Tuple:
     case Type::Kind::Fun:
     case Type::Kind::Named: {
@@ -132,9 +119,6 @@ bool typeEquals(const TypePtr& a, const TypePtr& b) {
     case Type::Kind::Bool:
     case Type::Kind::Unit:
       return true;
-    case Type::Kind::Signal:
-    case Type::Kind::Sample:
-      return typeEquals(a->elem, b->elem);
     case Type::Kind::Tuple:
       if (a->items.size() != b->items.size()) return false;
       for (size_t i = 0; i < a->items.size(); i++)
@@ -160,9 +144,10 @@ bool typeEquals(const TypePtr& a, const TypePtr& b) {
 }
 
 namespace {
-// A function type in a nested position — a parameter of another function
-// type or the element of Signal/Sample/list — is parenthesized, matching
-// where the source grammar itself requires parentheses.
+// A function type in a nested position - a parameter of another function
+// type or the argument of a postfix constructor (Scalar Signal,
+// 'a list) - is parenthesized, matching where the source grammar itself
+// requires parentheses.
 std::string nestedTypeName(const TypePtr& t) {
   std::string s = typeName(t);
   return t->kind == Type::Kind::Fun ? "(" + s + ")" : s;
@@ -178,8 +163,6 @@ std::string typeName(const TypePtr& t) {
     case Type::Kind::String: return "String";
     case Type::Kind::Bool: return "Bool";
     case Type::Kind::Unit: return "unit";
-    case Type::Kind::Signal: return nestedTypeName(t->elem) + " Signal";
-    case Type::Kind::Sample: return nestedTypeName(t->elem) + " Sample";
     case Type::Kind::Tuple: {
       std::string s = "(";
       for (size_t i = 0; i < t->items.size(); i++) {
@@ -230,9 +213,6 @@ bool occurs(int v, const TypePtr& t, const Subst& subst) {
       auto it = subst.find(t->var);
       return it != subst.end() && occurs(v, it->second, subst);
     }
-    case Type::Kind::Signal:
-    case Type::Kind::Sample:
-      return occurs(v, t->elem, subst);
     case Type::Kind::Tuple:
     case Type::Kind::Fun:
     case Type::Kind::Named: {
@@ -285,9 +265,6 @@ bool unify(const TypePtr& sig, const TypePtr& concrete, Subst& subst) {
     case Type::Kind::Bool:
     case Type::Kind::Unit:
       return true;
-    case Type::Kind::Signal:
-    case Type::Kind::Sample:
-      return unify(sig->elem, concrete->elem, subst);
     case Type::Kind::Tuple:
       if (sig->items.size() != concrete->items.size()) return false;
       for (size_t i = 0; i < sig->items.size(); i++)
@@ -320,8 +297,6 @@ TypePtr applySubst(const TypePtr& t, const Subst& subst) {
       auto it = subst.find(t->var);
       return it != subst.end() ? applySubst(it->second, subst) : t;
     }
-    case Type::Kind::Signal: return tSignal(applySubst(t->elem, subst));
-    case Type::Kind::Sample: return tSample(applySubst(t->elem, subst));
     case Type::Kind::Tuple: {
       std::vector<TypePtr> items;
       for (auto& x : t->items) items.push_back(applySubst(x, subst));

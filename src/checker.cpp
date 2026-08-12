@@ -49,13 +49,16 @@ class ModuleChecker {
 
   void run() {
     frames_.emplace_back();  // the file-level scope
-    // The prelude: Core's `list` declaration (and its Nil/Cons
-    // constructors) are ambient, like the built-in type names - list
-    // literals and annotations need no import. Core itself declares
-    // them at the top of its interface, so nothing to seed there.
-    if (const TypeDecl* list = coreListDecl()) {
-      frames_.back().types["list"] = list;
-      bindDeclCtors(frames_.back(), list);
+    // The prelude: Core's `list`, `Signal` and `Sample` declarations
+    // (and list's Nil/Cons constructors) are ambient, like the built-in
+    // type names - annotations and list literals need no import. Core
+    // itself declares them at the top of its interface, so nothing to
+    // seed there.
+    for (const char* name : {"list", "Signal", "Sample"}) {
+      if (const TypeDecl* d = coreDecl(name)) {
+        frames_.back().types[name] = d;
+        bindDeclCtors(frames_.back(), d);
+      }
     }
     checkDefs(mod_.parsed.defs, "");
   }
@@ -102,14 +105,21 @@ class ModuleChecker {
     return nullptr;
   }
 
-  // Core's `list` declaration - through the program for ordinary
-  // modules, from our own declarations while Core itself is checking.
-  const TypeDecl* coreListDecl() const {
-    if (const TypeDecl* d = prog_.coreTypeDecl("list")) return d;
-    auto it = mod_.typeDecls.find("list");
-    return it != mod_.typeDecls.end() && mod_.parsed.name == "Core"
-               ? it->second.get()
-               : nullptr;
+  // A Core-declared type the compiler itself knows - through the
+  // program for ordinary modules, from our own declarations while Core
+  // itself is checking.
+  const TypeDecl* coreDecl(const std::string& name) const {
+    if (const TypeDecl* d = prog_.coreTypeDecl(name)) return d;
+    if (mod_.parsed.name != "Core") return nullptr;
+    auto it = mod_.typeDecls.find(name);
+    return it != mod_.typeDecls.end() ? it->second.get() : nullptr;
+  }
+  const TypeDecl* coreListDecl() const { return coreDecl("list"); }
+
+  // Operator lifting recognizes signals nominally, by Core's
+  // declaration identity.
+  bool isSignalType(const TypePtr& t) const {
+    return t->kind == Type::Kind::Named && t->decl == coreDecl("Signal");
   }
 
   const std::pair<const TypeDecl*, int>* lookupCtor(
@@ -331,9 +341,9 @@ class ModuleChecker {
       bool atom = n == "Scalar" || n == "Int" || n == "Vector" ||
                   n == "Timestamp" || n == "String" || n == "Bool" ||
                   n == "unit";
-      // `list` is not here: it is an ordinary (Core-declared, ambient)
-      // type declaration and resolves through the scope below.
-      bool unary = n == "Signal" || n == "Sample";
+      // `list`, `Signal` and `Sample` are not here: they are ordinary
+      // (Core-declared, ambient) declarations and resolve through the
+      // scope below.
       if (atom) {
         if (!te.args.empty())
           return typeError(te.span,
@@ -345,15 +355,6 @@ class ModuleChecker {
         if (n == "String") return tString();
         if (n == "Bool") return tBool();
         return tUnit();
-      }
-      if (unary) {
-        if (te.args.size() != 1)
-          return typeError(te.span,
-                           "type '" + n + "' expects an element type, "
-                           "written postfix (as in 'Scalar " + n + "')", n);
-        TypePtr elem = resolveType(*te.args[0]);
-        if (n == "Signal") return tSignal(std::move(elem));
-        return tSample(std::move(elem));
       }
       if (const TypeDecl* decl = lookupTypeDecl(n)) {
         // Rewrite to canonical form (declaring module + stored dotted
@@ -1000,9 +1001,9 @@ class ModuleChecker {
           case Type::Kind::Int:
           case Type::Kind::Scalar:
           case Type::Kind::Vector:
-          case Type::Kind::Signal:
             return t;
           default:
+            if (isSignalType(t)) return t;
             fail(e.span, "unary '-' is not defined for " + typeName(t));
         }
       }
@@ -1737,10 +1738,6 @@ class ModuleChecker {
   static void collectVarIds(const TypePtr& t, std::set<int>& out) {
     switch (t->kind) {
       case Type::Kind::Var: out.insert(t->var); break;
-      case Type::Kind::Signal:
-      case Type::Kind::Sample:
-        collectVarIds(t->elem, out);
-        break;
       case Type::Kind::Tuple:
       case Type::Kind::Fun:
       case Type::Kind::Named:
@@ -1756,9 +1753,6 @@ class ModuleChecker {
     switch (t->kind) {
       case Type::Kind::Var:
         return t->var == id ? typeName(t) : std::string{};
-      case Type::Kind::Signal:
-      case Type::Kind::Sample:
-        return varNameById(t->elem, id);
       case Type::Kind::Tuple:
       case Type::Kind::Fun:
       case Type::Kind::Named: {
@@ -1779,10 +1773,6 @@ class ModuleChecker {
       case Type::Kind::Var:
         if (!renaming.count(t->var))
           renaming[t->var] = tVar(nextFreshVar_++, t->varName);
-        break;
-      case Type::Kind::Signal:
-      case Type::Kind::Sample:
-        collectFreshening(t->elem, renaming);
         break;
       case Type::Kind::Tuple:
       case Type::Kind::Fun:
@@ -1857,14 +1847,14 @@ class ModuleChecker {
     if ((is(l, K::Vector) && is(r, K::Scalar)) ||
         (is(l, K::Scalar) && is(r, K::Vector)))
       return tVector();
-    if (is(l, K::Signal) && is(r, K::Signal)) {
-      if (!typeEquals(l->elem, r->elem))
+    if (isSignalType(l) && isSignalType(r)) {
+      if (!typeEquals(l->items[0], r->items[0]))
         fail(e.span, "cannot combine " + typeName(l) + " with " + typeName(r) +
                          " (element types differ)");
       return l;
     }
-    if (is(l, K::Signal) && is(r, K::Scalar)) return l;
-    if (is(l, K::Scalar) && is(r, K::Signal)) return r;
+    if (isSignalType(l) && is(r, K::Scalar)) return l;
+    if (is(l, K::Scalar) && isSignalType(r)) return r;
     fail(e.span, "operator is not defined for " + typeName(l) + " and " +
                      typeName(r));
   }

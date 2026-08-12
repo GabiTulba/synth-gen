@@ -10,12 +10,21 @@
    (Core.Osc.sine), `open Core` for module-qualified access (Osc.sine),
    or `open Core.Osc` for bare names (sine). *)
 
-(* --- The list type ----------------------------------------------------
-   An ordinary recursive variant. It, and its Nil/Cons constructors, are
-   ambient like the built-in type names: `[a; b; c]` literals are sugar
-   for Cons chains, and `match` takes lists apart without any import. *)
+(* --- The core types ---------------------------------------------------
+   Declared here, ambient everywhere (like the built-in type names - no
+   import needed to write an annotation).
+
+   `list` is an ordinary recursive variant: `[a; b; c]` literals are
+   sugar for Cons chains, and `match` takes lists apart.
+
+   `Signal` is abstract - an engine-backed handle with no structure to
+   observe; the element type is Scalar (mono) or Vector (multichannel).
+   A `Sample` is a plain record: a signal plus the window to cut from
+   it, so `s.from` and `{ s with to = ... }` work like on any record. *)
 
 type 'a list = | Nil | Cons of ('a, 'a list) ;;
+type 'a Signal ;;
+type 'a Sample = { sig : 'a Signal; from : Timestamp; to : Timestamp } ;;
 
 (* --- Oscillators & modulation (oscillators.cpp) ---------------------- *)
 

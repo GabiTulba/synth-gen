@@ -2704,3 +2704,33 @@ let n : Int = List.fold ~f:(fun a:Int x:Timestamp -> a + 1) ~init:0 ~xs:same ;;
   for (auto& d : r.diags.items) std::cerr << d.message << "\n";
   CHECK(r.ok);
 }
+
+TEST(build_sample_record_projection_and_update) {
+  // Cutting a window by record update renders byte-identically to
+  // cutting it with Arrange.sample directly.
+  TempDir viaUpdate, direct;
+  viaUpdate.write("p.synth", R"(
+open Core open Core.Osc open Core.Arrange open Core.Render
+let whole : Scalar Sample = sample (sine 440.0) 0s 200ms ;;
+let cut : Scalar Sample = { whole with from = 50ms; to = 150ms } ;;
+let start : Timestamp = cut.from ;;
+let _ = render "w" 48000.0 (sample (place cut start) 0s 200ms) ;;
+)");
+  viaUpdate.write("build.json", projectManifest("upd", {"p.synth"}));
+  direct.write("p.synth", R"(
+open Core open Core.Osc open Core.Arrange open Core.Render
+let cut : Scalar Sample = sample (sine 440.0) 50ms 150ms ;;
+let _ = render "w" 48000.0 (sample (place cut 50ms) 0s 200ms) ;;
+)");
+  direct.write("build.json", projectManifest("dir", {"p.synth"}));
+  BuildResult r1 = buildProject(viaUpdate.dir.string());
+  for (auto& d : r1.diags.items) std::cerr << d.message << "\n";
+  BuildResult r2 = buildProject(direct.dir.string());
+  for (auto& d : r2.diags.items) std::cerr << d.message << "\n";
+  CHECK(r1.ok);
+  CHECK(r2.ok);
+  std::string a = slurp(viaUpdate.dir / "_build" / "artifacts" / "w.wav");
+  std::string b = slurp(direct.dir / "_build" / "artifacts" / "w.wav");
+  CHECK(!a.empty());
+  CHECK(a == b);
+}

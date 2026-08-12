@@ -82,7 +82,7 @@ let _ = render "demo" 48000.0 (sample song 0s 2s)
   CHECK(!diags.hasErrors());
   CHECK(userModCount(prog) == 1);
   const auto& types = userMod(prog).defTypes;
-  CHECK(typeEquals(types.at("song"), tSignal(tScalar())));
+  CHECK(typeName(types.at("song")) == "Scalar Signal");
   CHECK(types.at("pluck")->kind == Type::Kind::Fun);
 }
 
@@ -656,7 +656,7 @@ let own : Scalar Signal = tone ;;
   const CheckedModule* song_m = prog.find("Song");
   CHECK(song_m != nullptr);
   CHECK(typeEquals(song_m->defTypes.at("opened"), tScalar()));
-  CHECK(typeEquals(song_m->defTypes.at("own"), tSignal(tScalar())));
+  CHECK(typeName(song_m->defTypes.at("own")) == "Scalar Signal");
 }
 
 TEST(checker_module_alias_binds_and_overrides) {
@@ -853,7 +853,7 @@ let wide : Vector Signal =
     std::cerr << renderDiagnostic(d, prog.modules.empty() ? std::string{}
                                        : userMod(prog).parsed.source);
   CHECK(!diags.hasErrors());
-  CHECK(typeEquals(userMod(prog).defTypes.at("wide"), tSignal(tVector())));
+  CHECK(typeName(userMod(prog).defTypes.at("wide")) == "Vector Signal");
 }
 
 TEST(checker_modulation_type_errors) {
@@ -890,7 +890,7 @@ let wide : Vector Signal = delay 10ms (channels [sine 440.0; sine 442.0]) ;;
     std::cerr << renderDiagnostic(d, prog.modules.empty() ? std::string{}
                                        : userMod(prog).parsed.source);
   CHECK(!diags.hasErrors());
-  CHECK(typeEquals(userMod(prog).defTypes.at("wide"), tSignal(tVector())));
+  CHECK(typeName(userMod(prog).defTypes.at("wide")) == "Vector Signal");
 
   // Delay time must be a Timestamp, not a Scalar.
   std::string g = tp.write("bad.synth",
@@ -915,7 +915,7 @@ let hall : Vector Signal =
     std::cerr << renderDiagnostic(d, prog.modules.empty() ? std::string{}
                                        : userMod(prog).parsed.source);
   CHECK(!diags.hasErrors());
-  CHECK(typeEquals(userMod(prog).defTypes.at("hall"), tSignal(tVector())));
+  CHECK(typeName(userMod(prog).defTypes.at("hall")) == "Vector Signal");
 
   // decay must be a Timestamp.
   std::string g = tp.write(
@@ -982,7 +982,7 @@ let wide : Vector Signal =
     std::cerr << renderDiagnostic(d, prog.modules.empty() ? std::string{}
                                        : userMod(prog).parsed.source);
   CHECK(!diags.hasErrors());
-  CHECK(typeEquals(userMod(prog).defTypes.at("wide"), tSignal(tVector())));
+  CHECK(typeName(userMod(prog).defTypes.at("wide")) == "Vector Signal");
 
   // threshold is a Scalar, not a Timestamp.
   std::string g = tp.write(
@@ -1007,7 +1007,7 @@ let wide : Vector Signal =
     std::cerr << renderDiagnostic(d, prog.modules.empty() ? std::string{}
                                        : userMod(prog).parsed.source);
   CHECK(!diags.hasErrors());
-  CHECK(typeEquals(userMod(prog).defTypes.at("wide"), tSignal(tVector())));
+  CHECK(typeName(userMod(prog).defTypes.at("wide")) == "Vector Signal");
 
   // The list must be Timestamps, not Scalars.
   std::string g = tp.write("bad.synth",
@@ -1112,8 +1112,7 @@ let two : Scalar = twice (add 1.0) 0.0 ;;
                                        : userMod(prog).parsed.source);
   CHECK(!diags.hasErrors());
   CHECK(typeEquals(userMod(prog).defTypes.at("three"), tScalar()));
-  CHECK(typeEquals(userMod(prog).defTypes.at("damped"),
-                   tSignal(tScalar())));
+  CHECK(typeName(userMod(prog).defTypes.at("damped")) == "Scalar Signal");
   // A non-function expression still cannot be applied.
   std::string g = tp.write("bad1.synth", "open Core open Core.Osc open Core.Fx open Core.Arrange open Core.Render open Core.Io open Core.Time open Core.Sig open Core.Math\nlet x : Scalar = (1.0) 2.0 ;;");
   DiagnosticBag d1;
@@ -1148,7 +1147,7 @@ let scaled base:Scalar : Scalar list =
     std::cerr << renderDiagnostic(d, prog.modules.empty() ? std::string{}
                                        : userMod(prog).parsed.source);
   CHECK(!diags.hasErrors());
-  CHECK(typeEquals(userMod(prog).defTypes.at("song"), tSignal(tScalar())));
+  CHECK(typeName(userMod(prog).defTypes.at("song")) == "Scalar Signal");
 }
 
 TEST(checker_lambda_capture_and_shadowing) {
@@ -1259,8 +1258,8 @@ let s : Scalar Sample = sine 440.0 |> sample ~from:0s ~to:1s ;;
     std::cerr << renderDiagnostic(d, prog.modules.empty() ? std::string{}
                                        : userMod(prog).parsed.source);
   CHECK(!diags.hasErrors());
-  CHECK(typeEquals(userMod(prog).defTypes.at("warm"), tSignal(tScalar())));
-  CHECK(typeEquals(userMod(prog).defTypes.at("s"), tSample(tScalar())));
+  CHECK(typeName(userMod(prog).defTypes.at("warm")) == "Scalar Signal");
+  CHECK(typeName(userMod(prog).defTypes.at("s")) == "Scalar Sample");
 }
 
 TEST(checker_pipe_type_error_propagates) {
@@ -1330,7 +1329,7 @@ let song : Scalar Signal =
     std::cerr << renderDiagnostic(d, prog.modules.empty() ? std::string{}
                                        : userMod(prog).parsed.source);
   CHECK(!diags.hasErrors());
-  CHECK(typeEquals(userMod(prog).defTypes.at("song"), tSignal(tScalar())));
+  CHECK(typeName(userMod(prog).defTypes.at("song")) == "Scalar Signal");
 }
 
 TEST(checker_let_in_shadowing_and_scope) {
@@ -1411,7 +1410,7 @@ let song : Scalar Signal =
     std::cerr << renderDiagnostic(d, prog.modules.empty() ? std::string{}
                                        : userMod(prog).parsed.source);
   CHECK(!diags.hasErrors());
-  CHECK(typeEquals(userMod(prog).defTypes.at("song"), tSignal(tScalar())));
+  CHECK(typeName(userMod(prog).defTypes.at("song")) == "Scalar Signal");
 }
 
 TEST(checker_let_in_function_body_mismatch) {
@@ -1526,11 +1525,11 @@ let wide : Vector Signal =
     std::cerr << renderDiagnostic(d, prog.modules.empty() ? std::string{}
                                        : userMod(prog).parsed.source);
   CHECK(!diags.hasErrors());
-  CHECK(typeEquals(userMod(prog).defTypes.at("dc"), tSignal(tScalar())));
-  CHECK(typeEquals(userMod(prog).defTypes.at("pair"), tSignal(tVector())));
-  CHECK(typeEquals(userMod(prog).defTypes.at("ramp"), tSignal(tScalar())));
-  CHECK(typeEquals(userMod(prog).defTypes.at("fade"), tSignal(tScalar())));
-  CHECK(typeEquals(userMod(prog).defTypes.at("wide"), tSignal(tVector())));
+  CHECK(typeName(userMod(prog).defTypes.at("dc")) == "Scalar Signal");
+  CHECK(typeName(userMod(prog).defTypes.at("pair")) == "Vector Signal");
+  CHECK(typeName(userMod(prog).defTypes.at("ramp")) == "Scalar Signal");
+  CHECK(typeName(userMod(prog).defTypes.at("fade")) == "Scalar Signal");
+  CHECK(typeName(userMod(prog).defTypes.at("wide")) == "Vector Signal");
 }
 
 TEST(checker_math_primitives) {
@@ -1552,9 +1551,8 @@ let fade : Scalar Signal = exp (0.0 - time) ;;
                                        : userMod(prog).parsed.source);
   CHECK(!diags.hasErrors());
   CHECK(typeEquals(userMod(prog).defTypes.at("e"), tScalar()));
-  CHECK(typeEquals(userMod(prog).defTypes.at("shaped"),
-                   tSignal(tScalar())));
-  CHECK(typeEquals(userMod(prog).defTypes.at("curve"), tSignal(tScalar())));
+  CHECK(typeName(userMod(prog).defTypes.at("shaped")) == "Scalar Signal");
+  CHECK(typeName(userMod(prog).defTypes.at("curve")) == "Scalar Signal");
 }
 
 TEST(checker_timestamp_conversions) {
@@ -1608,10 +1606,10 @@ let wide : Vector Signal =
     std::cerr << renderDiagnostic(d, prog.modules.empty() ? std::string{}
                                        : userMod(prog).parsed.source);
   CHECK(!diags.hasErrors());
-  CHECK(typeEquals(userMod(prog).defTypes.at("warped"), tSignal(tScalar())));
-  CHECK(typeEquals(userMod(prog).defTypes.at("piped"), tSignal(tScalar())));
+  CHECK(typeName(userMod(prog).defTypes.at("warped")) == "Scalar Signal");
+  CHECK(typeName(userMod(prog).defTypes.at("piped")) == "Scalar Signal");
   // The element type rides through: only the rate function is constrained.
-  CHECK(typeEquals(userMod(prog).defTypes.at("wide"), tSignal(tVector())));
+  CHECK(typeName(userMod(prog).defTypes.at("wide")) == "Vector Signal");
 }
 
 TEST(checker_resample_type_errors) {
@@ -1685,13 +1683,14 @@ let wide : Vector Signal = dampen (channels [saw 220.0; saw 221.0]) ;;
   Program prog = checkProject({f}, diags);
   CHECK(!diags.hasErrors());
   const auto& types = userMod(prog).defTypes;
-  CHECK(typeEquals(types.at("mono"), tSignal(tScalar())));
-  CHECK(typeEquals(types.at("wide"), tSignal(tVector())));
+  CHECK(typeName(types.at("mono")) == "Scalar Signal");
+  CHECK(typeName(types.at("wide")) == "Vector Signal");
   // The definition itself keeps its polymorphic signature.
   const TypePtr& dampen = types.at("dampen");
   CHECK(dampen->kind == Type::Kind::Fun);
   CHECK(containsRigidVar(dampen));
-  CHECK(dampen->items[0]->elem->var == dampen->ret->elem->var);
+  // 'a Signal is Named with the variable as its argument.
+  CHECK(dampen->items[0]->items[0]->var == dampen->ret->items[0]->var);
 }
 
 TEST(checker_polymorphic_higher_order_definition) {
@@ -1711,7 +1710,7 @@ let filtered : Scalar Signal =
   CHECK(!diags.hasErrors());
   const auto& types = userMod(prog).defTypes;
   CHECK(typeEquals(types.at("quad"), tScalar()));
-  CHECK(typeEquals(types.at("filtered"), tSignal(tScalar())));
+  CHECK(typeName(types.at("filtered")) == "Scalar Signal");
 }
 
 TEST(checker_polymorphic_def_flows_into_polymorphic_prim) {
@@ -1726,7 +1725,7 @@ let layers : Scalar Signal =
   DiagnosticBag diags;
   Program prog = checkProject({f}, diags);
   CHECK(!diags.hasErrors());
-  CHECK(typeEquals(userMod(prog).defTypes.at("layers"), tSignal(tScalar())));
+  CHECK(typeName(userMod(prog).defTypes.at("layers")) == "Scalar Signal");
 }
 
 TEST(checker_polymorphic_def_across_modules) {
@@ -1750,8 +1749,8 @@ let wide : Vector Signal =
   CHECK(!diags.hasErrors());
   const CheckedModule* m = prog.find("Song");
   CHECK(m != nullptr);
-  CHECK(typeEquals(m->defTypes.at("mono"), tSignal(tScalar())));
-  CHECK(typeEquals(m->defTypes.at("wide"), tSignal(tVector())));
+  CHECK(typeName(m->defTypes.at("mono")) == "Scalar Signal");
+  CHECK(typeName(m->defTypes.at("wide")) == "Vector Signal");
 }
 
 TEST(checker_polymorphic_annotated_partial_application) {
@@ -1766,8 +1765,8 @@ let wide : Vector Signal = damp (channels [saw 220.0; saw 221.0]) ;;
   Program prog = checkProject({f}, diags);
   CHECK(!diags.hasErrors());
   const auto& types = userMod(prog).defTypes;
-  CHECK(typeEquals(types.at("mono"), tSignal(tScalar())));
-  CHECK(typeEquals(types.at("wide"), tSignal(tVector())));
+  CHECK(typeName(types.at("mono")) == "Scalar Signal");
+  CHECK(typeName(types.at("wide")) == "Vector Signal");
 }
 
 TEST(checker_type_variable_is_rigid_in_its_own_body) {
@@ -1841,13 +1840,13 @@ let wide : Vector Signal = Voices.Fx.damp (channels [saw 110.0; saw 111.0]) ;;
   const auto& types = userMod(prog).defTypes;
   CHECK(typeEquals(types.at("Voices.base"), tScalar()));
   CHECK(typeEquals(types.at("Voices.again"), tScalar()));
-  CHECK(typeEquals(types.at("Voices.lead"), tSignal(tScalar())));
+  CHECK(typeName(types.at("Voices.lead")) == "Scalar Signal");
   CHECK(types.count("Voices.Fx.damp") == 1);
   CHECK(userMod(prog).inlineModules.count("Voices") == 1);
   CHECK(userMod(prog).inlineModules.count("Voices.Fx") == 1);
   // The polymorphic member instantiates per use like any signature.
-  CHECK(typeEquals(types.at("mono"), tSignal(tScalar())));
-  CHECK(typeEquals(types.at("wide"), tSignal(tVector())));
+  CHECK(typeName(types.at("mono")) == "Scalar Signal");
+  CHECK(typeName(types.at("wide")) == "Vector Signal");
 }
 
 TEST(checker_inline_module_members_not_bare_outside) {
@@ -1907,7 +1906,7 @@ let tone : Scalar Signal = (sine hz) * Sub.gain ;;
     std::cerr << renderDiagnostic(d, prog.modules.empty() ? std::string{}
                                        : userMod(prog).parsed.source);
   CHECK(!diags.hasErrors());
-  CHECK(typeEquals(userMod(prog).defTypes.at("tone"), tSignal(tScalar())));
+  CHECK(typeName(userMod(prog).defTypes.at("tone")) == "Scalar Signal");
 }
 
 TEST(checker_inline_module_shadows_outer_names) {
@@ -1951,8 +1950,8 @@ let lvl : Scalar = A.level ;;
   CHECK(!diags.hasErrors());
   const CheckedModule* m = prog.find("Song");
   CHECK(m != nullptr);
-  CHECK(typeEquals(m->defTypes.at("mono"), tSignal(tScalar())));
-  CHECK(typeEquals(m->defTypes.at("wide"), tSignal(tVector())));
+  CHECK(typeName(m->defTypes.at("mono")) == "Scalar Signal");
+  CHECK(typeName(m->defTypes.at("wide")) == "Vector Signal");
   CHECK(typeEquals(m->defTypes.at("lvl"), tScalar()));
 }
 
@@ -2007,7 +2006,7 @@ let s : Scalar Signal = voice ~freq:hz ~crisp:(not late) ;;
   CHECK(typeEquals(types.at("fast"), tBool()));
   CHECK(typeEquals(types.at("late"), tBool()));
   CHECK(typeEquals(types.at("hz"), tScalar()));
-  CHECK(typeEquals(types.at("s"), tSignal(tScalar())));
+  CHECK(typeName(types.at("s")) == "Scalar Signal");
 }
 
 TEST(checker_if_branches_can_be_polymorphic) {
@@ -2292,9 +2291,7 @@ TEST(checker_type_name_function_formatting) {
   CHECK(typeName(f) == "x:Scalar -> Scalar");
   TypePtr hof = tFun({f, tScalar()}, {"f", ""}, tScalar());
   CHECK(typeName(hof) == "f:(x:Scalar -> Scalar) -> Scalar -> Scalar");
-  CHECK(typeName(tSignal(tFun({tScalar()}, tScalar()))) ==
-        "(Scalar -> Scalar) Signal");
-
+  
   // A bundled-stdlib signature reads back as written: Math.exp : x:'a -> 'a.
   fs::path lib =
       fs::path(bundledStdlibDir()) / "core" / kLibraryInterfaceFile;
@@ -2579,7 +2576,7 @@ let out : Scalar Signal = v.osc * v.vel ;;
   for (auto& d : diags.items)
     std::cerr << renderDiagnostic(d, userMod(prog).parsed.source);
   CHECK(!diags.hasErrors());
-  CHECK(typeEquals(userMod(prog).defTypes.at("out"), tSignal(tScalar())));
+  CHECK(typeName(userMod(prog).defTypes.at("out")) == "Scalar Signal");
 }
 
 TEST(checker_variant_and_match) {
@@ -2916,4 +2913,40 @@ TEST(checker_undetermined_empty_list_is_an_error) {
   DiagnosticBag ok;
   checkProject({f}, ok);
   CHECK(!ok.hasErrors());  // the call may leave 'a free: result is Int
+}
+
+TEST(checker_signal_is_abstract_and_sample_is_a_record) {
+  TempProject tp;
+  std::string f = tp.write("t.synth", R"(
+open Core open Core.Osc open Core.Arrange
+let s : Scalar Sample = sample (sine 440.0) 0s 100ms ;;
+let start : Timestamp = s.from ;;
+let inner : Scalar Signal = s.sig ;;
+let longer : Scalar Sample = { s with to = 200ms } ;;
+)");
+  DiagnosticBag diags;
+  Program prog = checkProject({f}, diags);
+  for (auto& d : diags.items)
+    std::cerr << renderDiagnostic(d, userMod(prog).parsed.source);
+  CHECK(!diags.hasErrors());
+  const auto& types = userMod(prog).defTypes;
+  CHECK(typeEquals(types.at("start"), tTimestamp()));
+  CHECK(typeName(types.at("inner")) == "Scalar Signal");
+  CHECK(types.at("s")->kind == Type::Kind::Named);
+  CHECK(types.at("s")->decl->flavor == TypeDecl::Flavor::Record);
+  // Matching on an abstract Signal is an error.
+  TempProject tp2;
+  std::string g = tp2.write("t.synth", R"(
+open Core open Core.Osc
+let f : Scalar =
+  match sine 440.0 with
+  | On -> 1.0 ;;
+)");
+  DiagnosticBag d2;
+  checkProject({g}, d2);
+  CHECK(d2.hasErrors());
+  bool found = false;
+  for (auto& d : d2.items)
+    if (d.message.find("abstract") != std::string::npos) found = true;
+  CHECK(found);
 }

@@ -48,6 +48,7 @@ class Interp {
   std::map<std::string, Env> globals_;             // module -> name -> value
   std::map<std::string, SigPtr> fileCache_;        // absolute path -> signal
   mutable CoreListInfo coreList_;                  // resolved on first use
+  mutable CoreSampleInfo coreSample_;              // resolved on first use
 
   const CoreListInfo& coreList() const {
     if (!coreList_) {
@@ -61,6 +62,21 @@ class Interp {
       }
     }
     return coreList_;
+  }
+
+  const CoreSampleInfo& coreSample() const {
+    if (!coreSample_) {
+      const TypeDecl* d = prog_.coreTypeDecl("Sample");
+      if (!d)
+        throw EvalError("internal error: Core's Sample type is not loaded");
+      coreSample_.decl = d;
+      for (size_t i = 0; i < d->fields.size(); i++) {
+        if (d->fields[i].name == "sig") coreSample_.sigField = (int)i;
+        if (d->fields[i].name == "from") coreSample_.fromField = (int)i;
+        if (d->fields[i].name == "to") coreSample_.toField = (int)i;
+      }
+    }
+    return coreSample_;
   }
   // Resolved user externals, one compile+load per definition per build.
   std::map<const TopDef*, ExternalFn> userExternals_;
@@ -511,6 +527,7 @@ class Interp {
     }
     ExtServices svc;
     svc.coreList = coreList();
+    svc.coreSample = coreSample();
     svc.apply = [this, &callerMod](const Value& fn, std::vector<Value> a) {
       return apply(fn, std::move(a), callerMod);
     };

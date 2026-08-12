@@ -29,6 +29,10 @@ struct TimeV { double seconds = 0; };
 struct BoolV { bool v = false; };
 struct StringV { std::string s; };
 struct VectorV { std::vector<double> v; };
+// A sample as the render pipeline consumes it: a signal plus the window
+// to cut. At the language level a Sample is an ordinary Core RECORD
+// value ({ sig; from; to }); this plain struct survives only inside
+// RenderTarget, after evaluation.
 struct SampleV {
   SigPtr sig;
   double from = 0, to = 0;
@@ -67,7 +71,7 @@ struct VariantV {
 
 struct Value {
   std::variant<UnitV, ScalarV, IntV, TimeV, BoolV, StringV, VectorV, SigPtr,
-               SampleV, TupleV, FunV, LambdaV, RecordV, VariantV>
+               TupleV, FunV, LambdaV, RecordV, VariantV>
       v;
 };
 
@@ -78,6 +82,17 @@ struct CoreListInfo {
   const TypeDecl* decl = nullptr;
   int nilIndex = 0;
   int consIndex = 1;
+  explicit operator bool() const { return decl != nullptr; }
+};
+
+// Core's Sample declaration and its field indexes: samples are ordinary
+// record values ({ sig; from; to }), and the external boundary converts
+// them to (and from) the engine-level ext::Sample with this.
+struct CoreSampleInfo {
+  const TypeDecl* decl = nullptr;
+  int sigField = 0;
+  int fromField = 1;
+  int toField = 2;
   explicit operator bool() const { return decl != nullptr; }
 };
 

@@ -25,6 +25,9 @@ struct ExtServices {
   // ext-level lists at the boundary (and rebuild coming back), so list
   // implementations keep seeing plain vectors.
   CoreListInfo coreList;
+  // Core's Sample declaration: host-side { sig; from; to } records
+  // convert to (and from) the engine-level ext::Sample.
+  CoreSampleInfo coreSample;
   // Apply a synth function value to positional arguments.
   std::function<Value(const Value& fn, std::vector<Value> args)> apply;
   // Resolve a path relative to the calling module, load (and cache) the

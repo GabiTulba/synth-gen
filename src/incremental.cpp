@@ -135,10 +135,6 @@ void collectNamedDecls(const TypePtr& t, const Program& prog, DepMap& out) {
       for (auto& x : t->items) collectNamedDecls(x, prog, out);
       return;
     }
-    case Type::Kind::Signal:
-    case Type::Kind::Sample:
-      collectNamedDecls(t->elem, prog, out);
-      return;
     case Type::Kind::Tuple:
     case Type::Kind::Fun:
       for (auto& x : t->items) collectNamedDecls(x, prog, out);

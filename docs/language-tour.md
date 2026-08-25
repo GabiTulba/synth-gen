@@ -63,7 +63,13 @@ and indexes. A literal with a unit suffix (`100ns`, `800ms`, `1.5s`,
 `1m`) is a `Timestamp`. A *computed* Scalar enters the time domain
 through `to_sec`/`to_ms`/`to_min` (`to_min (1.0 / bpm)` is one beat) —
 and there is deliberately no conversion back, because a Timestamp that
-decays into a bare number is how unit confusion gets in. Ints convert
+decays into a bare number is how unit confusion gets in. Once in the
+time domain you stay there and keep computing: Timestamps add and
+subtract, and scale by a Scalar, so `beat * 4.0` is the bar,
+`beat + beat / 2.0` the dotted note, and `bar - beat` the upbeat before
+it (results clamp at `0s`). What is left out is left out on purpose —
+`1s * 2s` is not a duration and `1s / 500ms` would be the Scalar
+conversion that does not exist. Ints convert
 only explicitly: `to_scalar` exactly, and `round`/`floor`/`ceil` back
 from the continuous side.
 
@@ -200,7 +206,9 @@ works straight in a binding:
 `let rec` puts a function's own name in scope in its body. That, plus
 recursive type declarations, is exactly what lists are made of: Core
 declares `type 'a list = | Nil | Cons of ('a, 'a list)`, makes it
-ambient, and writes `List.map`/`fold`/`init`/`repeat` in SynthGraph —
+ambient, and writes the whole `List` module (`map`, `fold`, `init`,
+`repeat`, `length`, `append`, `nth`, `rev`, `filter`, `concat`,
+`flat_map`, `zip`, `range`, `sum`, `maximum`) in SynthGraph —
 `[a; b; c]` is sugar for a `Cons` chain:
 
 ```ocaml

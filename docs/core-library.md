@@ -34,7 +34,7 @@ semantics of the less obvious primitives.
 | `Core.Arrange` | Combination and arrangement: `mix_all`, `channels`, `sample`, `place`, `place_multi` | `stdlib/core/sampling.cpp` |
 | `Core.Render` | The effects: `render`, `render_vis`, `render_stems`, `render_vis_stems` | `stdlib/core/render.cpp` |
 | `Core.Io` | Audio import: `load_mono`, `load_multi` | `stdlib/core/io.cpp` |
-| `Core.List` | List combinators & builders: `map`, `fold`, `init`, `repeat` | `stdlib/core/lists.cpp` |
+| `Core.List` | List combinators & builders: `map`, `fold`, `init`, `repeat`, `length`, `append`, `nth`, `rev`, `filter`, `concat`, `flat_map`, `zip`, `range`, `sum`, `maximum` | written in SynthGraph (`lib.synth`) |
 | `Core.Time` | Timestamp construction & sequences: `to_sec`/`to_ms`/`to_min`, `time_steps`, `jitter` | `stdlib/core/lists.cpp` |
 | `Core.Sig` | Signal constructors: `constant`, `constant_multi`, `time`, `signal`, `signal_multi` | `stdlib/core/signals.cpp` |
 | `Core.Math` | `exp`, `sqrt`, `log`, `pow` — polymorphic over Scalars and (elementwise) Signals — plus the Int conversions `to_scalar`, `round`, `floor`, `ceil`, and `not` | `stdlib/core/math.cpp` |
@@ -126,7 +126,23 @@ the whole story:
   literal unit suffixes (which can only follow a literal): `to_ms 250.0`
   is `250ms`, `to_min (1.0 / bpm)` is one beat at `bpm`. There is no
   conversion back to Scalar on purpose — a Timestamp that decays into a
-  bare number is how unit confusion gets in.
+  bare number is how unit confusion gets in. Once you have a Timestamp,
+  the operators carry it the rest of the way: Timestamps add and
+  subtract, and scale by a Scalar, so a tempo becomes a grid without
+  ever leaving the unit — `let beat : Timestamp = to_min (1.0 / bpm)`,
+  then `beat * 4.0` for the bar and `beat + beat / 2.0` for the dotted
+  note. Results clamp at `0s` (language spec
+  [§3](language-spec.md#operators-pointwise-lifting--scalar-broadcasting)).
+- **`List` edge cases** — the combinators are total, so a score
+  builder that legitimately produces nothing needs no special case at
+  the call site. `nth` answers with its `default` when the index is out
+  of range (there is no option type, and a partial primitive would push
+  a bounds check onto every caller); `maximum` takes the value an empty
+  list answers with, which doubles as a floor; `zip` stops at the
+  shorter list, so pairing a melody against a rhythm never invents an
+  element neither side had; `concat`/`flat_map`/`filter` on an empty
+  list are empty. `range ~from ~count` is the Int counterpart of
+  `time_steps`.
 - **`jitter ~seed ~spread steps`** — humanizes a rhythm: each timestamp
   moves by a delta in `[-spread, +spread]` (clamped at `0s`) derived by
   hashing `(seed, index)`. Statistically random but pure — the same seed

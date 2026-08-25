@@ -504,9 +504,29 @@ For `+ - * /` with operand types L and R:
 | Vector | Scalar (either order) | Vector |
 | t Signal | t Signal | t Signal (pointwise) |
 | t Signal | Scalar (either order) | t Signal (broadcast) |
+| Timestamp | Timestamp | Timestamp (`+` `-` only) |
+| Timestamp | Scalar | Timestamp (`*` either order, `/` with the Timestamp on the left) |
 
 Anything else (e.g. `Timestamp + Signal`, or `Int + Scalar` — Ints do
 not broadcast; convert explicitly with `to_scalar`) is a type error.
+
+The Timestamp rows are a *dimensional* rule, not a numeric one:
+durations add and subtract, and a duration scales by a dimensionless
+Scalar, so musical time can be written as musical time —
+`beat * 1.5` is a dotted note, `bar - beat` is the upbeat before it,
+`to_ms 250.0 + 100ms` composes a window. The combinations left out are
+left out on purpose. `1s * 2s` is not a duration; `1s / 500ms` would
+hand back the bare Scalar that `to_sec`/`to_ms`/`to_min` deliberately
+have no inverse for (§6); `1s + 2.0` mixes a duration with a number —
+convert the Scalar first. `1s * 2` is rejected by the Int rule above:
+scale by `2.0`, or convert with `to_scalar`.
+
+Every Timestamp result **clamps at the epoch**. The timeline starts at
+`0s` and a negative instant has no meaning, so `100ms - 900ms` is `0s`
+rather than an error or a negative Timestamp — the same clamping
+`jitter` applies to a humanized step (§6). Unary `-` on a Timestamp
+stays a type error for the same reason: there is nothing for it to
+denote.
 Channel-count
 mismatches between Vector Signals are detected when the signal graph is
 built — before any audio is computed — and signals are capped at 16
@@ -821,6 +841,23 @@ val List.fold   : f:('a -> 'b -> 'a) -> init:'a -> xs:'b list -> 'a  (* folds le
 val List.init   : n:Int -> f:(Int -> 'a) -> 'a list   (* [f 0; ...; f (n-1)] *)
 val List.repeat : n:Int -> x:'a -> 'a list
 
+(* structure *)
+val List.length : xs:'a list -> Int
+val List.append : xs:'a list -> ys:'a list -> 'a list
+val List.nth    : xs:'a list -> i:Int -> default:'a -> 'a  (* out of range -> default *)
+val List.rev    : xs:'a list -> 'a list
+
+(* selection & expansion *)
+val List.filter   : f:('a -> Bool) -> xs:'a list -> 'a list
+val List.concat   : xss:'a list list -> 'a list
+val List.flat_map : f:('a -> 'b list) -> xs:'a list -> 'b list
+val List.zip      : xs:'a list -> ys:'b list -> ('a, 'b) list  (* stops at the shorter *)
+
+(* numeric *)
+val List.range   : from:Int -> count:Int -> Int list   (* [from; ...; from+count-1] *)
+val List.sum     : xs:Scalar list -> Scalar
+val List.maximum : xs:Scalar list -> least:Scalar -> Scalar  (* empty -> least *)
+
 (* Core.Time: timestamp construction & sequences *)
 val Time.to_sec: x:Scalar -> Timestamp
 val Time.to_ms: x:Scalar -> Timestamp
@@ -834,6 +871,15 @@ Counts and indices are Ints, so wholeness is guaranteed by the type
 system; `List.init`/`List.repeat` treat a negative computed count as
 zero (the empty list), while `time_steps` still rejects one as a build
 (evaluation) error.
+
+The `List` combinators are **total**: every one of them answers for the
+empty list, so a builder that legitimately produces nothing needs no
+special case at the call site. Where a partial function would normally
+be, the signature names the answer instead — `nth` takes the `default`
+for an out-of-range index and `maximum` the value an empty list yields
+(which doubles as a floor), rather than failing the build. `zip` stops
+at the shorter list. All of them are written in SynthGraph in
+`lib.synth`, as ordinary recursive functions over `Cons`/`Nil`.
 
 `to_sec`/`to_ms`/`to_min` are the computed counterpart of the literal
 suffixes — `to_ms 250.0` is `250ms` — and are what a duration derived

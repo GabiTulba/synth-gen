@@ -1843,6 +1843,44 @@ class ModuleChecker {
                        typeName(r) +
                        " (an Int does not mix with other numeric types "
                        "implicitly; convert with to_scalar)");
+    // Timestamps: durations add and subtract, and scale by a Scalar
+    // (either order for `*`, left operand only for `/`). The table is
+    // deliberately partial - it adds a dimensional rule rather than
+    // relaxing one. Timestamp*Timestamp is not a duration, and
+    // Timestamp/Timestamp would hand back the bare Scalar the unit
+    // discipline exists to prevent: there is no way back from a
+    // Timestamp on purpose (§6, `to_sec`/`to_ms`/`to_min`).
+    if (is(l, K::Timestamp) || is(r, K::Timestamp)) {
+      bool both = is(l, K::Timestamp) && is(r, K::Timestamp);
+      bool add = e.op == BinOpKind::Add || e.op == BinOpKind::Sub;
+      if (both && add) return tTimestamp();
+      if (!both && e.op == BinOpKind::Mul &&
+          (is(l, K::Scalar) || is(r, K::Scalar)))
+        return tTimestamp();
+      if (!both && e.op == BinOpKind::Div && is(l, K::Timestamp) &&
+          is(r, K::Scalar))
+        return tTimestamp();
+      if (both && e.op == BinOpKind::Div)
+        fail(e.span,
+             "two Timestamps do not divide: the ratio would be a bare "
+             "Scalar, and a Timestamp deliberately has no way back to one "
+             "(there is no inverse of to_sec/to_ms/to_min). Carry the "
+             "Scalar you divided by instead, or keep the result a "
+             "Timestamp with 'beat / 2.0'");
+      if (both)
+        fail(e.span, "two Timestamps do not multiply (the result would not "
+                     "be a duration); scale a Timestamp by a Scalar "
+                     "instead, as in 'beat * 1.5'");
+      if (add)
+        fail(e.span, "operator is not defined for " + typeName(l) + " and " +
+                         typeName(r) +
+                         " (a Timestamp only adds to another Timestamp; "
+                         "convert with to_sec/to_ms/to_min first)");
+      fail(e.span, "operator is not defined for " + typeName(l) + " and " +
+                       typeName(r) +
+                       " (scale a Timestamp by a Scalar: 'beat * 1.5' or "
+                       "'1.5 * beat', and 'beat / 2.0')");
+    }
     if (is(l, K::Vector) && is(r, K::Vector)) return tVector();
     if ((is(l, K::Vector) && is(r, K::Scalar)) ||
         (is(l, K::Scalar) && is(r, K::Vector)))

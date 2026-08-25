@@ -1591,6 +1591,68 @@ TEST(checker_timestamp_conversion_type_errors) {
   }
 }
 
+TEST(checker_timestamp_arithmetic) {
+  TempProject tp;
+  std::string f = tp.write("t.synth", R"(
+open Core open Core.Osc open Core.Fx open Core.Arrange open Core.Render open Core.Io open Core.Time open Core.Sig open Core.Math
+let beat : Timestamp = to_min (1.0 / 120.0) ;;
+let bar : Timestamp = beat * 4.0 ;;
+let bar2 : Timestamp = 4.0 * beat ;;
+let half : Timestamp = beat / 2.0 ;;
+let dotted : Timestamp = beat + beat / 2.0 ;;
+let upbeat : Timestamp = bar - beat ;;
+let clamped : Timestamp = 0s - 1s ;;
+let window : Timestamp = 250ms + 100ms * 2.0 ;;
+let grid : Timestamp list = time_steps ~start:bar ~step:half ~count:8 ;;
+let cmp : Bool = bar > beat ;;
+)");
+  DiagnosticBag diags;
+  Program prog = checkProject({f}, diags);
+  for (auto& d : diags.items)
+    std::cerr << renderDiagnostic(d, prog.modules.empty() ? std::string{}
+                                       : userMod(prog).parsed.source);
+  CHECK(!diags.hasErrors());
+  const auto& types = userMod(prog).defTypes;
+  for (const char* n : {"beat", "bar", "bar2", "half", "dotted", "upbeat",
+                        "clamped", "window"})
+    CHECK(typeEquals(types.at(n), tTimestamp()));
+  CHECK(typeName(types.at("grid")) == "Timestamp list");
+  CHECK(typeEquals(types.at("cmp"), tBool()));
+}
+
+TEST(checker_timestamp_arithmetic_type_errors) {
+  // The table is deliberately partial: a Timestamp is not a number.
+  // Multiplying two of them is not a duration, dividing two would hand
+  // back the bare Scalar the unit discipline exists to prevent, a Scalar
+  // does not add to a Timestamp, an Int does not scale one, and a
+  // Timestamp does not divide a Scalar.
+  for (const char* body :
+       {"open Core open Core.Osc open Core.Fx open Core.Arrange open Core.Render open Core.Io open Core.Time open Core.Sig open Core.Math"
+        "\nlet x : Timestamp = 1s * 2s ;;",
+        "open Core open Core.Osc open Core.Fx open Core.Arrange open Core.Render open Core.Io open Core.Time open Core.Sig open Core.Math"
+        "\nlet x : Scalar = 1s / 500ms ;;",
+        "open Core open Core.Osc open Core.Fx open Core.Arrange open Core.Render open Core.Io open Core.Time open Core.Sig open Core.Math"
+        "\nlet x : Timestamp = 1s / 500ms ;;",
+        "open Core open Core.Osc open Core.Fx open Core.Arrange open Core.Render open Core.Io open Core.Time open Core.Sig open Core.Math"
+        "\nlet x : Timestamp = 1s + 2.0 ;;",
+        "open Core open Core.Osc open Core.Fx open Core.Arrange open Core.Render open Core.Io open Core.Time open Core.Sig open Core.Math"
+        "\nlet x : Timestamp = 2.0 - 1s ;;",
+        "open Core open Core.Osc open Core.Fx open Core.Arrange open Core.Render open Core.Io open Core.Time open Core.Sig open Core.Math"
+        "\nlet x : Timestamp = 1s * 2 ;;",
+        "open Core open Core.Osc open Core.Fx open Core.Arrange open Core.Render open Core.Io open Core.Time open Core.Sig open Core.Math"
+        "\nlet x : Timestamp = 2.0 / 1s ;;",
+        "open Core open Core.Osc open Core.Fx open Core.Arrange open Core.Render open Core.Io open Core.Time open Core.Sig open Core.Math"
+        "\nlet x : Scalar = 1s + 1s ;;",
+        "open Core open Core.Osc open Core.Fx open Core.Arrange open Core.Render open Core.Io open Core.Time open Core.Sig open Core.Math"
+        "\nlet x : Timestamp = -1s ;;"}) {
+    TempProject tp;
+    std::string f = tp.write("bad.synth", body);
+    DiagnosticBag diags;
+    checkProject({f}, diags);
+    CHECK(diags.hasErrors());
+  }
+}
+
 TEST(checker_resample_typing) {
   TempProject tp;
   std::string f = tp.write("ok.synth", R"(

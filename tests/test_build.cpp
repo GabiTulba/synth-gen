@@ -892,6 +892,157 @@ let _ = place_multi hit (time_steps ~start:250ms ~step:500ms ~count:3)
   CHECK(a == b);
 }
 
+TEST(build_timestamp_arithmetic_matches_literals) {
+  // Timestamp arithmetic must land on exactly the same instants as the
+  // literals it replaces, so a render whose grid is derived from a tempo
+  // is byte-identical to the same render written out by hand. This is
+  // the whole point of the rule: musical time expressed as musical time.
+  auto write = [](TempDir& tp, const char* body) {
+    tp.write("t.synth", body);
+    tp.write("build.json", projectManifest("ta", {"t.synth"}));
+  };
+  TempDir derived, literal;
+  write(derived, R"(
+open Core open Core.Osc open Core.Fx open Core.Arrange open Core.Render open Core.Io open Core.Time open Core.Sig open Core.Math
+let beat : Timestamp = to_min (1.0 / 120.0) ;;
+let bar : Timestamp = beat * 4.0 ;;
+let hit : Scalar Sample =
+  sample (sine 660.0 * exp_decay 20.0) 0s (beat / 2.0) ;;
+let _ = place_multi hit (time_steps ~start:(bar - beat) ~step:beat ~count:3)
+  |> sample ~from:0s ~to:(bar + bar)
+  |> render ~name:"out" ~rate:8000.0 ;;
+)");
+  write(literal, R"(
+open Core open Core.Osc open Core.Fx open Core.Arrange open Core.Render open Core.Io open Core.Time open Core.Sig open Core.Math
+let hit : Scalar Sample = sample (sine 660.0 * exp_decay 20.0) 0s 250ms ;;
+let _ = place_multi hit (time_steps ~start:1500ms ~step:500ms ~count:3)
+  |> sample ~from:0s ~to:4s
+  |> render ~name:"out" ~rate:8000.0 ;;
+)");
+  CHECK(buildProject(derived.dir.string()).ok);
+  CHECK(buildProject(literal.dir.string()).ok);
+  std::string a = slurp(derived.dir / "_build" / "artifacts" / "out.wav");
+  std::string b = slurp(literal.dir / "_build" / "artifacts" / "out.wav");
+  CHECK(!a.empty());
+  CHECK(a == b);
+}
+
+TEST(build_timestamp_subtraction_clamps_at_the_epoch) {
+  // The timeline starts at 0s: subtracting past it clamps rather than
+  // producing a negative instant, so an early-shifted placement lands on
+  // the epoch instead of failing or wrapping.
+  auto write = [](TempDir& tp, const char* body) {
+    tp.write("t.synth", body);
+    tp.write("build.json", projectManifest("tc", {"t.synth"}));
+  };
+  TempDir clamped, epoch;
+  write(clamped, R"(
+open Core open Core.Osc open Core.Fx open Core.Arrange open Core.Render open Core.Io open Core.Time open Core.Sig open Core.Math
+let hit : Scalar Sample = sample (sine 440.0 * exp_decay 12.0) 0s 200ms ;;
+let _ = place hit (100ms - 900ms)
+  |> sample ~from:0s ~to:500ms
+  |> render ~name:"out" ~rate:8000.0 ;;
+)");
+  write(epoch, R"(
+open Core open Core.Osc open Core.Fx open Core.Arrange open Core.Render open Core.Io open Core.Time open Core.Sig open Core.Math
+let hit : Scalar Sample = sample (sine 440.0 * exp_decay 12.0) 0s 200ms ;;
+let _ = place hit 0s
+  |> sample ~from:0s ~to:500ms
+  |> render ~name:"out" ~rate:8000.0 ;;
+)");
+  CHECK(buildProject(clamped.dir.string()).ok);
+  CHECK(buildProject(epoch.dir.string()).ok);
+  std::string a = slurp(clamped.dir / "_build" / "artifacts" / "out.wav");
+  std::string b = slurp(epoch.dir / "_build" / "artifacts" / "out.wav");
+  CHECK(!a.empty());
+  CHECK(a == b);
+}
+
+TEST(build_list_combinators_compute_the_right_values) {
+  // The combinators are written in SynthGraph, so nothing but a render
+  // pins their *values*. Every result is folded into one frequency and
+  // one placement grid: a wrong length, a wrong index, a zip that did
+  // not truncate, or a rev that did not reverse all move the artifact.
+  auto write = [](TempDir& tp, const char* body) {
+    tp.write("l.synth", body);
+    tp.write("build.json", projectManifest("lc", {"l.synth"}));
+  };
+  TempDir derived, literal;
+  write(derived, R"(
+open Core open Core.Osc open Core.Fx open Core.Arrange open Core.Render open Core.Io open Core.Time open Core.Sig open Core.Math
+let big : Scalar list =
+  List.filter ~f:(fun x:Scalar -> x > 0.5) ~xs:[0.0; 1.0; 0.25; 2.0; 3.0] ;;
+let n : Int = List.length ~xs:big ;;
+let total : Scalar = List.sum ~xs:big ;;
+let top : Scalar = List.maximum ~xs:big ~least:0.0 ;;
+let pick : Scalar = List.nth ~xs:big ~i:1 ~default:0.0 ;;
+let miss : Scalar = List.nth ~xs:big ~i:99 ~default:0.0 ;;
+let pairs : (Int, Scalar) list =
+  List.zip ~xs:(List.range ~from:0 ~count:4) ~ys:big ;;
+let doubled : Scalar list =
+  List.flat_map ~f:(fun x:Scalar -> [x; x]) ~xs:big ;;
+(* 600 + 30 + 2 + 0 + 3 + 3 + 6 = 644 *)
+let freq : Scalar =
+  total * 100.0 + top * 10.0 + pick + miss + to_scalar n
+    + to_scalar (List.length ~xs:pairs)
+    + to_scalar (List.length ~xs:doubled) ;;
+let grid : Timestamp list =
+  List.concat ~xss:[List.append ~xs:[0s] ~ys:[250ms];
+                    List.rev ~xs:[750ms; 500ms]] ;;
+let hit : Scalar Sample = sample (sine freq * exp_decay 20.0) 0s 100ms ;;
+let _ = place_multi hit grid
+  |> sample ~from:0s ~to:1s |> render ~name:"out" ~rate:8000.0 ;;
+)");
+  write(literal, R"(
+open Core open Core.Osc open Core.Fx open Core.Arrange open Core.Render open Core.Io open Core.Time open Core.Sig open Core.Math
+let hit : Scalar Sample = sample (sine 644.0 * exp_decay 20.0) 0s 100ms ;;
+let _ = place_multi hit [0s; 250ms; 500ms; 750ms]
+  |> sample ~from:0s ~to:1s |> render ~name:"out" ~rate:8000.0 ;;
+)");
+  CHECK(buildProject(derived.dir.string()).ok);
+  CHECK(buildProject(literal.dir.string()).ok);
+  std::string a = slurp(derived.dir / "_build" / "artifacts" / "out.wav");
+  std::string b = slurp(literal.dir / "_build" / "artifacts" / "out.wav");
+  CHECK(!a.empty());
+  CHECK(a == b);
+}
+
+TEST(build_list_combinators_handle_empty_lists) {
+  // Every combinator has to answer for the empty list without a special
+  // case at the call site: that is what makes them safe to fold into a
+  // score builder that may legitimately produce nothing.
+  TempDir tp;
+  tp.write("l.synth", R"(
+open Core open Core.Osc open Core.Fx open Core.Arrange open Core.Render open Core.Io open Core.Time open Core.Sig open Core.Math
+let none : Scalar list = List.filter ~f:(fun x:Scalar -> x > 9.0) ~xs:[1.0] ;;
+(* 0 + 0 + (-1) + 5 + 0 + 0 + 0 + 440 = 444 *)
+let freq : Scalar =
+  to_scalar (List.length ~xs:none) + List.sum ~xs:none
+    + List.nth ~xs:none ~i:0 ~default:(-1.0)
+    + List.maximum ~xs:none ~least:5.0
+    + to_scalar (List.length ~xs:(List.rev ~xs:none))
+    + to_scalar (List.length ~xs:(List.concat ~xss:[none; none]))
+    + to_scalar (List.length ~xs:(List.zip ~xs:none ~ys:[1.0]))
+    + 440.0 ;;
+let _ = sine freq * exp_decay 8.0
+  |> sample ~from:0s ~to:200ms |> render ~name:"out" ~rate:8000.0 ;;
+)");
+  tp.write("build.json", projectManifest("le", {"l.synth"}));
+  TempDir ref;
+  ref.write("l.synth", R"(
+open Core open Core.Osc open Core.Fx open Core.Arrange open Core.Render open Core.Io open Core.Time open Core.Sig open Core.Math
+let _ = sine 444.0 * exp_decay 8.0
+  |> sample ~from:0s ~to:200ms |> render ~name:"out" ~rate:8000.0 ;;
+)");
+  ref.write("build.json", projectManifest("le", {"l.synth"}));
+  CHECK(buildProject(tp.dir.string()).ok);
+  CHECK(buildProject(ref.dir.string()).ok);
+  std::string a = slurp(tp.dir / "_build" / "artifacts" / "out.wav");
+  std::string b = slurp(ref.dir / "_build" / "artifacts" / "out.wav");
+  CHECK(!a.empty());
+  CHECK(a == b);
+}
+
 TEST(build_resample_identity_matches_the_input) {
   // End-to-end: `|> resample ~f:(fun t -> 1.0)` reads one source frame per
   // output frame, so the artifact must be byte-identical to the un-warped

@@ -574,6 +574,14 @@ class Interp {
     throw EvalError("internal error: operand is not a signal");
   }
 
+  // A Timestamp is a point on (or a span of) a timeline that starts at
+  // the epoch: subtracting past zero clamps rather than going negative,
+  // and a NaN (0s * inf, say) has no position at all.
+  static double clampTime(double x) {
+    if (std::isnan(x)) throw EvalError("timestamp arithmetic produced NaN");
+    return x < 0 ? 0.0 : x;
+  }
+
   static double arith(BinOpKind op, double a, double b) {
     switch (op) {
       case BinOpKind::Add: return a + b;
@@ -669,6 +677,21 @@ class Interp {
     bool rSig = std::holds_alternative<SigPtr>(r.v);
     if (lSig || rSig)
       return Value{makeBinOp(toSigOp(op), asSignal(l), asSignal(r))};
+
+    // Timestamps: durations add and subtract, and scale by a Scalar.
+    // Every result clamps at the epoch - the timeline starts at 0s and a
+    // negative Timestamp has no meaning, exactly as `jitter` clamps its
+    // humanized steps. The checker admits only the combinations handled
+    // here (see checkBinOp).
+    if (auto* a = std::get_if<TimeV>(&l.v)) {
+      if (auto* b = std::get_if<TimeV>(&r.v))
+        return Value{TimeV{clampTime(arith(op, a->seconds, b->seconds))}};
+      if (auto* b = std::get_if<ScalarV>(&r.v))
+        return Value{TimeV{clampTime(arith(op, a->seconds, b->v))}};
+    }
+    if (auto* a = std::get_if<ScalarV>(&l.v))
+      if (auto* b = std::get_if<TimeV>(&r.v))
+        return Value{TimeV{clampTime(arith(op, a->v, b->seconds))}};
 
     if (auto* a = std::get_if<IntV>(&l.v))
       if (auto* b = std::get_if<IntV>(&r.v))

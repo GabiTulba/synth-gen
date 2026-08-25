@@ -11,9 +11,13 @@ open Core.Io
 open Core.Time
 open Core.Sig
 open Core.Math
+open Core.Pitch
 
+(* The detune widths are cents, not ratios: 10.4 cents is a slow beat
+   between the pair, 15.5 a harder one - and both read as intervals
+   rather than as 1.006 and 1.009. *)
 let voice freq:Scalar : Scalar Signal =
-  (saw freq + saw (freq * 1.006)) * 0.5
+  (saw freq + saw (detune ~freq:freq ~cents:10.4)) * 0.5
     |> lowpass ~cutoff:450.0
     |> soft_clip ~threshold:0.7
 ;;
@@ -36,7 +40,7 @@ let held freq:Scalar : Scalar Sample =
    the soft one, so the clipping harmonics actually reach the ear. *)
 let grind freq:Scalar : Scalar Sample =
   let tone : Scalar Signal =
-    saw freq + saw (freq * 1.009) + square freq * 0.5
+    saw freq + saw (detune ~freq:freq ~cents:15.5) + square freq * 0.5
       |> lowpass ~cutoff:950.0
       |> hard_clip ~threshold:0.5 in
   tone

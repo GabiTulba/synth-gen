@@ -1,6 +1,7 @@
 (* Pad building blocks: the two-saw detuned tone every example pad is
    built from (detune is a parameter so stereo sides can run different
-   widths), and the shared 4 x 4 s chord-progression placement. *)
+   widths), and the shared four-chord progression placement, which takes
+   its grid from the caller's tempo. *)
 
 open Core
 open Core.Osc
@@ -16,11 +17,13 @@ let detuned ~freq:Scalar ~detune:Scalar : Scalar Signal =
   (saw (freq - detune) + saw (freq + detune)) * 0.5
 ;;
 
-(* Four chord samples on the 16 s cycle grid (four seconds each, two
-   bars at 120 BPM). Polymorphic in the channel layout: placing is
-   placing, whether the chords are mono or a stereo Vector. *)
-let place4 a:'a Sample b:'a Sample c:'a Sample d:'a Sample
+(* Four chord samples, two bars each, on the four-chord cycle grid. The
+   tempo is the caller's - the library no longer assumes 120 BPM.
+   Polymorphic in the channel layout: placing is placing, whether the
+   chords are mono or a stereo Vector. *)
+let place4 ~t:Tempo.Tempo a:'a Sample b:'a Sample c:'a Sample d:'a Sample
     : 'a Signal =
-  mix_all [a |> place ~at:0s; b |> place ~at:4s;
-           c |> place ~at:8s; d |> place ~at:12s]
+  let two_bars : Timestamp = Tempo.bar ~t:t * 2.0 in
+  mix_all [a |> place ~at:0s; b |> place ~at:two_bars;
+           c |> place ~at:(two_bars * 2.0); d |> place ~at:(two_bars * 3.0)]
 ;;

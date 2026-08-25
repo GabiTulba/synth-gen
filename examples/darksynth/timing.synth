@@ -1,0 +1,27 @@
+(* The song's clock, in one place: 120 BPM in 4/4, so a beat is 500ms
+   and a bar 2s. Every groove takes its step from `dur`, so the whole
+   arrangement follows the tempo rather than a set of precomputed
+   durations.
+
+   The section landmarks stay written in seconds - the arrangement is
+   documented as a timeline at the top of song.synth, and 32s reads
+   better there than "bar 16". What Tempo buys this song is note values
+   and the offsets derived from them. *)
+
+open Core
+open Core.Osc
+open Core.Fx
+open Core.Arrange
+open Core.Render
+open Core.Io
+open Core.Time
+open Core.Sig
+open Core.Math
+open Core.Tempo
+
+let tempo : Tempo = common ~bpm:120.0 ;;
+
+let dur v:Value : Timestamp = value ~t:tempo ~v:v ;;
+(* Two bars: the length of one chord segment, and the unit the whole
+   arrangement is cut into. *)
+let segment : Timestamp = bar ~t:tempo * 2.0 ;;

@@ -13,8 +13,15 @@ open Core.Time
 open Core.Sig
 open Core.Math
 
+import Timing
 import Voices
 module P = Voices.Pads
+
+open Core.Tempo
+open Core.Pitch
+
+(* `note A 2` is the A two octaves below middle C, in 12-TET at A=440. *)
+let note pc:PitchClass oct:Int : Scalar = a440 ~note:{ pc = pc; oct = oct } ;;
 
 let chord ~a:Scalar ~b:Scalar ~c:Scalar ~d:Scalar ~detune:Scalar
     : Scalar Signal =
@@ -28,16 +35,20 @@ let chord ~a:Scalar ~b:Scalar ~c:Scalar ~d:Scalar ~detune:Scalar
   (stack |> lowpass ~cutoff:1100.0) * env
 ;;
 
-(* Am -> F -> C -> G, four seconds (two bars at 120 BPM) per chord.
-   `bar` is a local function that captures the enclosing detune and cuts
-   each chord to the 4 s grid, so only the chord tones vary per call. *)
+(* Am -> F -> C -> G, two bars per chord. `two_bars` is a local function
+   that captures the enclosing detune and cuts each chord to the grid
+   Timing defines, so only the chord tones vary per call. *)
 let progression detune:Scalar : Scalar Signal =
-  let bar ~a:Scalar ~b:Scalar ~c:Scalar ~d:Scalar : Scalar Sample =
+  let two_bars ~a:Scalar ~b:Scalar ~c:Scalar ~d:Scalar : Scalar Sample =
     chord ~a:a ~b:b ~c:c ~d:d ~detune:detune
-      |> sample ~from:0s ~to:4s in
-  let am : Scalar Sample = bar ~a:110.0 ~b:164.81 ~c:220.0 ~d:261.63 in
-  let f : Scalar Sample = bar ~a:87.31 ~b:130.81 ~c:174.61 ~d:220.0 in
-  let c : Scalar Sample = bar ~a:130.81 ~b:196.0 ~c:261.63 ~d:329.63 in
-  let g : Scalar Sample = bar ~a:98.0 ~b:146.83 ~c:196.0 ~d:246.94 in
-  P.place4 am f c g
+      |> sample ~from:0s ~to:(Timing.at ~bar:2 ~beat:0.0) in
+  let am : Scalar Sample =
+    two_bars ~a:(note A 2) ~b:(note E 3) ~c:(note A 3) ~d:(note C 4) in
+  let f : Scalar Sample =
+    two_bars ~a:(note F 2) ~b:(note C 3) ~c:(note F 3) ~d:(note A 3) in
+  let c : Scalar Sample =
+    two_bars ~a:(note C 3) ~b:(note G 3) ~c:(note C 4) ~d:(note E 4) in
+  let g : Scalar Sample =
+    two_bars ~a:(note G 2) ~b:(note D 3) ~c:(note G 3) ~d:(note B 3) in
+  P.place4 ~t:Timing.tempo am f c g
 ;;

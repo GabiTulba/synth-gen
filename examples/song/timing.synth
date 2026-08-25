@@ -1,0 +1,27 @@
+(* The song's clock, in one place: 120 BPM in 4/4, so a beat is 500ms
+   and a bar 2s. Every other module derives its grid from here, which is
+   what makes re-tempoing the whole song a one-line edit.
+
+   `at`, `dur` and `grid` are thin wrappers that drop the `~t` argument -
+   the tempo appears exactly once in the project, on the line below. *)
+
+open Core
+open Core.Osc
+open Core.Fx
+open Core.Arrange
+open Core.Render
+open Core.Io
+open Core.Time
+open Core.Sig
+open Core.Math
+open Core.Tempo
+
+let tempo : Tempo = common ~bpm:120.0 ;;
+
+(* Bars and beats count from 0: `at ~bar:2 ~beat:0.0` is "two bars in",
+   an offset rather than a ruler label. *)
+let at ~bar:Int ~beat:Scalar : Timestamp =
+  Tempo.at ~t:tempo ~bar:bar ~beat:beat ;;
+let dur v:Value : Timestamp = value ~t:tempo ~v:v ;;
+let grid ~from:Timestamp ~step:Value ~count:Int : Timestamp list =
+  Tempo.grid ~t:tempo ~from:from ~step:step ~count:count ;;

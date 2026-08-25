@@ -12,8 +12,13 @@ open Core.Time
 open Core.Sig
 open Core.Math
 
+import Timing
 import Voices
 module P = Voices.Pads
+
+open Core.Pitch
+
+let note pc:PitchClass oct:Int : Scalar = a440 ~note:{ pc = pc; oct = oct } ;;
 
 let dark_chord ~root:Scalar ~third:Scalar ~fifth:Scalar ~detune:Scalar
     : Scalar Signal =
@@ -28,17 +33,22 @@ let dark_chord ~root:Scalar ~third:Scalar ~fifth:Scalar ~detune:Scalar
   (stack |> lowpass ~cutoff:850.0) * env
 ;;
 
-(* Am -> F -> Dm -> E: four seconds per chord, one 16 s cycle. The E
-   major (G#) is the harmonic-minor turn that makes it dark. `bar` is a
-   local function that captures the enclosing detune and cuts each chord
-   to the 4 s grid, so only the chord tones vary per call. *)
+(* Am -> F -> Dm -> E: two bars per chord, four chords to the cycle. The
+   E major (G#) is the harmonic-minor turn that makes it dark.
+   `segment` is a local function that captures the enclosing detune and
+   cuts each chord to the grid Timing defines, so only the chord tones
+   vary per call. *)
 let cycle detune:Scalar : Scalar Signal =
-  let bar ~root:Scalar ~third:Scalar ~fifth:Scalar : Scalar Sample =
+  let segment ~root:Scalar ~third:Scalar ~fifth:Scalar : Scalar Sample =
     dark_chord ~root:root ~third:third ~fifth:fifth ~detune:detune
-      |> sample ~from:0s ~to:4s in
-  let am : Scalar Sample = bar ~root:110.0 ~third:130.81 ~fifth:164.81 in
-  let f : Scalar Sample = bar ~root:87.31 ~third:110.0 ~fifth:130.81 in
-  let dm : Scalar Sample = bar ~root:73.42 ~third:87.31 ~fifth:110.0 in
-  let e : Scalar Sample = bar ~root:82.41 ~third:103.83 ~fifth:123.47 in
-  P.place4 am f dm e
+      |> sample ~from:0s ~to:Timing.segment in
+  let am : Scalar Sample =
+    segment ~root:(note A 2) ~third:(note C 3) ~fifth:(note E 3) in
+  let f : Scalar Sample =
+    segment ~root:(note F 2) ~third:(note A 2) ~fifth:(note C 3) in
+  let dm : Scalar Sample =
+    segment ~root:(note D 2) ~third:(note F 2) ~fifth:(note A 2) in
+  let e : Scalar Sample =
+    segment ~root:(note E 2) ~third:(note Gs 2) ~fifth:(note B 2) in
+  P.place4 ~t:Timing.tempo am f dm e
 ;;

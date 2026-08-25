@@ -104,18 +104,18 @@ changes to what this section originally proposed:
 
 Still open, deliberately:
 
-- **The examples still hold raw frequencies and raw Timestamps.** Both
-  halves of phase 2 have now landed, so the rewrite is unblocked and is
-  the only phase-2 work left. It is deliberately its own change:
-  `examples/song/keys.synth` (melody pitches), `examples/song/pad.synth`
-  and `examples/song/strings.synth` (chord stacks),
-  `examples/song/song.synth` (three `time_steps` calls that encode 120
-  BPM 4/4), `examples/darksynth/song.synth` (the whole arrangement, on
-  `500ms`/`250ms` steps) and the `1.006` in
-  `examples/darksynth/bass.synth` (which is `detune ~cents:10.4`).
-  Rewriting them restages five committed renders under `outputs/`, so
-  "does the library work" and "does the song still sound right" are
-  reviewed separately.
+- ~~**The examples still hold raw frequencies and raw Timestamps.**~~
+  **Done.** Both showcase projects now name their pitches and their note
+  values. Each grew a `timing.synth` holding the one `Tempo`
+  everything derives from, `Voices.Pads.place4` takes a `~t` instead of
+  assuming 120 BPM, and `examples/darksynth/bass.synth`'s `1.006`/`1.009`
+  are `detune ~cents:10.4`/`15.5`. The timing half was verified by
+  rendering: it is bit-identical to the pre-migration artifacts. The
+  pitch half moved five committed renders under `outputs/`, and only by
+  the rounding — replacing each 2-decimal literal with exact 12-TET
+  shifts every pitch by under 0.02 cents, which shows up as phase drift
+  about 28 dB below the signal. Restoring the rounding reproduces the
+  old artifacts byte for byte.
 - **`Note` is inherently 12-tone**, so `shift`/`flat`/`hz` suit
   12-division temperaments; `n /= 12` ladders work in `Int` steps
   through `step_hz`. A spelling that generalizes to arbitrary `n` would
@@ -340,11 +340,8 @@ turns out to be wrong.
 
 1. ~~Timestamp arithmetic and the wider `List` module.~~ **Done** —
    nothing else compiles without them, and both are useful on their own.
-2. ~~**`Pitch` + `Tempo`.**~~ **Both shipped.** What remains of this
-   phase is the example rewrite: `examples/song/keys.synth` and the
-   other sites listed under `Core.Pitch` above, moved onto the pair in
-   one pass and reviewed on its own, since it restages committed
-   renders.
+2. ~~**`Pitch` + `Tempo`.**~~ **Done**, examples included: both
+   showcase projects are written against the pair.
 3. **`Scale` + `Rhythm`.** Rewrite `examples/song/pad.synth` and
    `examples/song/drums.synth`.
 4. **`Score` + `Dyn`.** Rewrite `examples/song/` and

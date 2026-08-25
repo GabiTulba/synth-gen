@@ -20,21 +20,31 @@ open Core.Time
 open Core.Sig
 open Core.Math
 
+import Timing
 import Drums
 import Pad
 import Keys
 import Strings
 
+open Core.Tempo
+
+(* Every grid names its note value and its bar, so the whole kit follows
+   the tempo in Timing rather than a set of precomputed steps: quarter
+   kicks from bar 1, the snare backbeat a beat later, eighth hats from
+   bar 2. *)
 let drums : Scalar Signal =
   let kicks : Scalar Signal =
     place_multi Drums.kick_hit
-                (time_steps ~start:2s ~step:500ms ~count:28) in
+                (Timing.grid ~from:(Timing.at ~bar:1 ~beat:0.0)
+                             ~step:Quarter ~count:28) in
   let snares : Scalar Signal =
     place_multi Drums.snare_hit
-                (time_steps ~start:2500ms ~step:1s ~count:14) in
+                (Timing.grid ~from:(Timing.at ~bar:1 ~beat:1.0)
+                             ~step:Half ~count:14) in
   let hats : Scalar Signal =
     place_multi Drums.hat_hit
-                (time_steps ~start:4s ~step:250ms ~count:48) in
+                (Timing.grid ~from:(Timing.at ~bar:2 ~beat:0.0)
+                             ~step:Eighth ~count:48) in
   kicks + snares * 0.9 + hats * 0.5
 ;;
 

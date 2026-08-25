@@ -11,8 +11,11 @@ open Core.Time
 open Core.Sig
 open Core.Math
 
+import Timing
 import Voices
 module K = Voices.Keys
+
+open Core.Pitch
 
 let note freq:Scalar : Scalar Sample =
   let env : Scalar Signal =
@@ -21,15 +24,23 @@ let note freq:Scalar : Scalar Sample =
     |> sample ~from:0s ~to:1200ms
 ;;
 
-(* Quarter-note melody entering with the F chord (4s), one phrase per
-   chord. Repeated pitches share one sample via place_multi. *)
+(* `key A 4` is the A above middle C, struck: the note names the pitch
+   and 12-TET at A=440 turns it into a frequency. *)
+let key pc:PitchClass oct:Int : Scalar Sample =
+  note (a440 ~note:{ pc = pc; oct = oct }) ;;
+
+(* The melody enters with the F chord at bar 2 and runs one note per
+   half bar, on beats 1 and 3. Repeated pitches share one sample via
+   place_multi. *)
 let melody : Scalar Signal =
-  mix_all [place_multi (note 440.0) [4s; 6s];        (* A4 *)
-           note 523.25 |> place ~at:5s;              (* C5 *)
-           note 349.23 |> place ~at:7s;              (* F4 *)
-           place_multi (note 392.0) [8s; 14s];       (* G4 *)
-           place_multi (note 329.63) [9s; 11s];      (* E4 *)
-           note 261.63 |> place ~at:10s;             (* C4 *)
-           note 293.66 |> place ~at:12s;             (* D4 *)
-           note 246.94 |> place ~at:13s]             (* B3 *)
+  let on ~bar:Int ~beat:Scalar : Timestamp =
+    Timing.at ~bar:bar ~beat:beat in
+  mix_all [place_multi (key A 4) [on ~bar:2 ~beat:0.0; on ~bar:3 ~beat:0.0];
+           key C 5 |> place ~at:(on ~bar:2 ~beat:2.0);
+           key F 4 |> place ~at:(on ~bar:3 ~beat:2.0);
+           place_multi (key G 4) [on ~bar:4 ~beat:0.0; on ~bar:7 ~beat:0.0];
+           place_multi (key E 4) [on ~bar:4 ~beat:2.0; on ~bar:5 ~beat:2.0];
+           key C 4 |> place ~at:(on ~bar:5 ~beat:0.0);
+           key D 4 |> place ~at:(on ~bar:6 ~beat:0.0);
+           key B 3 |> place ~at:(on ~bar:6 ~beat:2.0)]
 ;;

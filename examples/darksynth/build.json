@@ -4,6 +4,7 @@
   "dependencies": ["Voices", "Effects"],
   "sources": [
     "song.synth",
+    "timing.synth",
     "drums.synth",
     "bass.synth",
     "pads.synth",

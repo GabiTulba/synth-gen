@@ -1010,15 +1010,19 @@ let _ = place_multi hit [0s; 250ms; 500ms; 750ms]
 TEST(build_list_combinators_handle_empty_lists) {
   // Every combinator has to answer for the empty list without a special
   // case at the call site: that is what makes them safe to fold into a
-  // score builder that may legitimately produce nothing.
+  // score builder that may legitimately produce nothing. A *negative*
+  // index counts as out of range too, and must answer with `default`
+  // rather than the head - the extra nth below contributes 0.0 only if
+  // it does.
   TempDir tp;
   tp.write("l.synth", R"(
 open Core open Core.Osc open Core.Fx open Core.Arrange open Core.Render open Core.Io open Core.Time open Core.Sig open Core.Math
 let none : Scalar list = List.filter ~f:(fun x:Scalar -> x > 9.0) ~xs:[1.0] ;;
-(* 0 + 0 + (-1) + 5 + 0 + 0 + 0 + 440 = 444 *)
+(* 0 + 0 + (-1) + 0 + 5 + 0 + 0 + 0 + 440 = 444 *)
 let freq : Scalar =
   to_scalar (List.length ~xs:none) + List.sum ~xs:none
     + List.nth ~xs:none ~i:0 ~default:(-1.0)
+    + List.nth ~xs:[1.0; 2.0] ~i:(-3) ~default:0.0
     + List.maximum ~xs:none ~least:5.0
     + to_scalar (List.length ~xs:(List.rev ~xs:none))
     + to_scalar (List.length ~xs:(List.concat ~xss:[none; none]))
@@ -1041,6 +1045,141 @@ let _ = sine 444.0 * exp_decay 8.0
   std::string b = slurp(ref.dir / "_build" / "artifacts" / "out.wav");
   CHECK(!a.empty());
   CHECK(a == b);
+}
+
+// Pitch is written in SynthGraph, so only a render pins its values.
+// Rather than compare against decimal literals - `pow`/`log` results are
+// libm-dependent and would make these brittle across machines - each
+// claim is a build-time Bool, and the render frequency is 440 only if
+// every one of them holds. A single wrong value moves the artifact.
+namespace {
+void checkPitchClaims(const char* claims) {
+  TempDir derived, expected;
+  std::string src = std::string(R"(
+open Core open Core.Osc open Core.Fx open Core.Arrange open Core.Render open Core.Io open Core.Time open Core.Sig open Core.Math
+open Core.Pitch
+let e : Tuning = et12 ~ref_hz:440.0 ;;
+let j : Tuning = just ~root:0 ~ref_hz:440.0 ;;
+let p : Tuning = pyth ~root:0 ~ref_hz:440.0 ;;
+let a4 : Note = { pc = A; oct = 4 } ;;
+let ok : Bool =
+)") + claims + R"( ;;
+let _ = sine (if ok then 440.0 else 1.0)
+  |> sample ~from:0s ~to:100ms |> render ~name:"out" ~rate:8000.0 ;;
+)";
+  derived.write("p.synth", src);
+  derived.write("build.json", projectManifest("pv", {"p.synth"}));
+  expected.write("p.synth", R"(
+open Core open Core.Osc open Core.Fx open Core.Arrange open Core.Render open Core.Io open Core.Time open Core.Sig open Core.Math
+let _ = sine 440.0
+  |> sample ~from:0s ~to:100ms |> render ~name:"out" ~rate:8000.0 ;;
+)");
+  expected.write("build.json", projectManifest("pv", {"p.synth"}));
+  CHECK(buildProject(derived.dir.string()).ok);
+  CHECK(buildProject(expected.dir.string()).ok);
+  std::string a = slurp(derived.dir / "_build" / "artifacts" / "out.wav");
+  std::string b = slurp(expected.dir / "_build" / "artifacts" / "out.wav");
+  CHECK(!a.empty());
+  CHECK(a == b);
+}
+}  // namespace
+
+TEST(build_pitch_reference_is_exact_in_every_temperament) {
+  // Dividing by raw(ref_step) is what anchors a tuning, so the reference
+  // pitch must come back bit-exact no matter which ratios are in play.
+  checkPitchClaims(
+      "a440 ~note:a4 == 440.0\n"
+      "  && hz ~t:e ~note:a4 == 440.0\n"
+      "  && hz ~t:j ~note:a4 == 440.0\n"
+      "  && hz ~t:p ~note:a4 == 440.0\n"
+      "  && hz ~t:(et12 ~ref_hz:432.0) ~note:a4 == 432.0\n"
+      "  && step_hz ~t:(et ~n:19 ~ref_hz:440.0 ~ref_step:57) ~step:57 == 440.0");
+}
+
+TEST(build_pitch_equal_temperament_intervals) {
+  // Octaves are exact in equal temperament; the tempered third is not a
+  // round number, so it is pinned by a band rather than a literal.
+  checkPitchClaims(
+      "hz ~t:e ~note:{ pc = A; oct = 3 } == 220.0\n"
+      "  && hz ~t:e ~note:{ pc = A; oct = 5 } == 880.0\n"
+      "  && hz ~t:e ~note:{ pc = A; oct = 0 } == 27.5\n"
+      "  && hz ~t:e ~note:{ pc = C; oct = 5 } > 523.2511\n"
+      "  && hz ~t:e ~note:{ pc = C; oct = 5 } < 523.2512\n"
+      "  && hz ~t:e ~note:{ pc = E; oct = 4 } > 329.6275\n"
+      "  && hz ~t:e ~note:{ pc = E; oct = 4 } < 329.6276");
+}
+
+TEST(build_pitch_just_intonation_is_rational) {
+  // The point of just intonation: the intervals are exact small ratios,
+  // which equal temperament can only approximate.
+  checkPitchClaims(
+      "hz ~t:j ~note:{ pc = C; oct = 5 } == 528.0\n"
+      "  && hz ~t:j ~note:{ pc = E; oct = 4 } == 330.0\n"
+      "  && hz ~t:j ~note:{ pc = C; oct = 4 } == 264.0\n"
+      "  && hz ~t:j ~note:{ pc = G; oct = 4 } == 396.0\n"
+      "  && hz ~t:j ~note:{ pc = G; oct = 4 }\n"
+      "       == hz ~t:j ~note:{ pc = C; oct = 4 } * ratio ~num:3 ~den:2");
+}
+
+TEST(build_pitch_temperaments_actually_differ) {
+  // A guard against the whole tuning model collapsing into 12-TET: away
+  // from the reference the three temperaments must disagree, and the
+  // key centre must matter for the unequal ones.
+  // Not every note separates every pair - Pythagorean and just both put
+  // E4 at exactly 3/4 of the reference, and several just roots agree on
+  // C5 - so each claim names a note that genuinely does.
+  checkPitchClaims(
+      "hz ~t:j ~note:{ pc = C; oct = 5 } != hz ~t:e ~note:{ pc = C; oct = 5 }\n"
+      "  && hz ~t:p ~note:{ pc = C; oct = 5 } != hz ~t:e ~note:{ pc = C; oct = 5 }\n"
+      "  && hz ~t:p ~note:{ pc = D; oct = 4 } != hz ~t:j ~note:{ pc = D; oct = 4 }\n"
+      "  && hz ~t:p ~note:{ pc = D; oct = 4 } == 880.0 / 3.0\n"
+      "  && hz ~t:j ~note:{ pc = D; oct = 4 } == 297.0\n"
+      "  && hz ~t:(just ~root:7 ~ref_hz:440.0) ~note:{ pc = C; oct = 5 }\n"
+      "       != hz ~t:j ~note:{ pc = C; oct = 5 }\n"
+      "  && hz ~t:(just ~root:7 ~ref_hz:440.0) ~note:a4 == 440.0");
+}
+
+TEST(build_pitch_steps_round_trip) {
+  // C0 = 0, A4 = 57, and Math.floor being a true floor is what keeps
+  // octaves below C0 correct.
+  checkPitchClaims(
+      "step ~note:{ pc = C; oct = 0 } == 0\n"
+      "  && step ~note:a4 == 57\n"
+      "  && step ~note:(of_step ~step:57) == 57\n"
+      "  && step ~note:(of_step ~step:0) == 0\n"
+      "  && step ~note:(of_step ~step:(-1)) == -1\n"
+      "  && step ~note:(of_step ~step:(-13)) == -13\n"
+      "  && step ~note:(shift ~note:a4 ~by:7) == 64\n"
+      "  && step ~note:(shift ~note:a4 ~by:(-12)) == 45\n"
+      "  && step ~note:(flat ~note:a4) == 56");
+}
+
+TEST(build_pitch_cents_are_temperament_independent) {
+  checkPitchClaims(
+      "cents ~n:1200.0 == 2.0\n"
+      "  && cents ~n:0.0 == 1.0\n"
+      "  && cents ~n:(-1200.0) == 0.5\n"
+      "  && detune ~freq:440.0 ~cents:1200.0 == 880.0\n"
+      "  && detune ~freq:440.0 ~cents:0.0 == 440.0\n"
+      "  && to_cents ~ratio:2.0 == 1200.0\n"
+      "  && to_cents ~ratio:1.0 == 0.0\n"
+      "  && ratio ~num:3 ~den:2 == 1.5\n"
+      "  && to_cents ~ratio:(cents ~n:10.4) > 10.39\n"
+      "  && to_cents ~ratio:(cents ~n:10.4) < 10.41");
+}
+
+TEST(build_pitch_supports_non_octave_tunings) {
+  // Bohlen-Pierce: 13 steps to a tritave. If `octave` were secretly 2.0
+  // this would not land on 3x the reference.
+  checkPitchClaims(
+      "step_hz ~t:{ ref_hz = 440.0; ref_step = 0; root = 0;\n"
+      "             ratios = List.init ~n:13\n"
+      "                        ~f:(fun i:Int ->\n"
+      "                              Math.pow ~x:3.0\n"
+      "                                       ~y:(to_scalar i / 13.0));\n"
+      "             octave = 3.0 } ~step:13 == 1320.0\n"
+      "  && step_hz ~t:{ ref_hz = 440.0; ref_step = 0; root = 0;\n"
+      "                  ratios = []; octave = 2.0 } ~step:99 == 440.0");
 }
 
 TEST(build_resample_identity_matches_the_input) {

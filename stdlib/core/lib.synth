@@ -141,10 +141,12 @@ module List = struct
      build: there is no option type, and a partial primitive would make
      every caller carry a bounds check the list already knows. *)
   let rec nth ~xs:'a list ~i:Int ~default:'a : 'a =
-    match xs with
-    | Nil -> default
-    | Cons (x, rest) ->
-        if i <= 0 then x else nth ~xs:rest ~i:(i - 1) ~default:default ;;
+    if i < 0 then default
+    else match xs with
+         | Nil -> default
+         | Cons (x, rest) ->
+             if i <= 0 then x
+             else nth ~xs:rest ~i:(i - 1) ~default:default ;;
   let rev ~xs:'a list : 'a list =
     fold ~f:(fun acc:'a list x:'a -> Cons (x, acc)) ~init:Nil ~xs:xs ;;
   (* --- Selection and expansion --------------------------------------- *)
@@ -232,4 +234,110 @@ module Math = struct
   let ceil ~x:Scalar : Int = external "math.cpp" ;;
   (* Boolean negation; && and || are (short-circuiting) operators. *)
   let not ~b:Bool : Bool = external "math.cpp" ;;
+end ;;
+
+(* --- Pitch: notes, temperaments and cents - written in SynthGraph -----
+   A note is data, a temperament is data, and turning one into a
+   frequency is one call that reads the same in every temperament.
+
+   The chromatic ladder is indexed from C0 = 0, so A4 is step 57. That
+   is deliberately not a MIDI key number: nothing here speaks MIDI, and
+   in a temperament with n /= 12 steps to the octave a "semitone" is
+   whatever that ladder says it is. *)
+
+module Pitch = struct
+  (* Sharps only. Enharmonic *spelling* (Db vs Cs) matters for notation,
+     which this language does not do, so `flat` covers the rest rather
+     than doubling the constructor count. *)
+  type PitchClass = | C | Cs | D | Ds | E | F | Fs | G | Gs | A | As | B ;;
+  type Note = { pc : PitchClass; oct : Int } ;;
+  (* A temperament, as data. `ratios` holds one frequency ratio per step
+     of the octave counting from `root`; `octave` is the interval the
+     ladder repeats at (2.0 everywhere except non-octave tunings like
+     Bohlen-Pierce); `ref_hz` at `ref_step` pins the shape to a pitch.
+     `root` is the key centre - it is why just and Pythagorean tunings
+     sound different in different keys, and it is ignored by equal
+     temperaments, whose steps are all the same size. *)
+  type Tuning = { ref_hz : Scalar; ref_step : Int; root : Int;
+                  ratios : Scalar list; octave : Scalar } ;;
+
+  (* --- Notes on the chromatic ladder ---------------------------------- *)
+  let step ~note:Note : Int =
+    note.oct * 12
+      + (match note.pc with
+         | C -> 0 | Cs -> 1 | D -> 2 | Ds -> 3 | E -> 4 | F -> 5
+         | Fs -> 6 | G -> 7 | Gs -> 8 | A -> 9 | As -> 10 | B -> 11) ;;
+  (* Math.floor is a true floor (toward -inf), so octaves below C0 come
+     back out correctly: of_step (-1) is B at octave -1. *)
+  let of_step ~step:Int : Note =
+    let oct : Int = Math.floor ~x:(Math.to_scalar step / 12.0) in
+    { pc = List.nth ~xs:[C; Cs; D; Ds; E; F; Fs; G; Gs; A; As; B]
+                    ~i:(step - oct * 12) ~default:C;
+      oct = oct } ;;
+  let shift ~note:Note ~by:Int : Note =
+    of_step ~step:(step ~note:note + by) ;;
+  let flat ~note:Note : Note = shift ~note:note ~by:(-1) ;;
+
+  (* --- Temperaments ---------------------------------------------------
+     Presets are functions, not constants: a paramless definition is
+     evaluated on every build of every project, and a tuning nobody
+     asked for should not cost one. *)
+  let et ~n:Int ~ref_hz:Scalar ~ref_step:Int : Tuning =
+    { ref_hz = ref_hz; ref_step = ref_step; root = 0;
+      ratios = List.init ~n:n
+                 ~f:(fun i:Int ->
+                       Math.pow ~x:2.0
+                                ~y:(Math.to_scalar i / Math.to_scalar n));
+      octave = 2.0 } ;;
+  let et12 ~ref_hz:Scalar : Tuning = et ~n:12 ~ref_hz:ref_hz ~ref_step:57 ;;
+  (* 5-limit just intonation, and 3-limit Pythagorean: the ratios every
+     step of the octave sits at, relative to `root`. *)
+  let just ~root:Int ~ref_hz:Scalar : Tuning =
+    { ref_hz = ref_hz; ref_step = 57; root = root;
+      ratios = [1.0; 16.0 / 15.0; 9.0 / 8.0; 6.0 / 5.0; 5.0 / 4.0;
+                4.0 / 3.0; 45.0 / 32.0; 3.0 / 2.0; 8.0 / 5.0; 5.0 / 3.0;
+                9.0 / 5.0; 15.0 / 8.0];
+      octave = 2.0 } ;;
+  let pyth ~root:Int ~ref_hz:Scalar : Tuning =
+    { ref_hz = ref_hz; ref_step = 57; root = root;
+      ratios = [1.0; 256.0 / 243.0; 9.0 / 8.0; 32.0 / 27.0; 81.0 / 64.0;
+                4.0 / 3.0; 729.0 / 512.0; 3.0 / 2.0; 128.0 / 81.0;
+                27.0 / 16.0; 16.0 / 9.0; 243.0 / 128.0];
+      octave = 2.0 } ;;
+
+  (* --- Pitch to frequency ---------------------------------------------
+     One formula, every temperament:
+       raw s = ratios[(s - root) mod n] * octave ^ floor((s - root) / n)
+       hz  s = ref_hz * raw s / raw ref_step
+     Dividing by `raw ref_step` anchors the ladder, which makes the
+     reference pitch exact by construction - it is ref_hz times a value
+     over itself. There is no `%` operator, so the modulus is spelled
+     with the same floor the octave count uses. A tuning with no ratios
+     has exactly one pitch; saying so keeps this total. *)
+  let step_hz ~t:Tuning ~step:Int : Scalar =
+    let n : Int = List.length ~xs:t.ratios in
+    if n <= 0 then t.ref_hz
+    else
+      let raw s:Int : Scalar =
+        let o : Int =
+          Math.floor ~x:(Math.to_scalar (s - t.root) / Math.to_scalar n) in
+        List.nth ~xs:t.ratios ~i:(s - t.root - n * o) ~default:1.0
+          * Math.pow ~x:t.octave ~y:(Math.to_scalar o) in
+      t.ref_hz * raw step / raw t.ref_step ;;
+  (* `t` comes first so a tuning partially applies:
+     `let p : Note -> Scalar = hz ~t:(just ~root:0 ~ref_hz:440.0)`. *)
+  let hz ~t:Tuning ~note:Note : Scalar =
+    step_hz ~t:t ~step:(step ~note:note) ;;
+  let a440 ~note:Note : Scalar = hz ~t:(et12 ~ref_hz:440.0) ~note:note ;;
+
+  (* --- Cents: continuous, and the same in every temperament ------------
+     A Note is discrete and temperament-relative; cents are neither, so
+     they act on frequencies rather than on notes. *)
+  let cents ~n:Scalar : Scalar = Math.pow ~x:2.0 ~y:(n / 1200.0) ;;
+  let detune ~freq:Scalar ~cents:Scalar : Scalar =
+    freq * Math.pow ~x:2.0 ~y:(cents / 1200.0) ;;
+  let to_cents ~ratio:Scalar : Scalar =
+    1200.0 * Math.log ~x:ratio / Math.log ~x:2.0 ;;
+  let ratio ~num:Int ~den:Int : Scalar =
+    Math.to_scalar num / Math.to_scalar den ;;
 end ;;

@@ -73,55 +73,50 @@ genuinely needs C++, because the language has no string operations.
 
 | Module | Owns | Depends on | Written in |
 |---|---|---|---|
-| `Core.Pitch` | Notes, MIDI keys, cents, tuning references | — | SynthGraph |
+| `Core.Pitch` | Notes, temperaments, cents | — | SynthGraph ✅ |
 | `Core.Tempo` | BPM, meters, note values, bar/beat → Timestamp | Time | SynthGraph |
 | `Core.Scale` | Keys, modes, scale degrees, chords, inversions | Pitch, List | SynthGraph |
 | `Core.Rhythm` | Step patterns, Euclidean rhythms, swing | Tempo, List | C++ + SynthGraph |
 | `Core.Score` | Phrases, events, articulation, `play` | all of the above | SynthGraph |
 | `Core.Dyn` | Dynamic levels, crescendo, decibel gain | — | SynthGraph |
 
-The two prerequisites have **landed**: Timestamp arithmetic (language
-spec [§3](language-spec.md#operators-pointwise-lifting--scalar-broadcasting))
-and the wider `List` module ([§6](language-spec.md#6-primitive-signatures-v1-roster)).
-Everything below is still future work.
+**Landed so far:** Timestamp arithmetic (language spec
+[§3](language-spec.md#operators-pointwise-lifting--scalar-broadcasting)),
+the wider `List` module, and `Core.Pitch`
+([§6](language-spec.md#6-primitive-signatures-v1-roster)). The remaining
+five modules are future work.
 
-### `Core.Pitch`
+### `Core.Pitch` — **shipped**
 
-```
-type PitchClass = | C | Cs | D | Ds | E | F | Fs | G | Gs | A | As | B ;;
-type Note = { pc : PitchClass; oct : Int } ;;          (* scientific: A4 = 440 *)
+Implemented in `stdlib/core/lib.synth`; the roster lives in the language
+spec [§6](language-spec.md#6-primitive-signatures-v1-roster) and the
+semantics in [`core-library.md`](core-library.md). It landed with two
+changes to what this section originally proposed:
 
-val Pitch.key      : note:Note -> Int                  (* MIDI number; A4 = 69 *)
-val Pitch.of_key   : key:Int -> Note
-val Pitch.hz       : note:Note -> Scalar               (* 12-TET, A4 = 440 *)
-val Pitch.key_hz   : key:Int -> Scalar
-val Pitch.hz_ref   : ref_a:Scalar -> note:Note -> Scalar   (* A=432, historical *)
-val Pitch.shift    : note:Note -> semitones:Int -> Note
-val Pitch.flat     : note:Note -> Note                 (* enharmonic sugar *)
+- **Temperament is first-class**, rather than the "beyond the first
+  pass" item it was filed as. `Tuning` is an ordinary record —
+  `ratios` per step of the octave, the `octave` the ladder repeats at,
+  a `root` key centre, and a `ref_hz`/`ref_step` anchor — and one
+  formula serves equal, just, Pythagorean and non-octave tunings alike.
+- **No MIDI.** The integer form of a note is a plain step index on the
+  chromatic ladder with C0 = 0, so A4 is 57. Nothing in Core speaks
+  MIDI.
 
-val Pitch.cents    : n:Scalar -> Scalar                (* the multiplier 2^(n/1200) *)
-val Pitch.detune   : freq:Scalar -> cents:Scalar -> Scalar
-val Pitch.to_cents : ratio:Scalar -> Scalar            (* inverse; 1.006 -> ~10.4 *)
-val Pitch.just     : num:Int -> den:Int -> Scalar      (* 3/2, 5/4 — just intonation *)
-```
+Still open, deliberately:
 
-Two spellings of the same thing, on purpose. `Note` is the legible one;
-the `Int` MIDI key is the interchange currency, because it transposes by
-ordinary arithmetic and indexes with `List.init`/`List.range`. `key` and
-`of_key` bridge them.
-
-Sharps only in the variant. Enharmonic *spelling* (`Db` vs `Cs`) matters
-for notation, which the language does not do, so `flat` covers the rest
-rather than doubling the constructor count.
-
-`cents` returns a multiplier rather than a modified frequency, so it
-composes with the existing detune idiom: `saw (f * cents 7.0)`. This is
-also the microtonal escape hatch — anything 12-TET cannot express is a
-cents offset.
-
-Retires `1.006` in `examples/darksynth/bass.synth` (that is
-`detune freq 10.4`) and every commented frequency in
-`examples/song/keys.synth`.
+- **The examples still hold raw frequencies.** Rewriting
+  `examples/song/keys.synth` is phase 2's acceptance test and wants
+  `Tempo` as well, so the pitches and the grid move together rather than
+  in two passes. `examples/song/pad.synth`,
+  `examples/song/strings.synth`, `examples/darksynth/song.synth` and the
+  `1.006` in `examples/darksynth/bass.synth` (which is
+  `detune ~cents:10.4`) are all waiting on the same rewrite.
+- **`Note` is inherently 12-tone**, so `shift`/`flat`/`hz` suit
+  12-division temperaments; `n /= 12` ladders work in `Int` steps
+  through `step_hz`. A spelling that generalizes to arbitrary `n` would
+  need a different note type, and it is not clear one is worth it.
+- **Scale-degree spelling** (whether `Cs` and `Df` should be
+  distinguishable) stays out until something needs to render notation.
 
 ### `Core.Tempo`
 
@@ -358,8 +353,9 @@ turns out to be wrong.
 
 1. ~~Timestamp arithmetic and the wider `List` module.~~ **Done** —
    nothing else compiles without them, and both are useful on their own.
-2. **`Pitch` + `Tempo`.** Independently valuable; rewriting
-   `examples/song/keys.synth` against them is the acceptance test.
+2. **`Pitch`** ✅ **+ `Tempo`.** `Pitch` has shipped; `Tempo` is next,
+   and rewriting `examples/song/keys.synth` against the pair is the
+   acceptance test.
 3. **`Scale` + `Rhythm`.** Rewrite `examples/song/pad.synth` and
    `examples/song/drums.synth`.
 4. **`Score` + `Dyn`.** Rewrite `examples/song/` and
@@ -376,7 +372,7 @@ literal renders, as the `List` combinator tests do.
 
 ### Beyond the first pass
 
-Four things the stack above makes cheap, none of them worth building
+Three things the stack above makes cheap, none of them worth building
 before it exists:
 
 - **`Render.render_score`.** A piano-roll or staff SVG artifact
@@ -384,10 +380,6 @@ before it exists:
   exactly. It would make the "music sheet" framing literal, and a
   dependency-free SVG of a `Phrase` is viewable straight from a git
   host like the waveforms already are.
-- **`Io.load_midi : path:String -> Score.Phrase`.** The on-ramp from a
-  DAW, and nearly free once `Phrase` exists — a MIDI file is already a
-  list of timed note events. It would resolve relative to the declaring
-  source file and become a build input, exactly like `load_mono`.
 - **Tempo maps and rubato.** `Tempo` is one fixed BPM. A tempo *curve*
   (accelerando, ritardando, a click that drifts) is expressible as a
   `Scalar -> Scalar` rate over the timeline, which is precisely what

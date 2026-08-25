@@ -6,8 +6,8 @@ the ambient type declarations (`'a list`, the abstract `'a Signal`,
 and the `'a Sample` record) and then declares the primitives. Nearly
 every definition is an `external` binding to a C++ implementation
 shipped beside it (`stdlib/core/*.cpp`), compiled at build time by the
-same mechanism user externals use; the `List` module is written in
-SynthGraph itself — plain recursive functions over the Cons/Nil
+same mechanism user externals use; the `List` and `Pitch` modules are
+written in SynthGraph itself — plain recursive functions over the Cons/Nil
 variant. So `open Core` genuinely imports a library rather than
 triggering compiler magic: primitive signatures live in synth source,
 their bodies in library C++ (or synth), and the same `external`
@@ -37,6 +37,7 @@ semantics of the less obvious primitives.
 | `Core.List` | List combinators & builders: `map`, `fold`, `init`, `repeat`, `length`, `append`, `nth`, `rev`, `filter`, `concat`, `flat_map`, `zip`, `range`, `sum`, `maximum` | written in SynthGraph (`lib.synth`) |
 | `Core.Time` | Timestamp construction & sequences: `to_sec`/`to_ms`/`to_min`, `time_steps`, `jitter` | `stdlib/core/lists.cpp` |
 | `Core.Sig` | Signal constructors: `constant`, `constant_multi`, `time`, `signal`, `signal_multi` | `stdlib/core/signals.cpp` |
+| `Core.Pitch` | Notes, temperaments and cents: `step`/`of_step`, `shift`, `flat`, `et`/`et12`/`just`/`pyth`, `hz`/`step_hz`/`a440`, `cents`/`detune`/`to_cents`/`ratio` | written in SynthGraph (`lib.synth`) |
 | `Core.Math` | `exp`, `sqrt`, `log`, `pow` — polymorphic over Scalars and (elementwise) Signals — plus the Int conversions `to_scalar`, `round`, `floor`, `ceil`, and `not` | `stdlib/core/math.cpp` |
 
 ## Primitive semantics
@@ -133,6 +134,50 @@ the whole story:
   then `beat * 4.0` for the bar and `beat + beat / 2.0` for the dotted
   note. Results clamp at `0s` (language spec
   [§3](language-spec.md#operators-pointwise-lifting--scalar-broadcasting)).
+- **`Pitch`: a note is data, a temperament is data.** The chromatic
+  ladder is indexed from **C0 = 0**, so A4 is step 57 — deliberately not
+  a MIDI key number. A `Tuning` carries `ratios` (one frequency ratio per
+  step of the octave, counting from `root`), the `octave` the ladder
+  repeats at, and a `ref_hz`/`ref_step` anchor. One formula serves every
+  temperament:
+
+  ```
+  raw s = ratios[(s - root) mod n] * octave ^ floor((s - root) / n)
+  hz  s = ref_hz * raw s / raw ref_step
+  ```
+
+  Dividing by `raw ref_step` is what anchors the ladder, and it makes the
+  reference pitch **exact by construction** — `ref_hz` times a value over
+  itself — in every temperament. `root` is the key centre, which is why
+  `just` and `pyth` sound different in different keys; equal temperaments
+  ignore it, their steps all being the same size. `octave` is what admits
+  non-octave tunings: 13 ratios and `octave = 3.0` is Bohlen-Pierce. A
+  tuning with no ratios has exactly one pitch, which keeps `step_hz`
+  total.
+- **`Pitch`: two ways to move a pitch, deliberately different types.**
+  `shift ~by:Int` is discrete and temperament-relative — one step of
+  whatever ladder the tuning defines. `detune ~cents:Scalar` is
+  continuous and temperament-*in*dependent, and acts on a frequency
+  rather than a note, because a `Note` has no fractional part. `cents`
+  returns the bare multiplier `2^(n/1200)`, so it composes with the
+  existing detune idiom (`saw (f * cents 7.0)`); `to_cents` inverts it,
+  though not bit-exactly — it is a `log` undoing a `pow`.
+- **`Pitch`: the tuning comes first.** `hz` and `step_hz` take `~t`
+  ahead of the pitch so a temperament partially applies and disappears
+  from call sites:
+  `let p : Note -> Scalar = hz ~t:(just ~root:0 ~ref_hz:440.0)`. `a440`
+  is the zero-ceremony path when 12-TET at A=440 is all you want.
+  `Note` is inherently 12-tone, so `shift`/`flat`/`hz` suit 12-division
+  temperaments; for `n /= 12` (19-EDO, Bohlen-Pierce) work in `Int`
+  steps with `step_hz`, where shifting is plain `+`. The presets are
+  functions rather than constants on purpose — a paramless definition is
+  evaluated on every build of every project, and a tuning nobody asked
+  for should not cost one.
+- **`open Core.Pitch` binds twelve one- and two-letter constructors**
+  (`C`, `Cs`, … `B`) as bare names. That is what makes
+  `{ pc = A; oct = 4 }` read well, but in a file that is not
+  pitch-heavy, `open Core` plus `Pitch.hz` and `Pitch.A` keeps the
+  namespace legible.
 - **`List` edge cases** — the combinators are total, so a score
   builder that legitimately produces nothing needs no special case at
   the call site. `nth` answers with its `default` when the index is out

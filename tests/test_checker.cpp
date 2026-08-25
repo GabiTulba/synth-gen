@@ -1,5 +1,6 @@
 #include <unistd.h>
 #include <functional>
+#include <set>
 
 #include <filesystem>
 #include <fstream>
@@ -1653,6 +1654,81 @@ TEST(checker_timestamp_arithmetic_type_errors) {
   }
 }
 
+TEST(checker_pitch_roster) {
+  TempProject tp;
+  std::string f = tp.write("p.synth", R"(
+open Core open Core.Osc open Core.Fx open Core.Arrange open Core.Render open Core.Io open Core.Time open Core.Sig open Core.Math
+open Core.Pitch
+let a4 : Note = { pc = A; oct = 4 } ;;
+let s : Int = step ~note:a4 ;;
+let back : Note = of_step ~step:57 ;;
+let up : Note = shift ~note:a4 ~by:7 ;;
+let down : Note = flat ~note:a4 ;;
+let e : Tuning = et12 ~ref_hz:440.0 ;;
+let wide : Tuning = et ~n:19 ~ref_hz:440.0 ~ref_step:57 ;;
+let j : Tuning = just ~root:0 ~ref_hz:440.0 ;;
+let p : Tuning = pyth ~root:0 ~ref_hz:432.0 ;;
+let hand : Tuning =
+  { ref_hz = 440.0; ref_step = 0; root = 0;
+    ratios = [1.0; 1.5]; octave = 3.0 } ;;
+let f1 : Scalar = a440 ~note:a4 ;;
+let f2 : Scalar = hz ~t:j ~note:a4 ;;
+let f3 : Scalar = step_hz ~t:wide ~step:60 ;;
+(* the tuning partially applies, so call sites stay quiet *)
+let voice : Note -> Scalar = hz ~t:j ;;
+let f4 : Scalar = voice { pc = C; oct = 5 } ;;
+let c1 : Scalar = cents ~n:10.4 ;;
+let c2 : Scalar = detune ~freq:440.0 ~cents:10.4 ;;
+let c3 : Scalar = to_cents ~ratio:1.006 ;;
+let c4 : Scalar = ratio ~num:3 ~den:2 ;;
+(* reachable qualified, without opening Pitch *)
+let q : Scalar = Core.Pitch.a440 ~note:(Core.Pitch.of_step ~step:57) ;;
+)");
+  DiagnosticBag diags;
+  Program prog = checkProject({f}, diags);
+  for (auto& d : diags.items)
+    std::cerr << renderDiagnostic(d, prog.modules.empty() ? std::string{}
+                                       : userMod(prog).parsed.source);
+  CHECK(!diags.hasErrors());
+  const auto& types = userMod(prog).defTypes;
+  // A declared type travels under its module, so it prints qualified.
+  for (const char* n : {"a4", "back", "up", "down"})
+    CHECK(typeName(types.at(n)) == "Pitch.Note");
+  for (const char* n : {"e", "wide", "j", "p", "hand"})
+    CHECK(typeName(types.at(n)) == "Pitch.Tuning");
+  for (const char* n : {"f1", "f2", "f3", "f4", "c1", "c2", "c3", "c4", "q"})
+    CHECK(typeEquals(types.at(n), tScalar()));
+  CHECK(typeEquals(types.at("s"), tInt()));
+  CHECK(types.at("voice")->kind == Type::Kind::Fun);
+}
+
+TEST(checker_pitch_type_errors) {
+  // Notes are discrete and temperament-relative; cents are continuous
+  // and act on frequencies. The types keep the two apart, and a Note is
+  // not a frequency until a Tuning says so.
+  for (const char* body :
+       {"open Core open Core.Osc open Core.Fx open Core.Arrange open Core.Render open Core.Io open Core.Time open Core.Sig open Core.Math"
+        "\nopen Core.Pitch\nlet x : Scalar = { pc = A; oct = 4 } ;;",
+        "open Core open Core.Osc open Core.Fx open Core.Arrange open Core.Render open Core.Io open Core.Time open Core.Sig open Core.Math"
+        "\nopen Core.Pitch\nlet x : Note = shift ~note:{ pc = A; oct = 4 } ~by:0.5 ;;",
+        "open Core open Core.Osc open Core.Fx open Core.Arrange open Core.Render open Core.Io open Core.Time open Core.Sig open Core.Math"
+        "\nopen Core.Pitch\nlet x : Scalar = hz ~t:(et12 ~ref_hz:440.0) ~note:57 ;;",
+        "open Core open Core.Osc open Core.Fx open Core.Arrange open Core.Render open Core.Io open Core.Time open Core.Sig open Core.Math"
+        "\nopen Core.Pitch\nlet x : Scalar = a440 ~note:{ pc = H; oct = 4 } ;;",
+        "open Core open Core.Osc open Core.Fx open Core.Arrange open Core.Render open Core.Io open Core.Time open Core.Sig open Core.Math"
+        "\nopen Core.Pitch\nlet x : Note = { pc = A } ;;",
+        "open Core open Core.Osc open Core.Fx open Core.Arrange open Core.Render open Core.Io open Core.Time open Core.Sig open Core.Math"
+        "\nopen Core.Pitch\nlet x : Scalar = cents ~n:100 ;;",
+        "open Core open Core.Osc open Core.Fx open Core.Arrange open Core.Render open Core.Io open Core.Time open Core.Sig open Core.Math"
+        "\nlet x : Scalar = a440 ~note:{ pc = A; oct = 4 } ;;"}) {
+    TempProject tp;
+    std::string f = tp.write("bad.synth", body);
+    DiagnosticBag diags;
+    checkProject({f}, diags);
+    CHECK(diags.hasErrors());
+  }
+}
+
 TEST(checker_resample_typing) {
   TempProject tp;
   std::string f = tp.write("ok.synth", R"(
@@ -2201,15 +2277,21 @@ TEST(checker_core_is_a_real_library_of_externals) {
   CHECK(core->defTypes.count("Sig.time") == 1);
   CHECK(core->defTypes.count("Math.pow") == 1);
   CHECK(core->defTypes.count("Io.load_mono") == 1);
+  CHECK(core->defTypes.count("Pitch.hz") == 1);
+  // Pitch's type declarations travel under their module too.
+  CHECK(core->typeDecls.count("Pitch.Note") == 1);
+  CHECK(core->typeDecls.count("Pitch.Tuning") == 1);
+  CHECK(core->typeDecls.count("Pitch.PitchClass") == 1);
   // ...nothing lives at the top level...
   for (auto& [name, type] : core->defTypes)
     CHECK(name.find('.') != std::string::npos);
-  // ...and every definition outside the (SynthGraph-implemented) List
-  // module is an external binding.
+  // ...and every definition outside the SynthGraph-implemented modules
+  // (List, Pitch) is an external binding.
+  std::set<std::string> inSynthGraph = {"List", "Pitch"};
   std::function<bool(const std::vector<TopDef>&)> allExternal =
       [&](const std::vector<TopDef>& ds) {
         for (auto& d : ds) {
-          if (d.kind == TopDef::Kind::ModuleDef && d.name != "List" &&
+          if (d.kind == TopDef::Kind::ModuleDef && !inSynthGraph.count(d.name) &&
               !allExternal(d.defs))
             return false;
           if (d.kind == TopDef::Kind::Let &&

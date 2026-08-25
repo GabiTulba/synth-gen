@@ -263,14 +263,15 @@ Rules:
 - **The Core library.** All primitives live in `Core` — a *real
   library* bundled with the compiler (`stdlib/core/lib.synth`). Nearly
   every definition is an `external` binding to a C++ implementation
-  shipped beside it (§5); the `List` module is written in SynthGraph
+  shipped beside it (§5); the `List` and `Pitch` modules are written in SynthGraph
   itself, and the interface opens with the `list`/`Signal`/`Sample`
   type declarations (§3, top). Core is organized into functional
   submodules:
   `Osc` (oscillators & modulation), `Fx` (effects, filters,
   envelopes), `Arrange` (sample/place/mix), `Render` (the render
   effects), `Io` (audio import), `List`, `Time` (conversions &
-  Timestamp sequences), `Sig` (signal constructors), and `Math`
+  Timestamp sequences), `Sig` (signal constructors), `Pitch` (notes, temperaments &
+  cents), and `Math`
   (see §6 for the roster). Core is **not ambient**: like any library
   it must be brought into scope — `import Core` for qualified access
   (`Core.Osc.sine`), `open Core` for module-qualified access
@@ -834,6 +835,37 @@ val Math.round: x:Scalar -> Int
 val Math.floor: x:Scalar -> Int
 val Math.ceil: x:Scalar -> Int
 
+(* Core.Pitch: notes, temperaments & cents - written in SynthGraph.
+   The chromatic ladder is indexed from C0 = 0, so A4 is step 57; this
+   is not a MIDI key number. Types travel under the module, so they are
+   Pitch.Note / Pitch.Tuning / Pitch.PitchClass when qualified. *)
+type PitchClass = | C | Cs | D | Ds | E | F | Fs | G | Gs | A | As | B
+type Note   = { pc : PitchClass; oct : Int }
+type Tuning = { ref_hz : Scalar; ref_step : Int; root : Int;
+                ratios : Scalar list; octave : Scalar }
+
+val Pitch.step    : note:Note -> Int
+val Pitch.of_step : step:Int -> Note
+val Pitch.shift   : note:Note -> by:Int -> Note      (* by ladder steps *)
+val Pitch.flat    : note:Note -> Note
+
+(* temperaments; presets are functions, not constants *)
+val Pitch.et    : n:Int -> ref_hz:Scalar -> ref_step:Int -> Tuning
+val Pitch.et12  : ref_hz:Scalar -> Tuning
+val Pitch.just  : root:Int -> ref_hz:Scalar -> Tuning      (* 5-limit *)
+val Pitch.pyth  : root:Int -> ref_hz:Scalar -> Tuning      (* 3-limit *)
+
+(* pitch -> frequency; the tuning comes first so it partially applies *)
+val Pitch.hz      : t:Tuning -> note:Note -> Scalar
+val Pitch.step_hz : t:Tuning -> step:Int -> Scalar    (* for n /= 12 *)
+val Pitch.a440    : note:Note -> Scalar               (* 12-TET, A4 = 440 *)
+
+(* cents: continuous, and the same in every temperament *)
+val Pitch.cents    : n:Scalar -> Scalar               (* multiplier 2^(n/1200) *)
+val Pitch.detune   : freq:Scalar -> cents:Scalar -> Scalar
+val Pitch.to_cents : ratio:Scalar -> Scalar
+val Pitch.ratio    : num:Int -> den:Int -> Scalar     (* 3/2, 5/4 *)
+
 (* Core.List: list combinators & builders - written in SynthGraph
    (recursive functions over the Cons/Nil variant), not C++ *)
 val List.map    : f:('a -> 'b) -> xs:'a list -> 'b list
@@ -880,6 +912,16 @@ for an out-of-range index and `maximum` the value an empty list yields
 (which doubles as a floor), rather than failing the build. `zip` stops
 at the shorter list. All of them are written in SynthGraph in
 `lib.synth`, as ordinary recursive functions over `Cons`/`Nil`.
+
+`Pitch` is written in SynthGraph too. One formula turns a ladder step
+into a frequency in every temperament —
+`raw s = ratios[(s - root) mod n] * octave ^ floor((s - root) / n)` and
+`hz s = ref_hz * raw s / raw ref_step` — so the reference pitch is exact
+by construction, `root` is the key centre that makes just and
+Pythagorean tunings key-dependent, and `octave` admits non-octave
+tunings. `shift` moves by discrete ladder steps; `cents`/`detune` are
+continuous and act on frequencies, since a `Note` has no fractional
+part. See [`core-library.md`](core-library.md) for the details.
 
 `to_sec`/`to_ms`/`to_min` are the computed counterpart of the literal
 suffixes — `to_ms 250.0` is `250ms` — and are what a duration derived

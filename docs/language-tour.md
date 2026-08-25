@@ -337,7 +337,20 @@ or `Tuplet (3, 2, Eighth)` — is a note value in Timestamps. `grid ~t
 one edit instead of a sweep over literals; `at ~bar:4 ~beat:2.0` names a
 position (bars and beats count from 0, as an offset rather than a ruler
 label); and `swing ~amount ~step` displaces every offbeat by a fixed
-proportion where `jitter` scatters by hashing. `List.init` / `List.repeat` build
+proportion where `jitter` scatters by hashing.
+
+`Core.Scale` puts the pitches in a key. A `Scale` is a `tonic` and a
+`quality` (`{ tonic = { pc = A; oct = 3 }; quality = Minor }`), and
+`degree ~s ~n` is the note `n` steps up its ladder — 0-based, wrapping
+at the scale's own length, descending for negative `n`. A melody written
+in degrees stays in key by construction, and transposing the piece is
+editing `tonic`. `triad ~degree` and `seventh ~degree` stack every other
+degree, so the chord's quality falls out of the key rather than being
+named; `tones ~c` does the same for a chord you *do* name
+(`{ root = ...; quality = Dom7 }`). Everything hands back a
+`Pitch.Note list`, which `invert`, `voicing ~low ~count` and
+`freqs ~t` all consume — `snap` pulls a stray note back into the key on
+the way. `List.init` / `List.repeat` build
 generated lists; counts and indices are `Int`s, so wholeness is the
 type system's business (`List.init 6 (fun i:Int -> ...)`), and the
 index reaches Scalar arithmetic through `to_scalar`.

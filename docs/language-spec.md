@@ -263,15 +263,16 @@ Rules:
 - **The Core library.** All primitives live in `Core` — a *real
   library* bundled with the compiler (`stdlib/core/lib.synth`). Nearly
   every definition is an `external` binding to a C++ implementation
-  shipped beside it (§5); the `List`, `Pitch` and `Tempo` modules are written
-  in SynthGraph itself, and the interface opens with the `list`/`Signal`/`Sample`
+  shipped beside it (§5); the `List`, `Pitch`, `Tempo` and `Scale` modules
+  are written in SynthGraph itself, and the interface opens with the `list`/`Signal`/`Sample`
   type declarations (§3, top). Core is organized into functional
   submodules:
   `Osc` (oscillators & modulation), `Fx` (effects, filters,
   envelopes), `Arrange` (sample/place/mix), `Render` (the render
   effects), `Io` (audio import), `List`, `Time` (conversions &
   Timestamp sequences), `Sig` (signal constructors), `Pitch` (notes, temperaments &
-  cents), `Tempo` (meters, note values & the beat grid), and `Math`
+  cents), `Tempo` (meters, note values & the beat grid),
+  `Scale` (keys, degrees & chords), and `Math`
   (see §6 for the roster). Core is **not ambient**: like any library
   it must be brought into scope — `import Core` for qualified access
   (`Core.Osc.sine`), `open Core` for module-qualified access
@@ -893,6 +894,44 @@ val Tempo.swing : amount:Scalar -> step:Timestamp -> steps:Timestamp list
                     -> Timestamp list
 
 val Tempo.common : bpm:Scalar -> Tempo               (* 4/4; a function *)
+
+(* Core.Scale: keys, degrees & chords - written in SynthGraph. Degrees
+   count from 0 and wrap at the ladder's own length, so degree 5 is the
+   octave of a pentatonic scale and degree 7 the octave of a heptatonic
+   one; negative degrees descend. A scale has a `tonic` and a chord a
+   `root` - both carry a `quality`, and a record literal resolves by its
+   field names. Types are Scale.Scale / Scale.Chord / Scale.Quality /
+   Scale.ChordQuality when qualified. *)
+type Quality = | Major | Minor | Dorian | Phrygian | Lydian | Mixolydian
+               | Locrian | HarmMinor | MelMinor | PentMajor | PentMinor
+               | Blues | WholeTone | Chromatic
+type Scale = { tonic : Pitch.Note; quality : Quality }
+type ChordQuality = | Maj | Min | Dim | Aug | Maj7 | Min7 | Dom7
+                    | HalfDim7 | Dim7 | Sus2 | Sus4 | Add9
+type Chord = { root : Pitch.Note; quality : ChordQuality }
+
+(* degrees of the key *)
+val Scale.offsets : q:Quality -> Int list        (* semitones from the tonic *)
+val Scale.degree  : s:Scale -> n:Int -> Pitch.Note      (* n<0 descends *)
+val Scale.notes   : s:Scale -> from:Int -> count:Int -> Pitch.Note list
+val Scale.snap    : s:Scale -> note:Pitch.Note -> Pitch.Note
+
+(* chords: named by quality, or stacked out of the key *)
+val Scale.shape   : q:ChordQuality -> Int list   (* semitones from the root *)
+val Scale.tones   : c:Chord -> Pitch.Note list
+val Scale.stack   : s:Scale -> from:Int -> count:Int -> Pitch.Note list
+val Scale.triad   : s:Scale -> degree:Int -> Pitch.Note list  (* stack of 3 *)
+val Scale.seventh : s:Scale -> degree:Int -> Pitch.Note list  (* stack of 4 *)
+
+(* voicing, and the one exit to frequencies *)
+val Scale.invert  : notes:Pitch.Note list -> n:Int -> Pitch.Note list
+val Scale.voicing : notes:Pitch.Note list -> low:Pitch.Note -> count:Int
+                      -> Pitch.Note list
+val Scale.freqs   : t:Pitch.Tuning -> notes:Pitch.Note list -> Scalar list
+
+(* floor division and its non-negative remainder; there is no `%` *)
+val Scale.wrap_div : n:Int -> k:Int -> Int
+val Scale.wrap_rem : n:Int -> k:Int -> Int
 
 (* Core.List: list combinators & builders - written in SynthGraph
    (recursive functions over the Cons/Nil variant), not C++ *)

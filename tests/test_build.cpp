@@ -1317,6 +1317,169 @@ TEST(build_tempo_swing_displaces_alternate_entries) {
       "              ~i:1 ~default:0s == 500ms + 500ms / 3.0");
 }
 
+// Scale trades in Pitch.Note lists, so the claims below compare step
+// ladders: `st` turns a note list into its chromatic steps and `same`
+// compares two Int lists element-wise, with the length guard that stops
+// two out-of-range `nth` defaults from agreeing vacuously.
+namespace {
+void checkScaleClaims(const char* claims) {
+  TempDir derived, expected;
+  std::string src = std::string(R"(
+open Core open Core.Osc open Core.Fx open Core.Arrange open Core.Render open Core.Io open Core.Time open Core.Sig open Core.Math
+open Core.Pitch
+open Core.Scale
+let cmaj : Scale = { tonic = { pc = C; oct = 4 }; quality = Major } ;;
+let amin : Scale = { tonic = { pc = A; oct = 3 }; quality = Minor } ;;
+let cpent : Scale = { tonic = { pc = C; oct = 4 }; quality = PentMajor } ;;
+let am : Chord = { root = { pc = A; oct = 3 }; quality = Min } ;;
+let st ns:Note list : Int list =
+  List.map ~f:(fun n:Note -> step ~note:n) ~xs:ns ;;
+let same xs:Int list ys:Int list : Bool =
+  List.length ~xs:xs == List.length ~xs:ys
+    && List.fold
+         ~f:(fun acc:Bool i:Int ->
+               acc && List.nth ~xs:xs ~i:i ~default:0
+                        == List.nth ~xs:ys ~i:i ~default:1)
+         ~init:true ~xs:(List.range ~from:0 ~count:(List.length ~xs:xs)) ;;
+let d s:Scale n:Int : Int = step ~note:(degree ~s:s ~n:n) ;;
+let sn s:Scale k:Int : Int = step ~note:(snap ~s:s ~note:(of_step ~step:k)) ;;
+let ok : Bool =
+)") + claims + R"( ;;
+let _ = sine (if ok then 440.0 else 1.0)
+  |> sample ~from:0s ~to:100ms |> render ~name:"out" ~rate:8000.0 ;;
+)";
+  derived.write("s.synth", src);
+  derived.write("build.json", projectManifest("sv", {"s.synth"}));
+  expected.write("s.synth", R"(
+open Core open Core.Osc open Core.Fx open Core.Arrange open Core.Render open Core.Io open Core.Time open Core.Sig open Core.Math
+let _ = sine 440.0
+  |> sample ~from:0s ~to:100ms |> render ~name:"out" ~rate:8000.0 ;;
+)");
+  expected.write("build.json", projectManifest("sv", {"s.synth"}));
+  CHECK(buildProject(derived.dir.string()).ok);
+  CHECK(buildProject(expected.dir.string()).ok);
+  std::string a = slurp(derived.dir / "_build" / "artifacts" / "out.wav");
+  std::string b = slurp(expected.dir / "_build" / "artifacts" / "out.wav");
+  CHECK(!a.empty());
+  CHECK(a == b);
+}
+}  // namespace
+
+TEST(build_scale_degrees_count_from_zero) {
+  // Degree 0 is the tonic, degree 7 of a seven-note scale is the tonic
+  // an octave up, and negative degrees descend - the case a truncating
+  // divide would get wrong. C4 is step 48.
+  checkScaleClaims(
+      "d cmaj 0 == 48\n"
+      "  && d cmaj 4 == 55\n"
+      "  && d cmaj 7 == 60\n"
+      "  && d cmaj 8 == 62\n"
+      "  && d cmaj (-1) == 47\n"
+      "  && d cmaj (-7) == 36\n"
+      "  && same (st (notes ~s:cmaj ~from:0 ~count:8))\n"
+      "          [48; 50; 52; 53; 55; 57; 59; 60]");
+}
+
+TEST(build_scale_degrees_wrap_at_the_ladder_not_at_seven) {
+  // A five-note scale wraps after five degrees, so the octave lands on
+  // degree 5. A hardcoded 7 would put C an augmented fourth out.
+  checkScaleClaims(
+      "d cpent 5 == 60\n"
+      "  && d cpent 3 == 55\n"
+      "  && d cpent (-1) == 45\n"
+      "  && same (st (notes ~s:cpent ~from:0 ~count:6))\n"
+      "          [48; 50; 52; 55; 57; 60]\n"
+      "  && List.length ~xs:(offsets ~q:Chromatic) == 12\n"
+      "  && d { tonic = { pc = C; oct = 4 }; quality = Chromatic } 12 == 60");
+}
+
+TEST(build_scale_diatonic_stacks_take_quality_from_the_key) {
+  // Every other degree: i on A minor is minor, iv is minor, v7 is a
+  // minor seventh - none of it named, all of it falling out of the
+  // ladder.
+  checkScaleClaims(
+      "same (st (triad ~s:amin ~degree:0)) [45; 48; 52]\n"
+      "  && same (st (triad ~s:amin ~degree:3)) [50; 53; 57]\n"
+      "  && same (st (seventh ~s:amin ~degree:4)) [52; 55; 59; 62]\n"
+      "  && same (st (stack ~s:amin ~from:0 ~count:5)) [45; 48; 52; 55; 59]\n"
+      "  && same (st (stack ~s:amin ~from:0 ~count:0)) []");
+}
+
+TEST(build_scale_named_chords_are_a_root_plus_a_shape) {
+  checkScaleClaims(
+      "same (st (tones ~c:am)) [45; 48; 52]\n"
+      "  && same (st (tones ~c:{ root = { pc = G; oct = 3 };\n"
+      "                          quality = Dom7 })) [43; 47; 50; 53]\n"
+      "  && same (st (tones ~c:{ root = { pc = C; oct = 4 };\n"
+      "                          quality = Add9 })) [48; 52; 55; 62]\n"
+      "  && same (st (tones ~c:{ root = { pc = B; oct = 3 };\n"
+      "                          quality = HalfDim7 })) [47; 50; 53; 57]\n"
+      "  && same (shape ~q:Sus4) [0; 5; 7]");
+}
+
+TEST(build_scale_inversions_rotate_up_and_drop_down) {
+  // n:1 lifts the bottom note an octave; n:3 on a triad is the whole
+  // chord an octave up; a negative n drops the top note instead.
+  checkScaleClaims(
+      "same (st (invert ~notes:(tones ~c:am) ~n:1)) [48; 52; 57]\n"
+      "  && same (st (invert ~notes:(tones ~c:am) ~n:2)) [52; 57; 60]\n"
+      "  && same (st (invert ~notes:(tones ~c:am) ~n:3)) [57; 60; 64]\n"
+      "  && same (st (invert ~notes:(tones ~c:am) ~n:(-1))) [40; 45; 48]\n"
+      "  && same (st (invert ~notes:(tones ~c:am) ~n:0)) [45; 48; 52]\n"
+      "  && same (st (invert ~notes:Nil ~n:1)) []");
+}
+
+TEST(build_scale_voicing_spreads_from_a_floor) {
+  // Four parts out of a three-note chord, starting at the lowest octave
+  // at or above `low`: root, third, fifth, root again.
+  checkScaleClaims(
+      "same (st (voicing ~notes:(tones ~c:am)\n"
+      "                  ~low:{ pc = A; oct = 2 } ~count:4))\n"
+      "     [33; 36; 40; 45]\n"
+      "  && same (st (voicing ~notes:(tones ~c:am)\n"
+      "                       ~low:{ pc = A; oct = 3 } ~count:3))\n"
+      "          [45; 48; 52]\n"
+      "  && same (st (voicing ~notes:(tones ~c:am)\n"
+      "                       ~low:{ pc = A; oct = 3 } ~count:0)) []\n"
+      "  && same (st (voicing ~notes:Nil ~low:{ pc = A; oct = 3 }\n"
+      "                       ~count:4)) []");
+}
+
+TEST(build_scale_snap_keeps_a_line_in_the_key) {
+  // In-key notes are left alone, above and below the tonic alike; the
+  // black keys fall to the nearest white one, and a note exactly
+  // between two of them takes the lower.
+  checkScaleClaims(
+      "sn cmaj 59 == 59\n"
+      "  && sn cmaj 45 == 45\n"
+      "  && sn cmaj 48 == 48\n"
+      "  && sn cmaj 54 == 53\n"
+      "  && sn cmaj 44 == 43\n"
+      "  && sn cmaj 49 == 48\n"
+      "  && sn cmaj 61 == 60\n"
+      "  && sn amin 46 == 45");
+}
+
+TEST(build_scale_freqs_names_its_temperament) {
+  // The one exit to Scalars, and it goes through a Tuning like Pitch.hz
+  // does - so a just-intonation chord really is rational.
+  checkScaleClaims(
+      "List.nth ~xs:(freqs ~t:(et12 ~ref_hz:440.0)\n"
+      "                    ~notes:(triad ~s:amin ~degree:0))\n"
+      "         ~i:0 ~default:0.0 == 220.0\n"
+      "  && List.length ~xs:(freqs ~t:(et12 ~ref_hz:440.0)\n"
+      "                            ~notes:(tones ~c:am)) == 3\n"
+      "  && List.nth ~xs:(freqs ~t:(just ~root:0 ~ref_hz:440.0)\n"
+      "                         ~notes:(tones ~c:{ root = { pc = C; oct = 4 };\n"
+      "                                            quality = Maj }))\n"
+      "              ~i:2 ~default:0.0\n"
+      "       == List.nth ~xs:(freqs ~t:(just ~root:0 ~ref_hz:440.0)\n"
+      "                              ~notes:(tones ~c:{ root = { pc = C;\n"
+      "                                                          oct = 4 };\n"
+      "                                                 quality = Maj }))\n"
+      "                   ~i:0 ~default:0.0 * ratio ~num:3 ~den:2");
+}
+
 TEST(build_resample_identity_matches_the_input) {
   // End-to-end: `|> resample ~f:(fun t -> 1.0)` reads one source frame per
   // output frame, so the artifact must be byte-identical to the un-warped

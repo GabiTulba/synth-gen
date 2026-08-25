@@ -39,6 +39,7 @@ semantics of the less obvious primitives.
 | `Core.Sig` | Signal constructors: `constant`, `constant_multi`, `time`, `signal`, `signal_multi` | `stdlib/core/signals.cpp` |
 | `Core.Pitch` | Notes, temperaments and cents: `step`/`of_step`, `shift`, `flat`, `et`/`et12`/`just`/`pyth`, `hz`/`step_hz`/`a440`, `cents`/`detune`/`to_cents`/`ratio` | written in SynthGraph (`lib.synth`) |
 | `Core.Tempo` | Meters, note values and the beat grid: `beat`/`bar`/`beats`, `value`, `at`, `grid`, `swing`, `common` | written in SynthGraph (`lib.synth`) |
+| `Core.Scale` | Keys, degrees and chords: `offsets`, `degree`, `notes`, `snap`, `shape`, `tones`, `stack`/`triad`/`seventh`, `invert`, `voicing`, `freqs` | written in SynthGraph (`lib.synth`) |
 | `Core.Math` | `exp`, `sqrt`, `log`, `pow` — polymorphic over Scalars and (elementwise) Signals — plus the Int conversions `to_scalar`, `round`, `floor`, `ceil`, and `not` | `stdlib/core/math.cpp` |
 
 ## Primitive semantics
@@ -212,6 +213,37 @@ the whole story:
   rather than reading it off consecutive gaps, so the last entry is not a
   special case and a non-uniform grid still behaves predictably. Both are
   pure, so both stay cacheable.
+- **`Scale`: degrees count from 0, and wrap at the ladder's length.**
+  Degree 0 is the tonic; degree 7 of a seven-note scale is the tonic an
+  octave up, but degree *5* is the octave in a pentatonic one, because
+  `degree` wraps at `List.length (offsets q)` rather than at a hardcoded
+  seven. Negative degrees descend — the case a truncating divide gets
+  wrong, which is why `Scale` carries its own `wrap_div`/`wrap_rem` (the
+  language has no `%`). `notes ~from ~count` is the run of consecutive
+  degrees; `snap` pulls an out-of-key note to the nearest one in it,
+  taking the lower when a note sits exactly between two.
+- **`Scale`: a scale has a `tonic`, a chord has a `root`.** Those are
+  the musically correct words, and they are also what keeps the two
+  record types apart — both carry a `quality`, and a record literal
+  resolves by its field names, so identical field sets would be
+  ambiguous. `Quality` is spelled long (`Major`) and `ChordQuality`
+  short (`Maj`) so both can be `open`ed at once.
+- **`Scale`: a diatonic stack is notes, a named chord is a `Chord`.**
+  `triad`/`seventh`/`stack` take every other degree of the key and hand
+  back a `Pitch.Note list`: the quality falls out of the ladder instead
+  of being named, which is what lets harmonic minor produce its minMaj7
+  without `ChordQuality` growing a case for it. `Chord` is for chords
+  you name (`{ root = ...; quality = Min7 }`), and a progression is an
+  ordinary `Chord list`. `invert`, `voicing` and `freqs` work on the
+  note list from either source, so the two paths converge immediately.
+- **`Scale`: `invert` rotates, `voicing` spreads.** `invert ~n:1` lifts
+  the bottom note an octave (first inversion), `~n:-1` drops the top one
+  instead, and `~n:k` on a `k`-note chord is the whole chord an octave
+  up. `voicing ~low ~count` cycles upward through the chord for `count`
+  parts, starting at the lowest octave that puts its first note at or
+  above `low` — three chord tones become the four-part pad stack.
+  `freqs ~t` is the one exit to Scalars and names its temperament, as
+  `Pitch.hz` does.
 - **`List` edge cases** — the combinators are total, so a score
   builder that legitimately produces nothing needs no special case at
   the call site. `nth` answers with its `default` when the index is out

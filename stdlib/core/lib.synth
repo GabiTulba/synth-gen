@@ -422,3 +422,159 @@ module Tempo = struct
   let common ~bpm:Scalar : Tempo =
     { bpm = bpm; meter = { beats = 4; unit = 4 } } ;;
 end ;;
+
+(* --- Scale: keys, degrees and chords - written in SynthGraph ----------
+   A melody written in scale degrees stays in key by construction, and
+   transposing the whole piece is editing one `tonic`.
+
+   Degrees count from 0, like every other index in the language: degree
+   0 is the tonic, degree 7 of a seven-note scale is the tonic an octave
+   up, and negative degrees descend. A scale has a `tonic` and a chord
+   has a `root` - the musically correct words, and what keeps the two
+   record types apart when a literal is resolved by its field names.
+
+   Everything here trades in `Pitch.Note list`. A diatonic stack is
+   defined by the scale it comes from, not by a name from a fixed
+   enum - harmonic minor alone yields a minMaj7 and an augMaj7 - so
+   `triad` and `seventh` hand back the notes rather than forcing them
+   through `ChordQuality`. `Chord` stays for chords you *name*, and
+   `invert`, `voicing` and `freqs` work on any list from either
+   source. *)
+
+module Scale = struct
+  type Quality = | Major | Minor | Dorian | Phrygian | Lydian | Mixolydian
+                 | Locrian | HarmMinor | MelMinor | PentMajor | PentMinor
+                 | Blues | WholeTone | Chromatic ;;
+  type Scale = { tonic : Pitch.Note; quality : Quality } ;;
+  (* Spelled short (Maj/Min) where the scale qualities are spelled long
+     (Major/Minor), so both can be opened at once. *)
+  type ChordQuality = | Maj | Min | Dim | Aug | Maj7 | Min7 | Dom7
+                      | HalfDim7 | Dim7 | Sus2 | Sus4 | Add9 ;;
+  type Chord = { root : Pitch.Note; quality : ChordQuality } ;;
+
+  (* Floor division and its non-negative remainder. The language has no
+     `%`, and a degree, an inversion and a voicing all wrap - downwards
+     as well as up, which is the case a truncating divide gets wrong. *)
+  let wrap_div ~n:Int ~k:Int : Int =
+    Math.floor ~x:(Math.to_scalar n / Math.to_scalar k) ;;
+  let wrap_rem ~n:Int ~k:Int : Int = n - k * wrap_div ~n:n ~k:k ;;
+
+  (* --- Degrees --------------------------------------------------------
+     Semitones from the tonic, one entry per degree. Every ladder here
+     repeats at the octave, so a degree past the end wraps and carries
+     12 semitones with it. *)
+  let offsets ~q:Quality : Int list =
+    match q with
+    | Major -> [0; 2; 4; 5; 7; 9; 11]
+    | Minor -> [0; 2; 3; 5; 7; 8; 10]
+    | Dorian -> [0; 2; 3; 5; 7; 9; 10]
+    | Phrygian -> [0; 1; 3; 5; 7; 8; 10]
+    | Lydian -> [0; 2; 4; 6; 7; 9; 11]
+    | Mixolydian -> [0; 2; 4; 5; 7; 9; 10]
+    | Locrian -> [0; 1; 3; 5; 6; 8; 10]
+    | HarmMinor -> [0; 2; 3; 5; 7; 8; 11]
+    | MelMinor -> [0; 2; 3; 5; 7; 9; 11]
+    | PentMajor -> [0; 2; 4; 7; 9]
+    | PentMinor -> [0; 3; 5; 7; 10]
+    | Blues -> [0; 3; 5; 6; 7; 10]
+    | WholeTone -> [0; 2; 4; 6; 8; 10]
+    | Chromatic -> [0; 1; 2; 3; 4; 5; 6; 7; 8; 9; 10; 11] ;;
+
+  let degree ~s:Scale ~n:Int : Pitch.Note =
+    let os : Int list = offsets ~q:s.quality in
+    let k : Int = List.length ~xs:os in
+    let o : Int = wrap_div ~n:n ~k:k in
+    Pitch.shift ~note:s.tonic
+                ~by:(List.nth ~xs:os ~i:(n - k * o) ~default:0 + 12 * o) ;;
+  let notes ~s:Scale ~from:Int ~count:Int : Pitch.Note list =
+    List.init ~n:count ~f:(fun i:Int -> degree ~s:s ~n:(from + i)) ;;
+
+  (* The nearest note of the key, measured in semitones; a note exactly
+     between two of them snaps to the lower. This is what keeps a
+     chromatic line, or a jittered one, inside the key. *)
+  let snap ~s:Scale ~note:Pitch.Note : Pitch.Note =
+    let d : Int = Pitch.step ~note:note - Pitch.step ~note:s.tonic in
+    let o : Int = wrap_div ~n:d ~k:12 in
+    let pc : Int = d - 12 * o in
+    let closer acc:Int x:Int : Int =
+      let da : Int = if acc < pc then pc - acc else acc - pc in
+      let dx : Int = if x < pc then pc - x else x - pc in
+      if dx < da then x else acc in
+    Pitch.shift
+      ~note:s.tonic
+      ~by:(12 * o
+             + List.fold ~f:closer ~init:0
+                 ~xs:(List.append ~xs:(offsets ~q:s.quality) ~ys:[12])) ;;
+
+  (* --- Chords ---------------------------------------------------------
+     A named chord is a root and a shape in semitones. *)
+  let shape ~q:ChordQuality : Int list =
+    match q with
+    | Maj -> [0; 4; 7]
+    | Min -> [0; 3; 7]
+    | Dim -> [0; 3; 6]
+    | Aug -> [0; 4; 8]
+    | Maj7 -> [0; 4; 7; 11]
+    | Min7 -> [0; 3; 7; 10]
+    | Dom7 -> [0; 4; 7; 10]
+    | HalfDim7 -> [0; 3; 6; 10]
+    | Dim7 -> [0; 3; 6; 9]
+    | Sus2 -> [0; 2; 7]
+    | Sus4 -> [0; 5; 7]
+    | Add9 -> [0; 4; 7; 14] ;;
+  let tones ~c:Chord : Pitch.Note list =
+    List.map ~f:(fun i:Int -> Pitch.shift ~note:c.root ~by:i)
+             ~xs:(shape ~q:c.quality) ;;
+
+  (* A diatonic stack: every other degree from `from`, so `count:3` is
+     the triad on that degree and `count:4` the seventh. The quality
+     falls out of the key instead of being named. *)
+  let stack ~s:Scale ~from:Int ~count:Int : Pitch.Note list =
+    List.init ~n:count ~f:(fun i:Int -> degree ~s:s ~n:(from + 2 * i)) ;;
+  let triad ~s:Scale ~degree:Int : Pitch.Note list =
+    stack ~s:s ~from:degree ~count:3 ;;
+  let seventh ~s:Scale ~degree:Int : Pitch.Note list =
+    stack ~s:s ~from:degree ~count:4 ;;
+
+  (* --- Voicing --------------------------------------------------------
+     Both work on any note list, from `tones` or from `stack`. *)
+  (* Rotate upwards: `n:1` lifts the bottom note an octave (first
+     inversion), and a negative `n` drops the top one instead. *)
+  let invert ~notes:Pitch.Note list ~n:Int : Pitch.Note list =
+    let k : Int = List.length ~xs:notes in
+    if k <= 0 then Nil
+    else
+      List.init ~n:k
+        ~f:(fun i:Int ->
+              let o : Int = wrap_div ~n:(i + n) ~k:k in
+              Pitch.shift
+                ~note:(List.nth ~xs:notes ~i:(i + n - k * o)
+                                ~default:(Pitch.of_step ~step:0))
+                ~by:(12 * o)) ;;
+  (* `count` notes cycling upwards through the chord, starting at the
+     lowest octave that puts its first note at or above `low` - the
+     spread voicing a pad wants, from a three-note chord. *)
+  let voicing ~notes:Pitch.Note list ~low:Pitch.Note ~count:Int
+      : Pitch.Note list =
+    let k : Int = List.length ~xs:notes in
+    if k <= 0 then Nil
+    else
+      let base : Pitch.Note =
+        List.nth ~xs:notes ~i:0 ~default:(Pitch.of_step ~step:0) in
+      let lift : Int =
+        Math.ceil ~x:(Math.to_scalar (Pitch.step ~note:low
+                                        - Pitch.step ~note:base)
+                        / 12.0) in
+      List.init ~n:count
+        ~f:(fun i:Int ->
+              let o : Int = wrap_div ~n:i ~k:k in
+              Pitch.shift
+                ~note:(List.nth ~xs:notes ~i:(i - k * o)
+                                ~default:(Pitch.of_step ~step:0))
+                ~by:(12 * (lift + o))) ;;
+
+  (* The one exit to frequencies, and it names its temperament like
+     Pitch.hz does: `freqs ~t:(Pitch.et12 ~ref_hz:440.0)`. *)
+  let freqs ~t:Pitch.Tuning ~notes:Pitch.Note list : Scalar list =
+    List.map ~f:(fun n:Pitch.Note -> Pitch.hz ~t:t ~note:n) ~xs:notes ;;
+end ;;

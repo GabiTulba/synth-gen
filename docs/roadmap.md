@@ -75,16 +75,16 @@ genuinely needs C++, because the language has no string operations.
 |---|---|---|---|
 | `Core.Pitch` | Notes, temperaments, cents | — | SynthGraph ✅ |
 | `Core.Tempo` | BPM, meters, note values, bar/beat → Timestamp | Time | SynthGraph ✅ |
-| `Core.Scale` | Keys, modes, scale degrees, chords, inversions | Pitch, List | SynthGraph |
+| `Core.Scale` | Keys, modes, scale degrees, chords, inversions | Pitch, List | SynthGraph ✅ |
 | `Core.Rhythm` | Step patterns, Euclidean rhythms, swing | Tempo, List | C++ + SynthGraph |
 | `Core.Score` | Phrases, events, articulation, `play` | all of the above | SynthGraph |
 | `Core.Dyn` | Dynamic levels, crescendo, decibel gain | — | SynthGraph |
 
 **Landed so far:** Timestamp arithmetic (language spec
 [§3](language-spec.md#operators-pointwise-lifting--scalar-broadcasting)),
-the wider `List` module, `Core.Pitch` and `Core.Tempo`
+the wider `List` module, `Core.Pitch`, `Core.Tempo` and `Core.Scale`
 ([§6](language-spec.md#6-primitive-signatures-v1-roster)). The remaining
-four modules are future work.
+three modules are future work.
 
 ### `Core.Pitch` — **shipped**
 
@@ -153,39 +153,44 @@ whole note. `Dotted` and `Tuplet` then compose without further
 machinery, and `match` exhaustiveness catches a missing case at build
 time.
 
-### `Core.Scale`
+### `Core.Scale` — **shipped**
 
-```
-type Quality = | Major | Minor | Dorian | Phrygian | Lydian | Mixolydian
-               | Locrian | HarmMinor | MelMinor | PentMajor | PentMinor
-               | Blues | WholeTone | Chromatic ;;
-type Scale = { root : Note; quality : Quality } ;;
+Implemented in `stdlib/core/lib.synth`; the roster lives in the language
+spec [§6](language-spec.md#6-primitive-signatures-v1-roster) and the
+semantics in [`core-library.md`](core-library.md). Two departures from
+what this section originally proposed, both forced by trying to write
+it:
 
-val Scale.offsets : q:Quality -> Int list        (* semitones from the root *)
-val Scale.degree  : s:Scale -> n:Int -> Note     (* wraps octaves; n<0 descends *)
-val Scale.notes   : s:Scale -> from:Int -> count:Int -> Note list
-val Scale.snap    : s:Scale -> note:Note -> Note (* nearest in-key note *)
+- **Diatonic stacks are `Note list`s, not `Chord`s.** `triad` and
+  `seventh` were to return a `Chord`, which means naming the quality —
+  but harmonic minor's tonic seventh is a minMaj7 and its third is an
+  augMaj7, neither of which is in `ChordQuality`, and pentatonic and
+  whole-tone stacks have no name at all. Classifying would have meant
+  either an ever-growing enum or a lossy fallback. So a stack hands back
+  the notes the key produced, `Chord` stays for chords you *name*, and
+  `invert`/`voicing`/`freqs` work on the list from either source. The
+  `inv` field of `Chord` went with it: inversion is `invert`, applicable
+  to any note list, rather than a field only named chords can carry.
+- **A scale has a `tonic`, not a `root`.** The musically correct word,
+  and also the necessary one: a record literal resolves by its field
+  names, so `Scale` and `Chord` both having `{ root; quality }` would
+  have been ambiguous at every use.
 
-type ChordQuality = | Maj | Min | Dim | Aug | Maj7 | Min7 | Dom7
-                    | HalfDim7 | Dim7 | Sus2 | Sus4 | Add9 ;;
-type Chord = { root : Note; quality : ChordQuality; inv : Int } ;;
+`Scale.freqs` also takes a `~t:Tuning` rather than assuming 12-TET,
+matching `Pitch.hz` — a just-intonation triad really is rational.
 
-val Scale.tones   : c:Chord -> Note list
-val Scale.freqs   : c:Chord -> Scalar list       (* straight into channels/mix_all *)
-val Scale.triad   : s:Scale -> degree:Int -> Chord      (* diatonic *)
-val Scale.seventh : s:Scale -> degree:Int -> Chord
-val Scale.invert  : c:Chord -> n:Int -> Chord
-val Scale.voicing : c:Chord -> low:Note -> count:Int -> Note list
-```
+Degrees count from 0, settling the same question `Tempo.at` raised, and
+wrap at the ladder's own length rather than at seven: degree 5 is the
+octave of a pentatonic scale. Negative degrees descend, which is why
+`Scale` carries a floor division and remainder of its own.
 
-`Scale.degree` is the workhorse: a melody written as degree indices
-stays in key by construction, and transposing the whole song is editing
-`root`. `Scale.freqs` lands directly in the existing chord-stack idiom,
-so the `Am → F → C → G` of `examples/song/pad.synth` becomes
-`List.map ~f:(Scale.triad key) [0; 5; 2; 4]`.
+Still open, deliberately:
 
-`Quality` and `ChordQuality` are spelled differently (`Major`/`Maj`) so
-both can be `open`ed at once without a constructor collision.
+- **The examples do not use it yet.** `examples/song/pad.synth`'s
+  `Am → F → C → G` is a hand-written four-note voicing per chord, not a
+  triad, so moving it onto `Scale.voicing` changes which notes sound and
+  therefore the committed renders. That is a musical edit, not a
+  mechanical one, and it belongs with the `Score` rewrite in phase 4.
 
 ### `Core.Rhythm`
 
@@ -342,8 +347,10 @@ turns out to be wrong.
    nothing else compiles without them, and both are useful on their own.
 2. ~~**`Pitch` + `Tempo`.**~~ **Done**, examples included: both
    showcase projects are written against the pair.
-3. **`Scale` + `Rhythm`.** Rewrite `examples/song/pad.synth` and
-   `examples/song/drums.synth`.
+3. **`Scale`** ✅ **+ `Rhythm`.** `Scale` has shipped; `Rhythm` is next
+   (`euclid` is pure SynthGraph, `parse` is the one function in the plan
+   that needs C++). Rewriting `examples/song/pad.synth` and
+   `examples/song/drums.synth` follows.
 4. **`Score` + `Dyn`.** Rewrite `examples/song/` and
    `examples/darksynth/` against the full stack — a diff that should
    shrink both substantially and read like music.

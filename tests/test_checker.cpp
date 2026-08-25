@@ -1832,6 +1832,128 @@ let dots v:Value : Scalar =
   CHECK(mentioned);
 }
 
+TEST(checker_scale_roster) {
+  TempProject tp;
+  std::string f = tp.write("s.synth", R"(
+open Core open Core.Osc open Core.Fx open Core.Arrange open Core.Render open Core.Io open Core.Time open Core.Sig open Core.Math
+open Core.Pitch
+open Core.Scale
+let key : Scale = { tonic = { pc = A; oct = 3 }; quality = Minor } ;;
+let modal : Scale = { tonic = { pc = D; oct = 4 }; quality = Dorian } ;;
+let am : Chord = { root = { pc = A; oct = 3 }; quality = Min } ;;
+let os : Int list = offsets ~q:Lydian ;;
+let sh : Int list = shape ~q:HalfDim7 ;;
+let one : Note = degree ~s:key ~n:0 ;;
+let down : Note = degree ~s:key ~n:(-2) ;;
+let run : Note list = notes ~s:key ~from:0 ~count:8 ;;
+let fixed : Note = snap ~s:key ~note:{ pc = Cs; oct = 4 } ;;
+let chord : Note list = tones ~c:am ;;
+let three : Note list = triad ~s:key ~degree:3 ;;
+let four : Note list = seventh ~s:modal ~degree:4 ;;
+let five : Note list = stack ~s:key ~from:0 ~count:5 ;;
+let first : Note list = invert ~notes:chord ~n:1 ;;
+let wide : Note list = voicing ~notes:chord ~low:{ pc = A; oct = 2 } ~count:4 ;;
+let hz4 : Scalar list = freqs ~t:(et12 ~ref_hz:440.0) ~notes:wide ;;
+(* a progression is an ordinary list of chords *)
+let prog : Chord list =
+  [am; { root = { pc = F; oct = 3 }; quality = Maj };
+       { root = { pc = C; oct = 4 }; quality = Maj7 }] ;;
+(* the scale partially applies, as a tuning and a tempo do *)
+let line : Int -> Note = degree ~s:key ;;
+(* reachable qualified, without opening Scale *)
+let q : Int list = Core.Scale.offsets ~q:Core.Scale.Blues ;;
+)");
+  DiagnosticBag diags;
+  Program prog = checkProject({f}, diags);
+  for (auto& d : diags.items)
+    std::cerr << renderDiagnostic(d, prog.modules.empty() ? std::string{}
+                                       : userMod(prog).parsed.source);
+  CHECK(!diags.hasErrors());
+  const auto& types = userMod(prog).defTypes;
+  for (const char* n : {"key", "modal"})
+    CHECK(typeName(types.at(n)) == "Scale.Scale");
+  CHECK(typeName(types.at("am")) == "Scale.Chord");
+  CHECK(typeName(types.at("prog")) == "Scale.Chord list");
+  // Scale hands back Pitch's notes, so its lists are Pitch.Note lists.
+  for (const char* n : {"one", "down", "fixed"})
+    CHECK(typeName(types.at(n)) == "Pitch.Note");
+  for (const char* n : {"run", "chord", "three", "four", "five", "first",
+                        "wide"})
+    CHECK(typeName(types.at(n)) == "Pitch.Note list");
+  for (const char* n : {"os", "sh", "q"})
+    CHECK(typeName(types.at(n)) == "Int list");
+  CHECK(typeName(types.at("hz4")) == "Scalar list");
+  CHECK(types.at("line")->kind == Type::Kind::Fun);
+}
+
+TEST(checker_scale_type_errors) {
+  // A degree is an Int and a scale is not a chord; the two record types
+  // are told apart by their field names (tonic vs root), which is why
+  // they may share `quality`.
+  for (const char* body :
+       {"open Core open Core.Osc open Core.Fx open Core.Arrange open Core.Render open Core.Io open Core.Time open Core.Sig open Core.Math"
+        "\nopen Core.Pitch\nopen Core.Scale"
+        "\nlet x : Note = degree ~s:{ tonic = { pc = A; oct = 3 }; quality = Minor } ~n:1.0 ;;",
+        "open Core open Core.Osc open Core.Fx open Core.Arrange open Core.Render open Core.Io open Core.Time open Core.Sig open Core.Math"
+        "\nopen Core.Pitch\nopen Core.Scale"
+        "\nlet x : Scale = { tonic = { pc = A; oct = 3 }; quality = Min } ;;",
+        "open Core open Core.Osc open Core.Fx open Core.Arrange open Core.Render open Core.Io open Core.Time open Core.Sig open Core.Math"
+        "\nopen Core.Pitch\nopen Core.Scale"
+        "\nlet x : Chord = { root = { pc = A; oct = 3 }; quality = Minor } ;;",
+        "open Core open Core.Osc open Core.Fx open Core.Arrange open Core.Render open Core.Io open Core.Time open Core.Sig open Core.Math"
+        "\nopen Core.Pitch\nopen Core.Scale"
+        "\nlet x : Note list = tones ~c:{ tonic = { pc = A; oct = 3 }; quality = Min } ;;",
+        "open Core open Core.Osc open Core.Fx open Core.Arrange open Core.Render open Core.Io open Core.Time open Core.Sig open Core.Math"
+        "\nopen Core.Pitch\nopen Core.Scale"
+        "\nlet x : Scalar list = freqs ~notes:(tones ~c:{ root = { pc = A; oct = 3 }; quality = Min }) ;;",
+        "open Core open Core.Osc open Core.Fx open Core.Arrange open Core.Render open Core.Io open Core.Time open Core.Sig open Core.Math"
+        "\nopen Core.Pitch\nopen Core.Scale\nlet x : Int list = offsets ~q:Maj ;;",
+        "open Core open Core.Osc open Core.Fx open Core.Arrange open Core.Render open Core.Io open Core.Time open Core.Sig open Core.Math"
+        "\nopen Core.Pitch\nopen Core.Scale\nlet x : Int list = shape ~q:Major ;;",
+        "open Core open Core.Osc open Core.Fx open Core.Arrange open Core.Render open Core.Io open Core.Time open Core.Sig open Core.Math"
+        "\nopen Core.Pitch"
+        "\nlet x : Int list = offsets ~q:Lydian ;;"}) {
+    TempProject tp;
+    std::string f = tp.write("bad.synth", body);
+    DiagnosticBag diags;
+    checkProject({f}, diags);
+    CHECK(diags.hasErrors());
+  }
+}
+
+TEST(checker_scale_quality_match_must_be_exhaustive) {
+  // Fourteen scale qualities and twelve chord qualities: forgetting one
+  // is a build-time error, not a silently wrong key.
+  TempProject tp;
+  std::string f = tp.write("bad.synth", R"(
+open Core open Core.Osc open Core.Fx open Core.Arrange open Core.Render open Core.Io open Core.Time open Core.Sig open Core.Math
+open Core.Scale
+let bright q:Quality : Bool =
+  match q with
+  | Major -> true
+  | Minor -> false
+  | Dorian -> false
+  | Phrygian -> false
+  | Lydian -> true
+  | Mixolydian -> true
+  | Locrian -> false
+  | HarmMinor -> false
+  | MelMinor -> false
+  | PentMajor -> true
+  | PentMinor -> false
+  | Blues -> false
+  | WholeTone -> true
+;;
+)");
+  DiagnosticBag diags;
+  checkProject({f}, diags);
+  CHECK(diags.hasErrors());
+  bool mentioned = false;
+  for (auto& d : diags.items)
+    if (d.message.find("Chromatic") != std::string::npos) mentioned = true;
+  CHECK(mentioned);
+}
+
 TEST(checker_resample_typing) {
   TempProject tp;
   std::string f = tp.write("ok.synth", R"(
@@ -2389,12 +2511,17 @@ TEST(checker_core_is_a_real_library_of_externals) {
   CHECK(core->typeDecls.count("Tempo.Meter") == 1);
   CHECK(core->typeDecls.count("Tempo.Tempo") == 1);
   CHECK(core->typeDecls.count("Tempo.Value") == 1);
+  CHECK(core->defTypes.count("Scale.degree") == 1);
+  CHECK(core->typeDecls.count("Scale.Scale") == 1);
+  CHECK(core->typeDecls.count("Scale.Chord") == 1);
+  CHECK(core->typeDecls.count("Scale.Quality") == 1);
+  CHECK(core->typeDecls.count("Scale.ChordQuality") == 1);
   // ...nothing lives at the top level...
   for (auto& [name, type] : core->defTypes)
     CHECK(name.find('.') != std::string::npos);
   // ...and every definition outside the SynthGraph-implemented modules
-  // (List, Pitch, Tempo) is an external binding.
-  std::set<std::string> inSynthGraph = {"List", "Pitch", "Tempo"};
+  // (List, Pitch, Tempo, Scale) is an external binding.
+  std::set<std::string> inSynthGraph = {"List", "Pitch", "Tempo", "Scale"};
   std::function<bool(const std::vector<TopDef>&)> allExternal =
       [&](const std::vector<TopDef>& ds) {
         for (auto& d : ds) {

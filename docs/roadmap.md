@@ -74,7 +74,7 @@ genuinely needs C++, because the language has no string operations.
 | Module | Owns | Depends on | Written in |
 |---|---|---|---|
 | `Core.Pitch` | Notes, temperaments, cents | — | SynthGraph ✅ |
-| `Core.Tempo` | BPM, meters, note values, bar/beat → Timestamp | Time | SynthGraph |
+| `Core.Tempo` | BPM, meters, note values, bar/beat → Timestamp | Time | SynthGraph ✅ |
 | `Core.Scale` | Keys, modes, scale degrees, chords, inversions | Pitch, List | SynthGraph |
 | `Core.Rhythm` | Step patterns, Euclidean rhythms, swing | Tempo, List | C++ + SynthGraph |
 | `Core.Score` | Phrases, events, articulation, `play` | all of the above | SynthGraph |
@@ -82,9 +82,9 @@ genuinely needs C++, because the language has no string operations.
 
 **Landed so far:** Timestamp arithmetic (language spec
 [§3](language-spec.md#operators-pointwise-lifting--scalar-broadcasting)),
-the wider `List` module, and `Core.Pitch`
+the wider `List` module, `Core.Pitch` and `Core.Tempo`
 ([§6](language-spec.md#6-primitive-signatures-v1-roster)). The remaining
-five modules are future work.
+four modules are future work.
 
 ### `Core.Pitch` — **shipped**
 
@@ -104,13 +104,18 @@ changes to what this section originally proposed:
 
 Still open, deliberately:
 
-- **The examples still hold raw frequencies.** Rewriting
-  `examples/song/keys.synth` is phase 2's acceptance test and wants
-  `Tempo` as well, so the pitches and the grid move together rather than
-  in two passes. `examples/song/pad.synth`,
-  `examples/song/strings.synth`, `examples/darksynth/song.synth` and the
-  `1.006` in `examples/darksynth/bass.synth` (which is
-  `detune ~cents:10.4`) are all waiting on the same rewrite.
+- **The examples still hold raw frequencies and raw Timestamps.** Both
+  halves of phase 2 have now landed, so the rewrite is unblocked and is
+  the only phase-2 work left. It is deliberately its own change:
+  `examples/song/keys.synth` (melody pitches), `examples/song/pad.synth`
+  and `examples/song/strings.synth` (chord stacks),
+  `examples/song/song.synth` (three `time_steps` calls that encode 120
+  BPM 4/4), `examples/darksynth/song.synth` (the whole arrangement, on
+  `500ms`/`250ms` steps) and the `1.006` in
+  `examples/darksynth/bass.synth` (which is `detune ~cents:10.4`).
+  Rewriting them restages five committed renders under `outputs/`, so
+  "does the library work" and "does the song still sound right" are
+  reviewed separately.
 - **`Note` is inherently 12-tone**, so `shift`/`flat`/`hz` suit
   12-division temperaments; `n /= 12` ladders work in `Int` steps
   through `step_hz`. A spelling that generalizes to arbitrary `n` would
@@ -118,53 +123,35 @@ Still open, deliberately:
 - **Scale-degree spelling** (whether `Cs` and `Df` should be
   distinguishable) stays out until something needs to render notation.
 
-### `Core.Tempo`
+### `Core.Tempo` — **shipped**
 
-```
-type Meter = { beats : Int; unit : Int } ;;      (* 4/4 = { beats = 4; unit = 4 } *)
-type Tempo = { bpm : Scalar; meter : Meter } ;;  (* bpm counts `unit` notes per minute *)
+Implemented in `stdlib/core/lib.synth`; the roster lives in the language
+spec [§6](language-spec.md#6-primitive-signatures-v1-roster) and the
+semantics in [`core-library.md`](core-library.md). It shipped as
+proposed, with three refinements:
 
-type Value =                                     (* recursive variant *)
-  | Whole | Half | Quarter | Eighth | Sixteenth | ThirtySecond
-  | Dotted of Value
-  | Tuplet of (Int, Int, Value) ;;               (* 3-in-2, 5-in-4, ... *)
+- **The indexing base of `at` is 0**, and the open decision this section
+  used to record is settled. Bars and beats count from 0 like every
+  other index in the language, and `at ~bar:4 ~beat:2.0` is read as an
+  offset — "four bars and two beats in" — rather than as a ruler label,
+  which sidesteps the musicians-count-from-1 clash instead of picking a
+  side.
+- **`grid` takes `~from` and a `Value` step**, not `~start` and a
+  `Scalar`: `grid ~t ~from:2s ~step:Quarter ~count:28` is exactly the
+  call that replaces `time_steps ~start:2s ~step:500ms ~count:28`, and
+  the note value is the thing worth naming.
+- **`swing` takes `~step` explicitly** rather than reading it off
+  consecutive gaps, so the last entry of a grid is not a special case
+  and a non-uniform grid still behaves predictably. `Tempo.common ~bpm`
+  is the 4/4 preset, a function rather than a constant for the same
+  reason `Pitch.et12` is.
 
-val Tempo.beat  : t:Tempo -> Timestamp
-val Tempo.bar   : t:Tempo -> Timestamp
-val Tempo.beats : t:Tempo -> n:Scalar -> Timestamp
-val Tempo.value : t:Tempo -> v:Value -> Timestamp
-val Tempo.at    : t:Tempo -> bar:Int -> beat:Scalar -> Timestamp
-val Tempo.grid  : t:Tempo -> start:Timestamp -> step:Scalar -> count:Int
-                -> Timestamp list
-val Tempo.swing : amount:Scalar -> steps:Timestamp list -> Timestamp list
-```
-
-The highest-value module of the six, and the one Timestamp arithmetic
-was added for. `Tempo.grid` replaces
-`time_steps ~start:2s ~step:500ms ~count:28` with a call that names the
-tempo, so re-tempoing a song is a one-line edit instead of recomputing
-every literal across five files.
-
-`Value` is where the type system earns its keep: as a recursive variant,
-`Dotted (Dotted Quarter)` and nested tuplets fall out of a single
-`let rec`, and `match` exhaustiveness catches a missing case at build
+`value` rests on one observation that is easy to get wrong: a whole note
+is `unit` beats, whatever the meter — four beats in 4/4, eight eighths
+in 6/8 — so the only recursive part is a dimensionless fraction of a
+whole note. `Dotted` and `Tuplet` then compose without further
+machinery, and `match` exhaustiveness catches a missing case at build
 time.
-
-`bpm` counts the meter's `unit` note per minute. That is unambiguous for
-simple meters and a documented convention for compound ones — 6/8 felt
-in two is `{ beats = 6; unit = 8 }` with `bpm` still counting eighths;
-the dotted-quarter pulse is `value (Dotted Quarter)`.
-
-`swing` complements the existing `jitter`: `jitter` humanizes by hashing,
-`swing` displaces every odd step by a fixed proportion. Both are pure
-and both clamp at the epoch.
-
-**Open decision — the indexing base of `at`.** Musicians count bars and
-beats from 1; the rest of the language counts from 0 (`List.init` yields
-`0..n-1`, `List.range ~from:0`). Consistency argues for 0-based, and
-mixed conventions inside one project are a durable footgun. This is a
-taste call that is painful to reverse once examples are written against
-it, so it should be settled before `Tempo` lands.
 
 ### `Core.Scale`
 
@@ -353,9 +340,11 @@ turns out to be wrong.
 
 1. ~~Timestamp arithmetic and the wider `List` module.~~ **Done** —
    nothing else compiles without them, and both are useful on their own.
-2. **`Pitch`** ✅ **+ `Tempo`.** `Pitch` has shipped; `Tempo` is next,
-   and rewriting `examples/song/keys.synth` against the pair is the
-   acceptance test.
+2. ~~**`Pitch` + `Tempo`.**~~ **Both shipped.** What remains of this
+   phase is the example rewrite: `examples/song/keys.synth` and the
+   other sites listed under `Core.Pitch` above, moved onto the pair in
+   one pass and reviewed on its own, since it restages committed
+   renders.
 3. **`Scale` + `Rhythm`.** Rewrite `examples/song/pad.synth` and
    `examples/song/drums.synth`.
 4. **`Score` + `Dyn`.** Rewrite `examples/song/` and

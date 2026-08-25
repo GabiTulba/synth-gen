@@ -1729,6 +1729,109 @@ TEST(checker_pitch_type_errors) {
   }
 }
 
+TEST(checker_tempo_roster) {
+  TempProject tp;
+  std::string f = tp.write("t.synth", R"(
+open Core open Core.Osc open Core.Fx open Core.Arrange open Core.Render open Core.Io open Core.Time open Core.Sig open Core.Math
+open Core.Tempo
+let t : Tempo = common ~bpm:120.0 ;;
+let six8 : Tempo = { bpm = 90.0; meter = { beats = 6; unit = 8 } } ;;
+let m : Meter = { beats = 7; unit = 8 } ;;
+let b : Timestamp = beat ~t:t ;;
+let br : Timestamp = bar ~t:t ;;
+let n : Timestamp = beats ~t:t ~n:1.5 ;;
+let v1 : Timestamp = value ~t:t ~v:Quarter ;;
+let v2 : Timestamp = value ~t:t ~v:(Dotted (Dotted Eighth)) ;;
+let v3 : Timestamp = value ~t:six8 ~v:(Tuplet (3, 2, Sixteenth)) ;;
+let pos : Timestamp = at ~t:t ~bar:4 ~beat:2.0 ;;
+let g : Timestamp list = grid ~t:t ~from:0s ~step:Eighth ~count:16 ;;
+let sw : Timestamp list = swing ~amount:0.5 ~step:250ms ~steps:g ;;
+(* the tempo partially applies, as in Pitch *)
+let line : Value -> Int -> Timestamp list = grid ~t:t ~from:2s ;;
+let g2 : Timestamp list = line Quarter 28 ;;
+(* a Value is ordinary data: it can be stored and passed around *)
+let feel : Value list = [Quarter; Dotted Eighth; Tuplet (3, 2, Eighth)] ;;
+(* reachable qualified, without opening Tempo *)
+let q : Timestamp = Core.Tempo.beat ~t:(Core.Tempo.common ~bpm:60.0) ;;
+)");
+  DiagnosticBag diags;
+  Program prog = checkProject({f}, diags);
+  for (auto& d : diags.items)
+    std::cerr << renderDiagnostic(d, prog.modules.empty() ? std::string{}
+                                       : userMod(prog).parsed.source);
+  CHECK(!diags.hasErrors());
+  const auto& types = userMod(prog).defTypes;
+  // As with Pitch, a declared type prints under its module - and a module
+  // and a type may share the name `Tempo` because they live in separate
+  // scopes.
+  for (const char* n : {"t", "six8"})
+    CHECK(typeName(types.at(n)) == "Tempo.Tempo");
+  CHECK(typeName(types.at("m")) == "Tempo.Meter");
+  for (const char* n : {"b", "br", "n", "v1", "v2", "v3", "pos", "q"})
+    CHECK(typeEquals(types.at(n), tTimestamp()));
+  for (const char* n : {"g", "sw", "g2"})
+    CHECK(typeName(types.at(n)) == "Timestamp list");
+  CHECK(typeName(types.at("feel")) == "Tempo.Value list");
+  CHECK(types.at("line")->kind == Type::Kind::Fun);
+}
+
+TEST(checker_tempo_type_errors) {
+  // A beat count is continuous and a bar index is not; a Value is not a
+  // Timestamp; and Tempo's names have to be opened like anything else.
+  for (const char* body :
+       {"open Core open Core.Osc open Core.Fx open Core.Arrange open Core.Render open Core.Io open Core.Time open Core.Sig open Core.Math"
+        "\nopen Core.Tempo\nlet x : Timestamp = beats ~t:(common ~bpm:120.0) ~n:4 ;;",
+        "open Core open Core.Osc open Core.Fx open Core.Arrange open Core.Render open Core.Io open Core.Time open Core.Sig open Core.Math"
+        "\nopen Core.Tempo\nlet x : Timestamp = at ~t:(common ~bpm:120.0) ~bar:1.0 ~beat:0.0 ;;",
+        "open Core open Core.Osc open Core.Fx open Core.Arrange open Core.Render open Core.Io open Core.Time open Core.Sig open Core.Math"
+        "\nopen Core.Tempo\nlet x : Timestamp = value ~t:(common ~bpm:120.0) ~v:500ms ;;",
+        "open Core open Core.Osc open Core.Fx open Core.Arrange open Core.Render open Core.Io open Core.Time open Core.Sig open Core.Math"
+        "\nopen Core.Tempo\nlet x : Timestamp = Quarter ;;",
+        "open Core open Core.Osc open Core.Fx open Core.Arrange open Core.Render open Core.Io open Core.Time open Core.Sig open Core.Math"
+        "\nopen Core.Tempo\nlet x : Value = Dotted 4 ;;",
+        "open Core open Core.Osc open Core.Fx open Core.Arrange open Core.Render open Core.Io open Core.Time open Core.Sig open Core.Math"
+        "\nopen Core.Tempo\nlet x : Value = Tuplet (3, Eighth) ;;",
+        "open Core open Core.Osc open Core.Fx open Core.Arrange open Core.Render open Core.Io open Core.Time open Core.Sig open Core.Math"
+        "\nopen Core.Tempo\nlet x : Tempo = { bpm = 120.0 } ;;",
+        "open Core open Core.Osc open Core.Fx open Core.Arrange open Core.Render open Core.Io open Core.Time open Core.Sig open Core.Math"
+        "\nopen Core.Tempo\nlet x : Timestamp list = grid ~t:(common ~bpm:120.0) ~from:0s ~step:500ms ~count:4 ;;",
+        "open Core open Core.Osc open Core.Fx open Core.Arrange open Core.Render open Core.Io open Core.Time open Core.Sig open Core.Math"
+        "\nlet x : Timestamp = beat ~t:(common ~bpm:120.0) ;;"}) {
+    TempProject tp;
+    std::string f = tp.write("bad.synth", body);
+    DiagnosticBag diags;
+    checkProject({f}, diags);
+    CHECK(diags.hasErrors());
+  }
+}
+
+TEST(checker_tempo_value_match_must_be_exhaustive) {
+  // The payoff of making Value a variant: a missing case is a build-time
+  // error, not a silently wrong duration.
+  TempProject tp;
+  std::string f = tp.write("bad.synth", R"(
+open Core open Core.Osc open Core.Fx open Core.Arrange open Core.Render open Core.Io open Core.Time open Core.Sig open Core.Math
+open Core.Tempo
+let dots v:Value : Scalar =
+  match v with
+  | Whole -> 1.0
+  | Half -> 0.5
+  | Quarter -> 0.25
+  | Eighth -> 0.125
+  | Sixteenth -> 0.0625
+  | ThirtySecond -> 0.03125
+  | Dotted inner -> 1.5
+;;
+)");
+  DiagnosticBag diags;
+  checkProject({f}, diags);
+  CHECK(diags.hasErrors());
+  bool mentioned = false;
+  for (auto& d : diags.items)
+    if (d.message.find("Tuplet") != std::string::npos) mentioned = true;
+  CHECK(mentioned);
+}
+
 TEST(checker_resample_typing) {
   TempProject tp;
   std::string f = tp.write("ok.synth", R"(
@@ -2282,12 +2385,16 @@ TEST(checker_core_is_a_real_library_of_externals) {
   CHECK(core->typeDecls.count("Pitch.Note") == 1);
   CHECK(core->typeDecls.count("Pitch.Tuning") == 1);
   CHECK(core->typeDecls.count("Pitch.PitchClass") == 1);
+  CHECK(core->defTypes.count("Tempo.grid") == 1);
+  CHECK(core->typeDecls.count("Tempo.Meter") == 1);
+  CHECK(core->typeDecls.count("Tempo.Tempo") == 1);
+  CHECK(core->typeDecls.count("Tempo.Value") == 1);
   // ...nothing lives at the top level...
   for (auto& [name, type] : core->defTypes)
     CHECK(name.find('.') != std::string::npos);
   // ...and every definition outside the SynthGraph-implemented modules
-  // (List, Pitch) is an external binding.
-  std::set<std::string> inSynthGraph = {"List", "Pitch"};
+  // (List, Pitch, Tempo) is an external binding.
+  std::set<std::string> inSynthGraph = {"List", "Pitch", "Tempo"};
   std::function<bool(const std::vector<TopDef>&)> allExternal =
       [&](const std::vector<TopDef>& ds) {
         for (auto& d : ds) {

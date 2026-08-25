@@ -1182,6 +1182,141 @@ TEST(build_pitch_supports_non_octave_tunings) {
       "                  ratios = []; octave = 2.0 } ~step:99 == 440.0");
 }
 
+// Tempo is written in SynthGraph too, so the same trick pins its values:
+// each claim is a build-time Bool over Timestamps, and the render is 440
+// only if all of them hold. `same` compares two Timestamp lists
+// element-wise - the length guard is what stops two out-of-range `nth`
+// defaults from agreeing vacuously.
+namespace {
+void checkTempoClaims(const char* claims) {
+  TempDir derived, expected;
+  std::string src = std::string(R"(
+open Core open Core.Osc open Core.Fx open Core.Arrange open Core.Render open Core.Io open Core.Time open Core.Sig open Core.Math
+open Core.Tempo
+let t : Tempo = common ~bpm:120.0 ;;
+let six8 : Tempo = { bpm = 120.0; meter = { beats = 6; unit = 8 } } ;;
+let same xs:Timestamp list ys:Timestamp list : Bool =
+  List.length ~xs:xs == List.length ~xs:ys
+    && List.fold
+         ~f:(fun acc:Bool i:Int ->
+               acc && List.nth ~xs:xs ~i:i ~default:0s
+                        == List.nth ~xs:ys ~i:i ~default:1s)
+         ~init:true
+         ~xs:(List.range ~from:0 ~count:(List.length ~xs:xs)) ;;
+let ok : Bool =
+)") + claims + R"( ;;
+let _ = sine (if ok then 440.0 else 1.0)
+  |> sample ~from:0s ~to:100ms |> render ~name:"out" ~rate:8000.0 ;;
+)";
+  derived.write("t.synth", src);
+  derived.write("build.json", projectManifest("tv", {"t.synth"}));
+  expected.write("t.synth", R"(
+open Core open Core.Osc open Core.Fx open Core.Arrange open Core.Render open Core.Io open Core.Time open Core.Sig open Core.Math
+let _ = sine 440.0
+  |> sample ~from:0s ~to:100ms |> render ~name:"out" ~rate:8000.0 ;;
+)");
+  expected.write("build.json", projectManifest("tv", {"t.synth"}));
+  CHECK(buildProject(derived.dir.string()).ok);
+  CHECK(buildProject(expected.dir.string()).ok);
+  std::string a = slurp(derived.dir / "_build" / "artifacts" / "out.wav");
+  std::string b = slurp(expected.dir / "_build" / "artifacts" / "out.wav");
+  CHECK(!a.empty());
+  CHECK(a == b);
+}
+}  // namespace
+
+TEST(build_tempo_pulse_derives_from_bpm) {
+  // Everything hangs off `beat = to_min (1 / bpm)`; 120 and 90 both
+  // divide 60 cleanly, so these are exact rather than approximate.
+  checkTempoClaims(
+      "beat ~t:t == 500ms\n"
+      "  && bar ~t:t == 2s\n"
+      "  && beats ~t:t ~n:1.5 == 750ms\n"
+      "  && beats ~t:t ~n:0.0 == 0s\n"
+      "  && beats ~t:t ~n:4.0 == bar ~t:t\n"
+      "  && beat ~t:(common ~bpm:60.0) == 1s\n"
+      "  && bar ~t:six8 == 3s");
+}
+
+TEST(build_tempo_note_values_scale_with_the_meter_unit) {
+  // A whole note is `unit` beats, not four: in 6/8 the beat is an eighth,
+  // so a whole note is eight of them. This is the claim that catches the
+  // tempting-but-wrong `whole = 4 beats`.
+  checkTempoClaims(
+      "value ~t:t ~v:Quarter == beat ~t:t\n"
+      "  && value ~t:t ~v:Whole == 2s\n"
+      "  && value ~t:t ~v:Half == 1s\n"
+      "  && value ~t:t ~v:Eighth == 250ms\n"
+      "  && value ~t:t ~v:Sixteenth == 125ms\n"
+      "  && value ~t:t ~v:ThirtySecond == 62500us\n"
+      "  && value ~t:six8 ~v:Eighth == beat ~t:six8\n"
+      "  && value ~t:six8 ~v:Whole == 4s\n"
+      "  && value ~t:six8 ~v:Quarter == 1s");
+}
+
+TEST(build_tempo_values_nest) {
+  // The recursive constructors: a dot is x1.5 and composes, and
+  // `Tuplet (n, m, v)` is n of v in the time of m - which is why three
+  // eighth-triplets make a quarter, and why the identity tuplet is a
+  // no-op. Pinned against `value Quarter` rather than a decimal so a
+  // flipped n/m cannot pass.
+  checkTempoClaims(
+      "value ~t:t ~v:(Dotted Quarter) == 750ms\n"
+      "  && value ~t:t ~v:(Dotted (Dotted Quarter)) == 1125ms\n"
+      "  && value ~t:t ~v:(Dotted Quarter)\n"
+      "       == value ~t:t ~v:Quarter + value ~t:t ~v:Eighth\n"
+      "  && value ~t:t ~v:(Tuplet (3, 2, Eighth)) * 3.0\n"
+      "       == value ~t:t ~v:Quarter\n"
+      "  && value ~t:t ~v:(Tuplet (1, 1, Eighth)) == value ~t:t ~v:Eighth\n"
+      "  && value ~t:t ~v:(Tuplet (3, 2, Quarter)) * 3.0\n"
+      "       == value ~t:t ~v:Half\n"
+      "  && value ~t:six8 ~v:(Dotted Quarter) == bar ~t:six8 / 2.0");
+}
+
+TEST(build_tempo_at_counts_bars_and_beats_from_zero) {
+  // `at` is an offset, not a ruler label: bar 0 beat 0 is the origin and
+  // the two arguments simply add.
+  checkTempoClaims(
+      "at ~t:t ~bar:0 ~beat:0.0 == 0s\n"
+      "  && at ~t:t ~bar:1 ~beat:0.0 == bar ~t:t\n"
+      "  && at ~t:t ~bar:4 ~beat:2.0 == 9s\n"
+      "  && at ~t:t ~bar:0 ~beat:4.0 == at ~t:t ~bar:1 ~beat:0.0\n"
+      "  && at ~t:t ~bar:2 ~beat:1.5 == 4750ms\n"
+      "  && at ~t:six8 ~bar:1 ~beat:0.0 == 3s");
+}
+
+TEST(build_tempo_grid_matches_the_literals_it_replaces) {
+  // A migration rehearsal: this is the exact call in
+  // examples/song/song.synth, written the way Tempo will write it.
+  checkTempoClaims(
+      "same (grid ~t:t ~from:2s ~step:Quarter ~count:28)\n"
+      "     (time_steps ~start:2s ~step:500ms ~count:28)\n"
+      "  && same (grid ~t:t ~from:4s ~step:Eighth ~count:48)\n"
+      "          (time_steps ~start:4s ~step:250ms ~count:48)\n"
+      "  && same (grid ~t:t ~from:0s ~step:Quarter ~count:0) []\n"
+      "  && List.length ~xs:(grid ~t:t ~from:0s ~step:Whole ~count:3) == 3\n"
+      "  && List.nth ~xs:(grid ~t:t ~from:0s ~step:Whole ~count:3) ~i:2\n"
+      "             ~default:0s == 4s");
+}
+
+TEST(build_tempo_swing_displaces_alternate_entries) {
+  // Entries 1 and 3 move later by step*amount; 0 and 2 do not. Amount
+  // 0.0 is the identity, and a one-element grid has no offbeat to move.
+  checkTempoClaims(
+      "same (swing ~amount:0.0 ~step:500ms\n"
+      "            ~steps:(grid ~t:t ~from:0s ~step:Quarter ~count:4))\n"
+      "     (grid ~t:t ~from:0s ~step:Quarter ~count:4)\n"
+      "  && same (swing ~amount:0.5 ~step:500ms\n"
+      "                 ~steps:(grid ~t:t ~from:0s ~step:Quarter ~count:4))\n"
+      "          [0s; 750ms; 1s; 1750ms]\n"
+      "  && same (swing ~amount:0.5 ~step:500ms ~steps:[0s]) [0s]\n"
+      "  && same (swing ~amount:0.5 ~step:500ms ~steps:[]) []\n"
+      "  && List.nth ~xs:(swing ~amount:(1.0 / 3.0) ~step:500ms\n"
+      "                         ~steps:(grid ~t:t ~from:0s ~step:Quarter\n"
+      "                                      ~count:4))\n"
+      "              ~i:1 ~default:0s == 500ms + 500ms / 3.0");
+}
+
 TEST(build_resample_identity_matches_the_input) {
   // End-to-end: `|> resample ~f:(fun t -> 1.0)` reads one source frame per
   // output frame, so the artifact must be byte-identical to the un-warped

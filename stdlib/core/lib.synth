@@ -341,3 +341,84 @@ module Pitch = struct
   let ratio ~num:Int ~den:Int : Scalar =
     Math.to_scalar num / Math.to_scalar den ;;
 end ;;
+
+(* --- Tempo: meters, note values and the beat grid - written in
+   SynthGraph -----------------------------------------------------------
+   One tempo is named once and every position is derived from it, so
+   re-tempoing a piece is a one-line edit rather than a sweep over
+   Timestamp literals.
+
+   `bpm` counts the meter's `unit` note per minute. That is unambiguous
+   for simple meters and the usual convention for compound ones: 6/8
+   felt in two is { beats = 6; unit = 8 } with `bpm` still counting
+   eighths, and the dotted-quarter pulse is `value ~v:(Dotted Quarter)`.
+
+   Bars and beats count from 0, like every other index in the language.
+   `at ~bar:4 ~beat:2.0` is an offset - "four bars and two beats in" -
+   not a ruler label, so there is no clash with the convention that
+   numbers the downbeat 1. *)
+
+module Tempo = struct
+  type Meter = { beats : Int; unit : Int } ;;
+  type Tempo = { bpm : Scalar; meter : Meter } ;;
+  (* Recursive, so `Dotted (Dotted Quarter)` and nested tuplets fall out
+     of one function and `match` catches a missing case at build time.
+     `Tuplet (3, 2, v)` is three of `v` in the time of two. *)
+  type Value = | Whole | Half | Quarter | Eighth | Sixteenth | ThirtySecond
+               | Dotted of Value
+               | Tuplet of (Int, Int, Value) ;;
+
+  (* --- The pulse ------------------------------------------------------
+     `t` comes first throughout, as it does in Pitch.hz, so a tempo
+     partially applies and leaves the call sites alone. *)
+  let beat ~t:Tempo : Timestamp = Time.to_min ~x:(1.0 / t.bpm) ;;
+  let beats ~t:Tempo ~n:Scalar : Timestamp = beat ~t:t * n ;;
+  let bar ~t:Tempo : Timestamp =
+    beats ~t:t ~n:(Math.to_scalar t.meter.beats) ;;
+
+  (* --- Note values ----------------------------------------------------
+     A whole note is `unit` beats whatever the meter - four beats in
+     4/4, eight eighths in 6/8 - so the recursive part is just a
+     dimensionless fraction of a whole note. *)
+  let value ~t:Tempo ~v:Value : Timestamp =
+    let rec frac x:Value : Scalar =
+      match x with
+      | Whole -> 1.0
+      | Half -> 0.5
+      | Quarter -> 0.25
+      | Eighth -> 0.125
+      | Sixteenth -> 0.0625
+      | ThirtySecond -> 0.03125
+      | Dotted inner -> 1.5 * frac inner
+      | Tuplet (n, m, inner) ->
+          Math.to_scalar m / Math.to_scalar n * frac inner in
+    beats ~t:t ~n:(Math.to_scalar t.meter.unit * frac v) ;;
+
+  (* --- Positions and grids --------------------------------------------
+     `grid` is the tempo-aware Time.time_steps: the call names the tempo
+     and the note value instead of a precomputed step. *)
+  let at ~t:Tempo ~bar:Int ~beat:Scalar : Timestamp =
+    beats ~t:t ~n:(Math.to_scalar (bar * t.meter.beats) + beat) ;;
+  let grid ~t:Tempo ~from:Timestamp ~step:Value ~count:Int : Timestamp list =
+    Time.time_steps ~start:from ~step:(value ~t:t ~v:step) ~count:count ;;
+  (* The counterpart of Time.jitter: jitter humanizes by hashing, swing
+     displaces every odd entry by a fixed proportion of the step.
+     0.0 is straight, 1/3 is triplet swing, 0.5 is dotted. `step` is
+     passed rather than read off consecutive gaps, so the last entry is
+     not a special case. *)
+  let swing ~amount:Scalar ~step:Timestamp ~steps:Timestamp list
+      : Timestamp list =
+    let rec go xs:Timestamp list off:Bool : Timestamp list =
+      match xs with
+      | Nil -> Nil
+      | Cons (x, rest) ->
+          Cons (if off then x + step * amount else x,
+                go rest (Math.not ~b:off)) in
+    go steps false ;;
+
+  (* A preset is a function, not a constant: a paramless definition is
+     evaluated on every build of every project. Any other meter is a
+     plain record literal. *)
+  let common ~bpm:Scalar : Tempo =
+    { bpm = bpm; meter = { beats = 4; unit = 4 } } ;;
+end ;;

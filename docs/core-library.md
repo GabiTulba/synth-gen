@@ -38,6 +38,7 @@ semantics of the less obvious primitives.
 | `Core.Time` | Timestamp construction & sequences: `to_sec`/`to_ms`/`to_min`, `time_steps`, `jitter` | `stdlib/core/lists.cpp` |
 | `Core.Sig` | Signal constructors: `constant`, `constant_multi`, `time`, `signal`, `signal_multi` | `stdlib/core/signals.cpp` |
 | `Core.Pitch` | Notes, temperaments and cents: `step`/`of_step`, `shift`, `flat`, `et`/`et12`/`just`/`pyth`, `hz`/`step_hz`/`a440`, `cents`/`detune`/`to_cents`/`ratio` | written in SynthGraph (`lib.synth`) |
+| `Core.Tempo` | Meters, note values and the beat grid: `beat`/`bar`/`beats`, `value`, `at`, `grid`, `swing`, `common` | written in SynthGraph (`lib.synth`) |
 | `Core.Math` | `exp`, `sqrt`, `log`, `pow` — polymorphic over Scalars and (elementwise) Signals — plus the Int conversions `to_scalar`, `round`, `floor`, `ceil`, and `not` | `stdlib/core/math.cpp` |
 
 ## Primitive semantics
@@ -178,6 +179,39 @@ the whole story:
   `{ pc = A; oct = 4 }` read well, but in a file that is not
   pitch-heavy, `open Core` plus `Pitch.hz` and `Pitch.A` keeps the
   namespace legible.
+- **`Tempo`: `bpm` counts the meter's `unit` note per minute.** That is
+  unambiguous for simple meters and the usual convention for compound
+  ones: 6/8 felt in two is `{ beats = 6; unit = 8 }` with `bpm` still
+  counting eighths, and the dotted-quarter pulse is
+  `value ~v:(Dotted Quarter)`. Everything else is derived from
+  `beat = to_min (1 / bpm)` — `bar` is `beats` of them, `beats ~n` takes
+  a `Scalar` so half-beats need no ceremony. `common ~bpm` is 4/4; any
+  other meter is a plain record literal, and like `Pitch`'s temperaments
+  it is a function rather than a constant so an unused tempo costs no
+  build time.
+- **`Tempo`: a whole note is `unit` beats, whatever the meter.** Four
+  beats in 4/4, eight eighths in 6/8 — so `value` is the beat times
+  `unit` times a dimensionless fraction of a whole note. `Value` is a
+  recursive variant, which is where the type system earns its keep:
+  `Dotted` multiplies by 1.5 and composes
+  (`Dotted (Dotted Quarter)` is 2.25 quarters), `Tuplet (n, m, v)` is
+  *n* of `v` in the time of *m* (`Tuplet (3, 2, Eighth)` is the
+  eighth-note triplet) and nests, and a `match` that forgets a case is a
+  build-time error rather than a silently wrong duration.
+- **`Tempo`: bars and beats count from 0.** `at ~bar:0 ~beat:0.0` is the
+  origin. Read it as an offset — "four bars and two beats in" — not as a
+  ruler label, and it agrees with every other index in the language
+  rather than with the convention that numbers the downbeat 1. `grid` is
+  the tempo-aware `time_steps`: the call names the tempo and the note
+  value instead of a precomputed step, so re-tempoing is a one-line edit.
+  A `Tempo` carries one meter; a piece that changes meter binds a second
+  one and offsets from a computed start.
+- **`Tempo.swing` complements `jitter`.** `jitter` humanizes by hashing;
+  `swing` displaces every odd-indexed entry later by `step * amount`
+  (`0.0` straight, `1/3` triplet swing, `0.5` dotted). It takes `step`
+  rather than reading it off consecutive gaps, so the last entry is not a
+  special case and a non-uniform grid still behaves predictably. Both are
+  pure, so both stay cacheable.
 - **`List` edge cases** — the combinators are total, so a score
   builder that legitimately produces nothing needs no special case at
   the call site. `nth` answers with its `default` when the index is out

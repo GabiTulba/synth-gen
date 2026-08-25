@@ -326,7 +326,18 @@ per-channel forms). The math primitives `exp`, `sqrt`, `log`, and
 the natural feed for `place_multi`
 (`place_multi kick (time_steps ~start:0s ~step:500ms ~count:8)`);
 `jitter ~seed ~spread` humanizes such a list with hash-derived (pure,
-reproducible) per-note timing deltas. `List.init` / `List.repeat` build
+reproducible) per-note timing deltas.
+
+`Core.Tempo` gives the same grid a name for the tempo behind it. A
+`Tempo` is a BPM and a meter (`common ~bpm:120.0` is 4/4), `beat`/`bar`/
+`beats ~n` are its pulse, and `value ~v:Quarter` — or `Dotted Quarter`,
+or `Tuplet (3, 2, Eighth)` — is a note value in Timestamps. `grid ~t
+~from ~step:Quarter ~count:28` replaces the precomputed
+`time_steps ~start:2s ~step:500ms ~count:28`, so re-tempoing a piece is
+one edit instead of a sweep over literals; `at ~bar:4 ~beat:2.0` names a
+position (bars and beats count from 0, as an offset rather than a ruler
+label); and `swing ~amount ~step` displaces every offbeat by a fixed
+proportion where `jitter` scatters by hashing. `List.init` / `List.repeat` build
 generated lists; counts and indices are `Int`s, so wholeness is the
 type system's business (`List.init 6 (fun i:Int -> ...)`), and the
 index reaches Scalar arithmetic through `to_scalar`.

@@ -263,15 +263,15 @@ Rules:
 - **The Core library.** All primitives live in `Core` — a *real
   library* bundled with the compiler (`stdlib/core/lib.synth`). Nearly
   every definition is an `external` binding to a C++ implementation
-  shipped beside it (§5); the `List` and `Pitch` modules are written in SynthGraph
-  itself, and the interface opens with the `list`/`Signal`/`Sample`
+  shipped beside it (§5); the `List`, `Pitch` and `Tempo` modules are written
+  in SynthGraph itself, and the interface opens with the `list`/`Signal`/`Sample`
   type declarations (§3, top). Core is organized into functional
   submodules:
   `Osc` (oscillators & modulation), `Fx` (effects, filters,
   envelopes), `Arrange` (sample/place/mix), `Render` (the render
   effects), `Io` (audio import), `List`, `Time` (conversions &
   Timestamp sequences), `Sig` (signal constructors), `Pitch` (notes, temperaments &
-  cents), and `Math`
+  cents), `Tempo` (meters, note values & the beat grid), and `Math`
   (see §6 for the roster). Core is **not ambient**: like any library
   it must be brought into scope — `import Core` for qualified access
   (`Core.Osc.sine`), `open Core` for module-qualified access
@@ -865,6 +865,34 @@ val Pitch.cents    : n:Scalar -> Scalar               (* multiplier 2^(n/1200) *
 val Pitch.detune   : freq:Scalar -> cents:Scalar -> Scalar
 val Pitch.to_cents : ratio:Scalar -> Scalar
 val Pitch.ratio    : num:Int -> den:Int -> Scalar     (* 3/2, 5/4 *)
+
+(* Core.Tempo: meters, note values & the beat grid - written in
+   SynthGraph. `bpm` counts the meter's `unit` note per minute. Bars and
+   beats count from 0: `at` is an offset, not a ruler label. Types travel
+   under the module, so they are Tempo.Meter / Tempo.Tempo / Tempo.Value
+   when qualified - a module and a type may share a name. *)
+type Meter = { beats : Int; unit : Int }
+type Tempo = { bpm : Scalar; meter : Meter }
+type Value = | Whole | Half | Quarter | Eighth | Sixteenth | ThirtySecond
+             | Dotted of Value                  (* x1.5, and it nests *)
+             | Tuplet of (Int, Int, Value)      (* n of v per m of v *)
+
+(* the pulse; `t` comes first so a tempo partially applies *)
+val Tempo.beat  : t:Tempo -> Timestamp              (* one `unit` note *)
+val Tempo.bar   : t:Tempo -> Timestamp              (* `beats` of them *)
+val Tempo.beats : t:Tempo -> n:Scalar -> Timestamp  (* fractional is fine *)
+
+(* a whole note is `unit` beats, whatever the meter *)
+val Tempo.value : t:Tempo -> v:Value -> Timestamp
+
+(* positions and grids *)
+val Tempo.at    : t:Tempo -> bar:Int -> beat:Scalar -> Timestamp
+val Tempo.grid  : t:Tempo -> from:Timestamp -> step:Value -> count:Int
+                    -> Timestamp list
+val Tempo.swing : amount:Scalar -> step:Timestamp -> steps:Timestamp list
+                    -> Timestamp list
+
+val Tempo.common : bpm:Scalar -> Tempo               (* 4/4; a function *)
 
 (* Core.List: list combinators & builders - written in SynthGraph
    (recursive functions over the Cons/Nil variant), not C++ *)

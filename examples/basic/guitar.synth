@@ -19,7 +19,7 @@ module K = Voices.Keys
    fundamental once, so the stack below reads as harmonic numbers. *)
 let guitar : Scalar Signal =
   let harm ~n:Scalar ~amp:Scalar ~decay:Scalar : Scalar Signal =
-    K.partial ~freq:(196.0 * n) ~amp:amp ~decay:decay in
+    K.partial ~freq:(196.0 *. n) ~amp:amp ~decay:decay in
   let body : Scalar Signal =
     mix_all [harm ~n:1.0 ~amp:1.0 ~decay:2.6;
              harm ~n:2.0 ~amp:0.55 ~decay:3.4;
@@ -27,8 +27,8 @@ let guitar : Scalar Signal =
              harm ~n:4.0 ~amp:0.18 ~decay:5.6;
              harm ~n:5.0 ~amp:0.10 ~decay:6.8;
              harm ~n:6.0 ~amp:0.06 ~decay:8.0] in
-  let pick : Scalar Signal = noise 3000.0 * exp_decay 70.0 * 0.15 in
-  body * 0.55 + pick
+  let pick : Scalar Signal = noise 3000.0 *. exp_decay 70.0 *. 0.15 in
+  body *. 0.55 +. pick
 ;;
 
 let _ =

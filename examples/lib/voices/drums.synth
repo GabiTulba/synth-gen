@@ -17,21 +17,21 @@ open Core.Math
 let kick ~carrier:Scalar ~drop_rate:Scalar ~drop_depth:Scalar
          ~body_decay:Scalar ~click_freq:Scalar ~click_decay:Scalar
          ~click_amp:Scalar : Scalar Signal =
-  let drop : Scalar Signal = exp_decay drop_rate * drop_depth in
+  let drop : Scalar Signal = exp_decay drop_rate *. drop_depth in
   let body : Scalar Signal = fm ~carrier:carrier ~modulator:drop in
   let click : Scalar Signal =
-    noise click_freq * exp_decay click_decay * click_amp in
-  body * exp_decay body_decay + click
+    noise click_freq *. exp_decay click_decay *. click_amp in
+  body *. exp_decay body_decay +. click
 ;;
 
 let snare ~tone:Scalar ~tone_decay:Scalar ~tone_amp:Scalar
           ~noise_freq:Scalar ~noise_decay:Scalar : Scalar Signal =
-  let body : Scalar Signal = sine tone * exp_decay tone_decay * tone_amp in
-  let rattle : Scalar Signal = noise noise_freq * exp_decay noise_decay in
-  rattle + body
+  let body : Scalar Signal = sine tone *. exp_decay tone_decay *. tone_amp in
+  let rattle : Scalar Signal = noise noise_freq *. exp_decay noise_decay in
+  rattle +. body
 ;;
 
 let hat ~noise_freq:Scalar ~cutoff:Scalar ~decay:Scalar ~amp:Scalar
     : Scalar Signal =
-  (noise noise_freq |> highpass ~cutoff:cutoff) * exp_decay decay * amp
+  (noise noise_freq |> highpass ~cutoff:cutoff) *. exp_decay decay *. amp
 ;;

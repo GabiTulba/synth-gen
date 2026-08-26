@@ -22,5 +22,5 @@ module Doppler = Doppler ;;
 let fly_by ~base:Scalar ~rate:Scalar ~depth:Scalar ~gain:Scalar
     : Vector Signal =
   Doppler.pan (Doppler.swept_saw ~base:base ~rate:rate ~depth:depth
-                 ~gain:gain * Doppler.proximity rate) rate
+                 ~gain:gain *. Doppler.proximity rate) rate
 ;;

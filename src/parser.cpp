@@ -774,47 +774,60 @@ class Parser {
     return left;
   }
 
+  // A '.'-suffixed operator binds exactly as tightly as its bare
+  // counterpart, so `a *. b +. c` groups the way `a * b + c` does and
+  // switching a line between the two spellings never reparenthesizes it.
   ExprPtr parseComparison() {
     ExprPtr left = parseAdditive();
     for (;;) {
       BinOpKind op;
-      if (at(Tok::Lt)) op = BinOpKind::Lt;
-      else if (at(Tok::Le)) op = BinOpKind::Le;
-      else if (at(Tok::Gt)) op = BinOpKind::Gt;
-      else if (at(Tok::Ge)) op = BinOpKind::Ge;
-      else if (at(Tok::EqEq)) op = BinOpKind::Eq;
-      else if (at(Tok::BangEq)) op = BinOpKind::Ne;
+      if (at(Tok::Lt) || at(Tok::LtDot)) op = BinOpKind::Lt;
+      else if (at(Tok::Le) || at(Tok::LeDot)) op = BinOpKind::Le;
+      else if (at(Tok::Gt) || at(Tok::GtDot)) op = BinOpKind::Gt;
+      else if (at(Tok::Ge) || at(Tok::GeDot)) op = BinOpKind::Ge;
+      else if (at(Tok::EqEq) || at(Tok::EqEqDot)) op = BinOpKind::Eq;
+      else if (at(Tok::BangEq) || at(Tok::BangEqDot)) op = BinOpKind::Ne;
       else return left;
+      bool dotted = at(Tok::LtDot) || at(Tok::LeDot) || at(Tok::GtDot) ||
+                    at(Tok::GeDot) || at(Tok::EqEqDot) || at(Tok::BangEqDot);
       advance();
       ExprPtr right = parseAdditive();
-      left = mkBinOp(op, std::move(left), std::move(right));
+      left = mkBinOp(op, std::move(left), std::move(right), dotted);
     }
   }
 
   ExprPtr parseAdditive() {
     ExprPtr left = parseMultiplicative();
-    while (at(Tok::Plus) || at(Tok::Minus)) {
-      BinOpKind op = at(Tok::Plus) ? BinOpKind::Add : BinOpKind::Sub;
+    for (;;) {
+      bool dotted = at(Tok::PlusDot) || at(Tok::MinusDot);
+      bool plus = at(Tok::Plus) || at(Tok::PlusDot);
+      if (!dotted && !at(Tok::Plus) && !at(Tok::Minus)) return left;
+      BinOpKind op = plus ? BinOpKind::Add : BinOpKind::Sub;
       advance();
       ExprPtr right = parseMultiplicative();
-      left = mkBinOp(op, std::move(left), std::move(right));
+      left = mkBinOp(op, std::move(left), std::move(right), dotted);
     }
-    return left;
   }
 
   ExprPtr parseMultiplicative() {
     ExprPtr left = parseUnary();
-    while (at(Tok::Star) || at(Tok::Slash)) {
-      BinOpKind op = at(Tok::Star) ? BinOpKind::Mul : BinOpKind::Div;
+    for (;;) {
+      bool dotted = at(Tok::StarDot) || at(Tok::SlashDot);
+      bool star = at(Tok::Star) || at(Tok::StarDot);
+      if (!dotted && !at(Tok::Star) && !at(Tok::Slash)) return left;
+      BinOpKind op = star ? BinOpKind::Mul : BinOpKind::Div;
       advance();
       ExprPtr right = parseUnary();
-      left = mkBinOp(op, std::move(left), std::move(right));
+      left = mkBinOp(op, std::move(left), std::move(right), dotted);
     }
-    return left;
   }
 
   ExprPtr parseUnary() {
-    if (at(Tok::Minus)) {
+    // Negation stays one operator for every numeric kind: with a single
+    // operand there is nothing to disambiguate, so `-` needs no discrete/
+    // continuous split. `-.` is accepted as the same operator so a line
+    // written in the dotted style reads consistently.
+    if (at(Tok::Minus) || at(Tok::MinusDot)) {
       Span lo = advance().span;
       ExprPtr operand = parseUnary();
       // Unary minus is its own node: it negates whatever numeric kind its
@@ -1031,10 +1044,11 @@ class Parser {
     }
   }
 
-  ExprPtr mkBinOp(BinOpKind op, ExprPtr l, ExprPtr r) {
+  ExprPtr mkBinOp(BinOpKind op, ExprPtr l, ExprPtr r, bool dotted = false) {
     auto e = std::make_unique<Expr>(Expr::Kind::BinOp,
                                     Span{l->span.lo, r->span.hi});
     e->op = op;
+    e->dotted = dotted;
     e->items.push_back(std::move(l));
     e->items.push_back(std::move(r));
     return e;

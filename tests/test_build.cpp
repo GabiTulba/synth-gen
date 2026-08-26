@@ -72,7 +72,7 @@ std::string slurp(const fs::path& p) {
 const char* kPluckSource = R"(
 open Core open Core.Osc open Core.Fx open Core.Arrange open Core.Render open Core.Io open Core.Time open Core.Sig open Core.Math
 let pluck freq:Scalar : Scalar Signal =
-  (sine freq) * (exp_decay 6.0)
+  (sine freq) *. (exp_decay 6.0)
 ;;
 let pluck_sample freq:Scalar : Scalar Sample =
   sample (pluck freq) 0s 800ms
@@ -361,7 +361,7 @@ TEST(build_imports_across_files) {
   TempDir tp;
   tp.write("instr.synth", R"(
 open Core open Core.Osc open Core.Fx open Core.Arrange open Core.Render open Core.Io open Core.Time open Core.Sig open Core.Math
-let tone freq:Scalar : Scalar Signal = (sine freq) * (exp_decay 3.0) ;;
+let tone freq:Scalar : Scalar Signal = (sine freq) *. (exp_decay 3.0) ;;
 )");
   tp.write("song.synth", R"(
 open Core open Core.Osc open Core.Fx open Core.Arrange open Core.Render open Core.Io open Core.Time open Core.Sig open Core.Math
@@ -480,10 +480,10 @@ TEST(build_modulation_end_to_end) {
   TempDir tp;
   tp.write("modul.synth", R"(
 open Core open Core.Osc open Core.Fx open Core.Arrange open Core.Render open Core.Io open Core.Time open Core.Sig open Core.Math
-let vibrato : Scalar Signal = fm 440.0 ((sine 5.0) * 20.0) ;;
+let vibrato : Scalar Signal = fm 440.0 ((sine 5.0) *. 20.0) ;;
 let tremolo : Scalar Signal = am vibrato (sine 4.0) 0.5 ;;
-let bell : Scalar Signal = pm 220.0 ((sine 110.0) * 2.0) ;;
-let _ = render "voice" 48000.0 (sample (tremolo * 0.5 + bell * 0.3) 0s 250ms) ;;
+let bell : Scalar Signal = pm 220.0 ((sine 110.0) *. 2.0) ;;
+let _ = render "voice" 48000.0 (sample (tremolo *. 0.5 +. bell *. 0.3) 0s 250ms) ;;
 )");
   tp.write("build.json", projectManifest("modulation", {"modul.synth"}));
   BuildResult r = buildProject(tp.dir.string());
@@ -501,9 +501,9 @@ TEST(build_delay_echo_end_to_end) {
   tp.write("echo.synth", R"(
 open Core open Core.Osc open Core.Fx open Core.Arrange open Core.Render open Core.Io open Core.Time open Core.Sig open Core.Math
 let hit : Scalar Signal =
-  place (sample ((sine 660.0) * (exp_decay 30.0)) 0s 100ms) 0s ;;
+  place (sample ((sine 660.0) *. (exp_decay 30.0)) 0s 100ms) 0s ;;
 let echoed : Scalar Signal =
-  mix_all [hit; (delay 200ms hit) * 0.5; (delay 400ms hit) * 0.25] ;;
+  mix_all [hit; (delay 200ms hit) *. 0.5; (delay 400ms hit) *. 0.25] ;;
 let _ = render "echo" 8000.0 (sample echoed 0s 600ms) ;;
 )");
   tp.write("build.json", projectManifest("echo", {"echo.synth"}));
@@ -532,7 +532,7 @@ TEST(build_reverb_end_to_end) {
   tp.write("verb.synth", R"(
 open Core open Core.Osc open Core.Fx open Core.Arrange open Core.Render open Core.Io open Core.Time open Core.Sig open Core.Math
 let hit : Scalar Signal =
-  place (sample ((sine 660.0) * (exp_decay 40.0)) 0s 100ms) 0s ;;
+  place (sample ((sine 660.0) *. (exp_decay 40.0)) 0s 100ms) 0s ;;
 let roomy : Scalar Signal = reverb 500ms 0.3 0.6 hit ;;
 let _ = render "roomy" 8000.0 (sample roomy 0s 1s) ;;
 )");
@@ -559,7 +559,7 @@ TEST(build_noise_snare_end_to_end) {
   TempDir tp;
   tp.write("snare.synth", R"(
 open Core open Core.Osc open Core.Fx open Core.Arrange open Core.Render open Core.Io open Core.Time open Core.Sig open Core.Math
-let snare : Scalar Signal = (noise 1800.0) * (exp_decay 25.0) ;;
+let snare : Scalar Signal = (noise 1800.0) *. (exp_decay 25.0) ;;
 let _ = render "snare" 16000.0 (sample snare 0s 400ms) ;;
 )");
   tp.write("build.json", projectManifest("snare", {"snare.synth"}));
@@ -583,12 +583,12 @@ TEST(build_cache_skips_unchanged_and_invalidates_across_modules) {
   TempDir tp;
   tp.write("instr.synth",
            "open Core open Core.Osc open Core.Fx open Core.Arrange open Core.Render open Core.Io open Core.Time open Core.Sig open Core.Math\nlet tone freq:Scalar : Scalar Signal = "
-           "(sine freq) * (exp_decay 6.0) ;;");
+           "(sine freq) *. (exp_decay 6.0) ;;");
   tp.write("song.synth", R"(
 open Core open Core.Osc open Core.Fx open Core.Arrange open Core.Render open Core.Io open Core.Time open Core.Sig open Core.Math
 import Instr
 let _ = render "uses_instr" 8000.0 (sample (Instr.tone 440.0) 0s 100ms) ;;
-let _ = render "standalone" 8000.0 (sample ((saw 220.0) * 0.5) 0s 100ms) ;;
+let _ = render "standalone" 8000.0 (sample ((saw 220.0) *. 0.5) 0s 100ms) ;;
 )");
   tp.write("build.json", projectManifest("cachetest", {"song.synth"}));
 
@@ -606,7 +606,7 @@ let _ = render "standalone" 8000.0 (sample ((saw 220.0) * 0.5) 0s 100ms) ;;
   // re-renders; the standalone target stays cached.
   tp.write("instr.synth",
            "open Core open Core.Osc open Core.Fx open Core.Arrange open Core.Render open Core.Io open Core.Time open Core.Sig open Core.Math\nlet tone freq:Scalar : Scalar Signal = "
-           "(sine freq) * (exp_decay 9.0) ;;");
+           "(sine freq) *. (exp_decay 9.0) ;;");
   BuildResult third = buildProject(tp.dir.string(), &cache);
   CHECK(third.ok);
   for (auto& t : third.targets) {
@@ -646,12 +646,12 @@ TEST(build_parallel_targets_all_render) {
   TempDir tp;
   tp.write("many.synth", R"(
 open Core open Core.Osc open Core.Fx open Core.Arrange open Core.Render open Core.Io open Core.Time open Core.Sig open Core.Math
-let _ = render "t1" 8000.0 (sample ((sine 220.0) * 0.5) 0s 200ms) ;;
-let _ = render "t2" 8000.0 (sample ((saw 220.0) * 0.5) 0s 200ms) ;;
-let _ = render "t3" 8000.0 (sample ((square 220.0) * 0.5) 0s 200ms) ;;
-let _ = render "t4" 8000.0 (sample ((noise 1000.0) * 0.5) 0s 200ms) ;;
-let _ = render "t5" 8000.0 (sample ((fm 110.0 ((sine 55.0) * 50.0)) * 0.5) 0s 200ms) ;;
-let _ = render "t6" 8000.0 (sample ((reverb 200ms 0.4 0.5 ((sine 330.0) * (exp_decay 10.0)))) 0s 200ms) ;;
+let _ = render "t1" 8000.0 (sample ((sine 220.0) *. 0.5) 0s 200ms) ;;
+let _ = render "t2" 8000.0 (sample ((saw 220.0) *. 0.5) 0s 200ms) ;;
+let _ = render "t3" 8000.0 (sample ((square 220.0) *. 0.5) 0s 200ms) ;;
+let _ = render "t4" 8000.0 (sample ((noise 1000.0) *. 0.5) 0s 200ms) ;;
+let _ = render "t5" 8000.0 (sample ((fm 110.0 ((sine 55.0) *. 50.0)) *. 0.5) 0s 200ms) ;;
+let _ = render "t6" 8000.0 (sample ((reverb 200ms 0.4 0.5 ((sine 330.0) *. (exp_decay 10.0)))) 0s 200ms) ;;
 )");
   tp.write("build.json", projectManifest("many", {"many.synth"}));
   BuildResult r = buildProject(tp.dir.string());
@@ -675,9 +675,9 @@ TEST(build_parallel_matches_serial_output) {
   auto makeProject = [](TempDir& tp) {
     tp.write("p.synth", R"(
 open Core open Core.Osc open Core.Fx open Core.Arrange open Core.Render open Core.Io open Core.Time open Core.Sig open Core.Math
-let voice : Scalar Signal = fm 220.0 ((sine 3.0) * 12.0) ;;
-let _ = render "a" 8000.0 (sample ((lowpass 900.0 voice) * 0.6) 0s 300ms) ;;
-let _ = render "b" 8000.0 (sample ((delay 50ms voice) * 0.4) 0s 300ms) ;;
+let voice : Scalar Signal = fm 220.0 ((sine 3.0) *. 12.0) ;;
+let _ = render "a" 8000.0 (sample ((lowpass 900.0 voice) *. 0.6) 0s 300ms) ;;
+let _ = render "b" 8000.0 (sample ((delay 50ms voice) *. 0.4) 0s 300ms) ;;
 )");
     tp.write("build.json", projectManifest("det", {"p.synth"}));
   };
@@ -698,8 +698,8 @@ TEST(build_watch_uses_incremental_cache) {
   TempDir tp;
   tp.write("w.synth", R"(
 open Core open Core.Osc open Core.Fx open Core.Arrange open Core.Render open Core.Io open Core.Time open Core.Sig open Core.Math
-let _ = render "one" 8000.0 (sample ((sine 440.0) * 0.5) 0s 50ms) ;;
-let _ = render "two" 8000.0 (sample ((saw 110.0) * 0.5) 0s 50ms) ;;
+let _ = render "one" 8000.0 (sample ((sine 440.0) *. 0.5) 0s 50ms) ;;
+let _ = render "two" 8000.0 (sample ((saw 110.0) *. 0.5) 0s 50ms) ;;
 )");
   tp.write("build.json", projectManifest("watchcache", {"w.synth"}));
 
@@ -738,7 +738,7 @@ TEST(build_render_vis_writes_svg_artifact) {
   TempDir tp;
   tp.write("v.synth", R"(
 open Core open Core.Osc open Core.Fx open Core.Arrange open Core.Render open Core.Io open Core.Time open Core.Sig open Core.Math
-let tone : Scalar Signal = (sine 440.0) * (exp_decay 6.0) ;;
+let tone : Scalar Signal = (sine 440.0) *. (exp_decay 6.0) ;;
 let _ = render "tone" 8000.0 (sample tone 0s 500ms) ;;
 let _ = render_vis "tone-wave" 8000.0 (sample tone 0s 500ms) ;;
 )");
@@ -806,7 +806,7 @@ TEST(build_distortion_end_to_end) {
   TempDir tp;
   tp.write("dist.synth", R"(
 open Core open Core.Osc open Core.Fx open Core.Arrange open Core.Render open Core.Io open Core.Time open Core.Sig open Core.Math
-let hot : Scalar Signal = (sine 220.0) * 3.0 ;;
+let hot : Scalar Signal = (sine 220.0) *. 3.0 ;;
 let _ = render "hard" 8000.0 (sample (hard_clip 0.5 hot) 0s 250ms) ;;
 let _ = render "soft" 8000.0 (sample (soft_clip 0.5 hot) 0s 250ms) ;;
 )");
@@ -841,13 +841,13 @@ TEST(build_place_multi_matches_mixed_places) {
   TempDir multi, manual;
   write(multi, R"(
 open Core open Core.Osc open Core.Fx open Core.Arrange open Core.Render open Core.Io open Core.Time open Core.Sig open Core.Math
-let hit : Scalar Sample = sample ((sine 660.0) * (exp_decay 15.0)) 0s 150ms ;;
+let hit : Scalar Sample = sample ((sine 660.0) *. (exp_decay 15.0)) 0s 150ms ;;
 let _ = render "out" 8000.0
   (sample (place_multi hit [0s; 200ms; 400ms]) 0s 700ms) ;;
 )");
   write(manual, R"(
 open Core open Core.Osc open Core.Fx open Core.Arrange open Core.Render open Core.Io open Core.Time open Core.Sig open Core.Math
-let hit : Scalar Sample = sample ((sine 660.0) * (exp_decay 15.0)) 0s 150ms ;;
+let hit : Scalar Sample = sample ((sine 660.0) *. (exp_decay 15.0)) 0s 150ms ;;
 let _ = render "out" 8000.0
   (sample (mix_all [place hit 0s; place hit 200ms; place hit 400ms])
    0s 700ms) ;;
@@ -871,15 +871,15 @@ TEST(build_timestamp_conversions_match_literals) {
   TempDir computed, literal;
   write(computed, R"(
 open Core open Core.Osc open Core.Fx open Core.Arrange open Core.Render open Core.Io open Core.Time open Core.Sig open Core.Math
-let hit : Scalar Sample = sample (sine 660.0 * exp_decay 20.0) 0s (to_ms 200.0) ;;
+let hit : Scalar Sample = sample (sine 660.0 *. exp_decay 20.0) 0s (to_ms 200.0) ;;
 let _ = place_multi hit (time_steps ~start:(to_ms 250.0)
-                                    ~step:(to_min (1.0 / 120.0)) ~count:3)
+                                    ~step:(to_min (1.0 /. 120.0)) ~count:3)
   |> sample ~from:(to_sec 0.0) ~to:(to_sec 2.0)
   |> render ~name:"out" ~rate:8000.0 ;;
 )");
   write(literal, R"(
 open Core open Core.Osc open Core.Fx open Core.Arrange open Core.Render open Core.Io open Core.Time open Core.Sig open Core.Math
-let hit : Scalar Sample = sample (sine 660.0 * exp_decay 20.0) 0s 200ms ;;
+let hit : Scalar Sample = sample (sine 660.0 *. exp_decay 20.0) 0s 200ms ;;
 let _ = place_multi hit (time_steps ~start:250ms ~step:500ms ~count:3)
   |> sample ~from:0s ~to:2s
   |> render ~name:"out" ~rate:8000.0 ;;
@@ -904,17 +904,17 @@ TEST(build_timestamp_arithmetic_matches_literals) {
   TempDir derived, literal;
   write(derived, R"(
 open Core open Core.Osc open Core.Fx open Core.Arrange open Core.Render open Core.Io open Core.Time open Core.Sig open Core.Math
-let beat : Timestamp = to_min (1.0 / 120.0) ;;
-let bar : Timestamp = beat * 4.0 ;;
+let beat : Timestamp = to_min (1.0 /. 120.0) ;;
+let bar : Timestamp = beat *. 4.0 ;;
 let hit : Scalar Sample =
-  sample (sine 660.0 * exp_decay 20.0) 0s (beat / 2.0) ;;
-let _ = place_multi hit (time_steps ~start:(bar - beat) ~step:beat ~count:3)
-  |> sample ~from:0s ~to:(bar + bar)
+  sample (sine 660.0 *. exp_decay 20.0) 0s (beat /. 2.0) ;;
+let _ = place_multi hit (time_steps ~start:(bar -. beat) ~step:beat ~count:3)
+  |> sample ~from:0s ~to:(bar +. bar)
   |> render ~name:"out" ~rate:8000.0 ;;
 )");
   write(literal, R"(
 open Core open Core.Osc open Core.Fx open Core.Arrange open Core.Render open Core.Io open Core.Time open Core.Sig open Core.Math
-let hit : Scalar Sample = sample (sine 660.0 * exp_decay 20.0) 0s 250ms ;;
+let hit : Scalar Sample = sample (sine 660.0 *. exp_decay 20.0) 0s 250ms ;;
 let _ = place_multi hit (time_steps ~start:1500ms ~step:500ms ~count:3)
   |> sample ~from:0s ~to:4s
   |> render ~name:"out" ~rate:8000.0 ;;
@@ -938,14 +938,14 @@ TEST(build_timestamp_subtraction_clamps_at_the_epoch) {
   TempDir clamped, epoch;
   write(clamped, R"(
 open Core open Core.Osc open Core.Fx open Core.Arrange open Core.Render open Core.Io open Core.Time open Core.Sig open Core.Math
-let hit : Scalar Sample = sample (sine 440.0 * exp_decay 12.0) 0s 200ms ;;
-let _ = place hit (100ms - 900ms)
+let hit : Scalar Sample = sample (sine 440.0 *. exp_decay 12.0) 0s 200ms ;;
+let _ = place hit (100ms -. 900ms)
   |> sample ~from:0s ~to:500ms
   |> render ~name:"out" ~rate:8000.0 ;;
 )");
   write(epoch, R"(
 open Core open Core.Osc open Core.Fx open Core.Arrange open Core.Render open Core.Io open Core.Time open Core.Sig open Core.Math
-let hit : Scalar Sample = sample (sine 440.0 * exp_decay 12.0) 0s 200ms ;;
+let hit : Scalar Sample = sample (sine 440.0 *. exp_decay 12.0) 0s 200ms ;;
 let _ = place hit 0s
   |> sample ~from:0s ~to:500ms
   |> render ~name:"out" ~rate:8000.0 ;;
@@ -971,7 +971,7 @@ TEST(build_list_combinators_compute_the_right_values) {
   write(derived, R"(
 open Core open Core.Osc open Core.Fx open Core.Arrange open Core.Render open Core.Io open Core.Time open Core.Sig open Core.Math
 let big : Scalar list =
-  List.filter ~f:(fun x:Scalar -> x > 0.5) ~xs:[0.0; 1.0; 0.25; 2.0; 3.0] ;;
+  List.filter ~f:(fun x:Scalar -> x >. 0.5) ~xs:[0.0; 1.0; 0.25; 2.0; 3.0] ;;
 let n : Int = List.length ~xs:big ;;
 let total : Scalar = List.sum ~xs:big ;;
 let top : Scalar = List.maximum ~xs:big ~least:0.0 ;;
@@ -983,19 +983,19 @@ let doubled : Scalar list =
   List.flat_map ~f:(fun x:Scalar -> [x; x]) ~xs:big ;;
 (* 600 + 30 + 2 + 0 + 3 + 3 + 6 = 644 *)
 let freq : Scalar =
-  total * 100.0 + top * 10.0 + pick + miss + to_scalar n
-    + to_scalar (List.length ~xs:pairs)
-    + to_scalar (List.length ~xs:doubled) ;;
+  total *. 100.0 +. top *. 10.0 +. pick +. miss +. to_scalar n
+    +. to_scalar (List.length ~xs:pairs)
+    +. to_scalar (List.length ~xs:doubled) ;;
 let grid : Timestamp list =
   List.concat ~xss:[List.append ~xs:[0s] ~ys:[250ms];
                     List.rev ~xs:[750ms; 500ms]] ;;
-let hit : Scalar Sample = sample (sine freq * exp_decay 20.0) 0s 100ms ;;
+let hit : Scalar Sample = sample (sine freq *. exp_decay 20.0) 0s 100ms ;;
 let _ = place_multi hit grid
   |> sample ~from:0s ~to:1s |> render ~name:"out" ~rate:8000.0 ;;
 )");
   write(literal, R"(
 open Core open Core.Osc open Core.Fx open Core.Arrange open Core.Render open Core.Io open Core.Time open Core.Sig open Core.Math
-let hit : Scalar Sample = sample (sine 644.0 * exp_decay 20.0) 0s 100ms ;;
+let hit : Scalar Sample = sample (sine 644.0 *. exp_decay 20.0) 0s 100ms ;;
 let _ = place_multi hit [0s; 250ms; 500ms; 750ms]
   |> sample ~from:0s ~to:1s |> render ~name:"out" ~rate:8000.0 ;;
 )");
@@ -1017,25 +1017,25 @@ TEST(build_list_combinators_handle_empty_lists) {
   TempDir tp;
   tp.write("l.synth", R"(
 open Core open Core.Osc open Core.Fx open Core.Arrange open Core.Render open Core.Io open Core.Time open Core.Sig open Core.Math
-let none : Scalar list = List.filter ~f:(fun x:Scalar -> x > 9.0) ~xs:[1.0] ;;
+let none : Scalar list = List.filter ~f:(fun x:Scalar -> x >. 9.0) ~xs:[1.0] ;;
 (* 0 + 0 + (-1) + 0 + 5 + 0 + 0 + 0 + 440 = 444 *)
 let freq : Scalar =
-  to_scalar (List.length ~xs:none) + List.sum ~xs:none
-    + List.nth ~xs:none ~i:0 ~default:(-1.0)
-    + List.nth ~xs:[1.0; 2.0] ~i:(-3) ~default:0.0
-    + List.maximum ~xs:none ~least:5.0
-    + to_scalar (List.length ~xs:(List.rev ~xs:none))
-    + to_scalar (List.length ~xs:(List.concat ~xss:[none; none]))
-    + to_scalar (List.length ~xs:(List.zip ~xs:none ~ys:[1.0]))
-    + 440.0 ;;
-let _ = sine freq * exp_decay 8.0
+  to_scalar (List.length ~xs:none) +. List.sum ~xs:none
+    +. List.nth ~xs:none ~i:0 ~default:(-1.0)
+    +. List.nth ~xs:[1.0; 2.0] ~i:(-3) ~default:0.0
+    +. List.maximum ~xs:none ~least:5.0
+    +. to_scalar (List.length ~xs:(List.rev ~xs:none))
+    +. to_scalar (List.length ~xs:(List.concat ~xss:[none; none]))
+    +. to_scalar (List.length ~xs:(List.zip ~xs:none ~ys:[1.0]))
+    +. 440.0 ;;
+let _ = sine freq *. exp_decay 8.0
   |> sample ~from:0s ~to:200ms |> render ~name:"out" ~rate:8000.0 ;;
 )");
   tp.write("build.json", projectManifest("le", {"l.synth"}));
   TempDir ref;
   ref.write("l.synth", R"(
 open Core open Core.Osc open Core.Fx open Core.Arrange open Core.Render open Core.Io open Core.Time open Core.Sig open Core.Math
-let _ = sine 444.0 * exp_decay 8.0
+let _ = sine 444.0 *. exp_decay 8.0
   |> sample ~from:0s ~to:200ms |> render ~name:"out" ~rate:8000.0 ;;
 )");
   ref.write("build.json", projectManifest("le", {"l.synth"}));
@@ -1088,37 +1088,37 @@ TEST(build_pitch_reference_is_exact_in_every_temperament) {
   // Dividing by raw(ref_step) is what anchors a tuning, so the reference
   // pitch must come back bit-exact no matter which ratios are in play.
   checkPitchClaims(
-      "a440 ~note:a4 == 440.0\n"
-      "  && hz ~t:e ~note:a4 == 440.0\n"
-      "  && hz ~t:j ~note:a4 == 440.0\n"
-      "  && hz ~t:p ~note:a4 == 440.0\n"
-      "  && hz ~t:(et12 ~ref_hz:432.0) ~note:a4 == 432.0\n"
-      "  && step_hz ~t:(et ~n:19 ~ref_hz:440.0 ~ref_step:57) ~step:57 == 440.0");
+      "a440 ~note:a4 ==. 440.0\n"
+      "  && hz ~t:e ~note:a4 ==. 440.0\n"
+      "  && hz ~t:j ~note:a4 ==. 440.0\n"
+      "  && hz ~t:p ~note:a4 ==. 440.0\n"
+      "  && hz ~t:(et12 ~ref_hz:432.0) ~note:a4 ==. 432.0\n"
+      "  && step_hz ~t:(et ~n:19 ~ref_hz:440.0 ~ref_step:57) ~step:57 ==. 440.0");
 }
 
 TEST(build_pitch_equal_temperament_intervals) {
   // Octaves are exact in equal temperament; the tempered third is not a
   // round number, so it is pinned by a band rather than a literal.
   checkPitchClaims(
-      "hz ~t:e ~note:{ pc = A; oct = 3 } == 220.0\n"
-      "  && hz ~t:e ~note:{ pc = A; oct = 5 } == 880.0\n"
-      "  && hz ~t:e ~note:{ pc = A; oct = 0 } == 27.5\n"
-      "  && hz ~t:e ~note:{ pc = C; oct = 5 } > 523.2511\n"
-      "  && hz ~t:e ~note:{ pc = C; oct = 5 } < 523.2512\n"
-      "  && hz ~t:e ~note:{ pc = E; oct = 4 } > 329.6275\n"
-      "  && hz ~t:e ~note:{ pc = E; oct = 4 } < 329.6276");
+      "hz ~t:e ~note:{ pc = A; oct = 3 } ==. 220.0\n"
+      "  && hz ~t:e ~note:{ pc = A; oct = 5 } ==. 880.0\n"
+      "  && hz ~t:e ~note:{ pc = A; oct = 0 } ==. 27.5\n"
+      "  && hz ~t:e ~note:{ pc = C; oct = 5 } >. 523.2511\n"
+      "  && hz ~t:e ~note:{ pc = C; oct = 5 } <. 523.2512\n"
+      "  && hz ~t:e ~note:{ pc = E; oct = 4 } >. 329.6275\n"
+      "  && hz ~t:e ~note:{ pc = E; oct = 4 } <. 329.6276");
 }
 
 TEST(build_pitch_just_intonation_is_rational) {
   // The point of just intonation: the intervals are exact small ratios,
   // which equal temperament can only approximate.
   checkPitchClaims(
-      "hz ~t:j ~note:{ pc = C; oct = 5 } == 528.0\n"
-      "  && hz ~t:j ~note:{ pc = E; oct = 4 } == 330.0\n"
-      "  && hz ~t:j ~note:{ pc = C; oct = 4 } == 264.0\n"
-      "  && hz ~t:j ~note:{ pc = G; oct = 4 } == 396.0\n"
+      "hz ~t:j ~note:{ pc = C; oct = 5 } ==. 528.0\n"
+      "  && hz ~t:j ~note:{ pc = E; oct = 4 } ==. 330.0\n"
+      "  && hz ~t:j ~note:{ pc = C; oct = 4 } ==. 264.0\n"
+      "  && hz ~t:j ~note:{ pc = G; oct = 4 } ==. 396.0\n"
       "  && hz ~t:j ~note:{ pc = G; oct = 4 }\n"
-      "       == hz ~t:j ~note:{ pc = C; oct = 4 } * ratio ~num:3 ~den:2");
+      "       ==. hz ~t:j ~note:{ pc = C; oct = 4 } *. ratio ~num:3 ~den:2");
 }
 
 TEST(build_pitch_temperaments_actually_differ) {
@@ -1129,14 +1129,14 @@ TEST(build_pitch_temperaments_actually_differ) {
   // E4 at exactly 3/4 of the reference, and several just roots agree on
   // C5 - so each claim names a note that genuinely does.
   checkPitchClaims(
-      "hz ~t:j ~note:{ pc = C; oct = 5 } != hz ~t:e ~note:{ pc = C; oct = 5 }\n"
-      "  && hz ~t:p ~note:{ pc = C; oct = 5 } != hz ~t:e ~note:{ pc = C; oct = 5 }\n"
-      "  && hz ~t:p ~note:{ pc = D; oct = 4 } != hz ~t:j ~note:{ pc = D; oct = 4 }\n"
-      "  && hz ~t:p ~note:{ pc = D; oct = 4 } == 880.0 / 3.0\n"
-      "  && hz ~t:j ~note:{ pc = D; oct = 4 } == 297.0\n"
+      "hz ~t:j ~note:{ pc = C; oct = 5 } !=. hz ~t:e ~note:{ pc = C; oct = 5 }\n"
+      "  && hz ~t:p ~note:{ pc = C; oct = 5 } !=. hz ~t:e ~note:{ pc = C; oct = 5 }\n"
+      "  && hz ~t:p ~note:{ pc = D; oct = 4 } !=. hz ~t:j ~note:{ pc = D; oct = 4 }\n"
+      "  && hz ~t:p ~note:{ pc = D; oct = 4 } ==. 880.0 /. 3.0\n"
+      "  && hz ~t:j ~note:{ pc = D; oct = 4 } ==. 297.0\n"
       "  && hz ~t:(just ~root:7 ~ref_hz:440.0) ~note:{ pc = C; oct = 5 }\n"
-      "       != hz ~t:j ~note:{ pc = C; oct = 5 }\n"
-      "  && hz ~t:(just ~root:7 ~ref_hz:440.0) ~note:a4 == 440.0");
+      "       !=. hz ~t:j ~note:{ pc = C; oct = 5 }\n"
+      "  && hz ~t:(just ~root:7 ~ref_hz:440.0) ~note:a4 ==. 440.0");
 }
 
 TEST(build_pitch_steps_round_trip) {
@@ -1156,16 +1156,16 @@ TEST(build_pitch_steps_round_trip) {
 
 TEST(build_pitch_cents_are_temperament_independent) {
   checkPitchClaims(
-      "cents ~n:1200.0 == 2.0\n"
-      "  && cents ~n:0.0 == 1.0\n"
-      "  && cents ~n:(-1200.0) == 0.5\n"
-      "  && detune ~freq:440.0 ~cents:1200.0 == 880.0\n"
-      "  && detune ~freq:440.0 ~cents:0.0 == 440.0\n"
-      "  && to_cents ~ratio:2.0 == 1200.0\n"
-      "  && to_cents ~ratio:1.0 == 0.0\n"
-      "  && ratio ~num:3 ~den:2 == 1.5\n"
-      "  && to_cents ~ratio:(cents ~n:10.4) > 10.39\n"
-      "  && to_cents ~ratio:(cents ~n:10.4) < 10.41");
+      "cents ~n:1200.0 ==. 2.0\n"
+      "  && cents ~n:0.0 ==. 1.0\n"
+      "  && cents ~n:(-1200.0) ==. 0.5\n"
+      "  && detune ~freq:440.0 ~cents:1200.0 ==. 880.0\n"
+      "  && detune ~freq:440.0 ~cents:0.0 ==. 440.0\n"
+      "  && to_cents ~ratio:2.0 ==. 1200.0\n"
+      "  && to_cents ~ratio:1.0 ==. 0.0\n"
+      "  && ratio ~num:3 ~den:2 ==. 1.5\n"
+      "  && to_cents ~ratio:(cents ~n:10.4) >. 10.39\n"
+      "  && to_cents ~ratio:(cents ~n:10.4) <. 10.41");
 }
 
 TEST(build_pitch_supports_non_octave_tunings) {
@@ -1176,10 +1176,10 @@ TEST(build_pitch_supports_non_octave_tunings) {
       "             ratios = List.init ~n:13\n"
       "                        ~f:(fun i:Int ->\n"
       "                              Math.pow ~x:3.0\n"
-      "                                       ~y:(to_scalar i / 13.0));\n"
-      "             octave = 3.0 } ~step:13 == 1320.0\n"
+      "                                       ~y:(to_scalar i /. 13.0));\n"
+      "             octave = 3.0 } ~step:13 ==. 1320.0\n"
       "  && step_hz ~t:{ ref_hz = 440.0; ref_step = 0; root = 0;\n"
-      "                  ratios = []; octave = 2.0 } ~step:99 == 440.0");
+      "                  ratios = []; octave = 2.0 } ~step:99 ==. 440.0");
 }
 
 // Tempo is written in SynthGraph too, so the same trick pins its values:
@@ -1200,7 +1200,7 @@ let same xs:Timestamp list ys:Timestamp list : Bool =
     && List.fold
          ~f:(fun acc:Bool i:Int ->
                acc && List.nth ~xs:xs ~i:i ~default:0s
-                        == List.nth ~xs:ys ~i:i ~default:1s)
+                        ==. List.nth ~xs:ys ~i:i ~default:1s)
          ~init:true
          ~xs:(List.range ~from:0 ~count:(List.length ~xs:xs)) ;;
 let ok : Bool =
@@ -1229,13 +1229,13 @@ TEST(build_tempo_pulse_derives_from_bpm) {
   // Everything hangs off `beat = to_min (1 / bpm)`; 120 and 90 both
   // divide 60 cleanly, so these are exact rather than approximate.
   checkTempoClaims(
-      "beat ~t:t == 500ms\n"
-      "  && bar ~t:t == 2s\n"
-      "  && beats ~t:t ~n:1.5 == 750ms\n"
-      "  && beats ~t:t ~n:0.0 == 0s\n"
-      "  && beats ~t:t ~n:4.0 == bar ~t:t\n"
-      "  && beat ~t:(common ~bpm:60.0) == 1s\n"
-      "  && bar ~t:six8 == 3s");
+      "beat ~t:t ==. 500ms\n"
+      "  && bar ~t:t ==. 2s\n"
+      "  && beats ~t:t ~n:1.5 ==. 750ms\n"
+      "  && beats ~t:t ~n:0.0 ==. 0s\n"
+      "  && beats ~t:t ~n:4.0 ==. bar ~t:t\n"
+      "  && beat ~t:(common ~bpm:60.0) ==. 1s\n"
+      "  && bar ~t:six8 ==. 3s");
 }
 
 TEST(build_tempo_note_values_scale_with_the_meter_unit) {
@@ -1243,15 +1243,15 @@ TEST(build_tempo_note_values_scale_with_the_meter_unit) {
   // so a whole note is eight of them. This is the claim that catches the
   // tempting-but-wrong `whole = 4 beats`.
   checkTempoClaims(
-      "value ~t:t ~v:Quarter == beat ~t:t\n"
-      "  && value ~t:t ~v:Whole == 2s\n"
-      "  && value ~t:t ~v:Half == 1s\n"
-      "  && value ~t:t ~v:Eighth == 250ms\n"
-      "  && value ~t:t ~v:Sixteenth == 125ms\n"
-      "  && value ~t:t ~v:ThirtySecond == 62500us\n"
-      "  && value ~t:six8 ~v:Eighth == beat ~t:six8\n"
-      "  && value ~t:six8 ~v:Whole == 4s\n"
-      "  && value ~t:six8 ~v:Quarter == 1s");
+      "value ~t:t ~v:Quarter ==. beat ~t:t\n"
+      "  && value ~t:t ~v:Whole ==. 2s\n"
+      "  && value ~t:t ~v:Half ==. 1s\n"
+      "  && value ~t:t ~v:Eighth ==. 250ms\n"
+      "  && value ~t:t ~v:Sixteenth ==. 125ms\n"
+      "  && value ~t:t ~v:ThirtySecond ==. 62500us\n"
+      "  && value ~t:six8 ~v:Eighth ==. beat ~t:six8\n"
+      "  && value ~t:six8 ~v:Whole ==. 4s\n"
+      "  && value ~t:six8 ~v:Quarter ==. 1s");
 }
 
 TEST(build_tempo_values_nest) {
@@ -1261,28 +1261,28 @@ TEST(build_tempo_values_nest) {
   // no-op. Pinned against `value Quarter` rather than a decimal so a
   // flipped n/m cannot pass.
   checkTempoClaims(
-      "value ~t:t ~v:(Dotted Quarter) == 750ms\n"
-      "  && value ~t:t ~v:(Dotted (Dotted Quarter)) == 1125ms\n"
+      "value ~t:t ~v:(Dotted Quarter) ==. 750ms\n"
+      "  && value ~t:t ~v:(Dotted (Dotted Quarter)) ==. 1125ms\n"
       "  && value ~t:t ~v:(Dotted Quarter)\n"
-      "       == value ~t:t ~v:Quarter + value ~t:t ~v:Eighth\n"
-      "  && value ~t:t ~v:(Tuplet (3, 2, Eighth)) * 3.0\n"
-      "       == value ~t:t ~v:Quarter\n"
-      "  && value ~t:t ~v:(Tuplet (1, 1, Eighth)) == value ~t:t ~v:Eighth\n"
-      "  && value ~t:t ~v:(Tuplet (3, 2, Quarter)) * 3.0\n"
-      "       == value ~t:t ~v:Half\n"
-      "  && value ~t:six8 ~v:(Dotted Quarter) == bar ~t:six8 / 2.0");
+      "       ==. value ~t:t ~v:Quarter +. value ~t:t ~v:Eighth\n"
+      "  && value ~t:t ~v:(Tuplet (3, 2, Eighth)) *. 3.0\n"
+      "       ==. value ~t:t ~v:Quarter\n"
+      "  && value ~t:t ~v:(Tuplet (1, 1, Eighth)) ==. value ~t:t ~v:Eighth\n"
+      "  && value ~t:t ~v:(Tuplet (3, 2, Quarter)) *. 3.0\n"
+      "       ==. value ~t:t ~v:Half\n"
+      "  && value ~t:six8 ~v:(Dotted Quarter) ==. bar ~t:six8 /. 2.0");
 }
 
 TEST(build_tempo_at_counts_bars_and_beats_from_zero) {
   // `at` is an offset, not a ruler label: bar 0 beat 0 is the origin and
   // the two arguments simply add.
   checkTempoClaims(
-      "at ~t:t ~bar:0 ~beat:0.0 == 0s\n"
-      "  && at ~t:t ~bar:1 ~beat:0.0 == bar ~t:t\n"
-      "  && at ~t:t ~bar:4 ~beat:2.0 == 9s\n"
-      "  && at ~t:t ~bar:0 ~beat:4.0 == at ~t:t ~bar:1 ~beat:0.0\n"
-      "  && at ~t:t ~bar:2 ~beat:1.5 == 4750ms\n"
-      "  && at ~t:six8 ~bar:1 ~beat:0.0 == 3s");
+      "at ~t:t ~bar:0 ~beat:0.0 ==. 0s\n"
+      "  && at ~t:t ~bar:1 ~beat:0.0 ==. bar ~t:t\n"
+      "  && at ~t:t ~bar:4 ~beat:2.0 ==. 9s\n"
+      "  && at ~t:t ~bar:0 ~beat:4.0 ==. at ~t:t ~bar:1 ~beat:0.0\n"
+      "  && at ~t:t ~bar:2 ~beat:1.5 ==. 4750ms\n"
+      "  && at ~t:six8 ~bar:1 ~beat:0.0 ==. 3s");
 }
 
 TEST(build_tempo_grid_matches_the_literals_it_replaces) {
@@ -1296,7 +1296,7 @@ TEST(build_tempo_grid_matches_the_literals_it_replaces) {
       "  && same (grid ~t:t ~from:0s ~step:Quarter ~count:0) []\n"
       "  && List.length ~xs:(grid ~t:t ~from:0s ~step:Whole ~count:3) == 3\n"
       "  && List.nth ~xs:(grid ~t:t ~from:0s ~step:Whole ~count:3) ~i:2\n"
-      "             ~default:0s == 4s");
+      "             ~default:0s ==. 4s");
 }
 
 TEST(build_tempo_swing_displaces_alternate_entries) {
@@ -1311,10 +1311,10 @@ TEST(build_tempo_swing_displaces_alternate_entries) {
       "          [0s; 750ms; 1s; 1750ms]\n"
       "  && same (swing ~amount:0.5 ~step:500ms ~steps:[0s]) [0s]\n"
       "  && same (swing ~amount:0.5 ~step:500ms ~steps:[]) []\n"
-      "  && List.nth ~xs:(swing ~amount:(1.0 / 3.0) ~step:500ms\n"
+      "  && List.nth ~xs:(swing ~amount:(1.0 /. 3.0) ~step:500ms\n"
       "                         ~steps:(grid ~t:t ~from:0s ~step:Quarter\n"
       "                                      ~count:4))\n"
-      "              ~i:1 ~default:0s == 500ms + 500ms / 3.0");
+      "              ~i:1 ~default:0s ==. 500ms +. 500ms /. 3.0");
 }
 
 // Scale trades in Pitch.Note lists, so the claims below compare step
@@ -1466,18 +1466,18 @@ TEST(build_scale_freqs_names_its_temperament) {
   checkScaleClaims(
       "List.nth ~xs:(freqs ~t:(et12 ~ref_hz:440.0)\n"
       "                    ~notes:(triad ~s:amin ~degree:0))\n"
-      "         ~i:0 ~default:0.0 == 220.0\n"
+      "         ~i:0 ~default:0.0 ==. 220.0\n"
       "  && List.length ~xs:(freqs ~t:(et12 ~ref_hz:440.0)\n"
       "                            ~notes:(tones ~c:am)) == 3\n"
       "  && List.nth ~xs:(freqs ~t:(just ~root:0 ~ref_hz:440.0)\n"
       "                         ~notes:(tones ~c:{ root = { pc = C; oct = 4 };\n"
       "                                            quality = Maj }))\n"
       "              ~i:2 ~default:0.0\n"
-      "       == List.nth ~xs:(freqs ~t:(just ~root:0 ~ref_hz:440.0)\n"
+      "       ==. List.nth ~xs:(freqs ~t:(just ~root:0 ~ref_hz:440.0)\n"
       "                              ~notes:(tones ~c:{ root = { pc = C;\n"
       "                                                          oct = 4 };\n"
       "                                                 quality = Maj }))\n"
-      "                   ~i:0 ~default:0.0 * ratio ~num:3 ~den:2");
+      "                   ~i:0 ~default:0.0 *. ratio ~num:3 ~den:2");
 }
 
 // Score is symbolic until `realize`, so most claims compare beat
@@ -1507,7 +1507,7 @@ let vels p:Phrase : Scalar list =
 let stps p:Phrase : Int list =
   List.map ~f:(fun s:Step -> step ~note:s.note) ~xs:p.steps ;;
 let near a:Scalar b:Scalar : Bool =
-  let d : Scalar = a - b in (if d < 0.0 then 0.0 - d else d) < 0.00001 ;;
+  let d : Scalar = a -. b in (if d <. 0.0 then 0.0 -. d else d) <. 0.00001 ;;
 let sameS xs:Scalar list ys:Scalar list : Bool =
   List.length ~xs:xs == List.length ~xs:ys
     && List.fold ~f:(fun acc:Bool i:Int ->
@@ -1598,7 +1598,7 @@ TEST(build_score_edits_are_pure_and_compose) {
       "  && sameI (stps (in_key ~p:(melody ~notes:[{ pc = Cs; oct = 4 }]\n"
       "                                    ~len:1.0) ~s:cmaj)) [48]\n"
       "  && sameS (lens (staccato ~p:m1 ~ratio:0.5)) [0.25; 0.25]\n"
-      "  && sameS (vels (velocity ~p:m1 ~f:(fun v:Scalar -> v * 0.25)))\n"
+      "  && sameS (vels (velocity ~p:m1 ~f:(fun v:Scalar -> v *. 0.25)))\n"
       "           [0.25; 0.25]\n"
       "  (* the original is untouched: every edit is a copy *)\n"
       "  && sameS (ats m1) [0.0; 0.5] && sameS (lens m1) [0.5; 0.5]");
@@ -1620,15 +1620,15 @@ TEST(build_score_dynamics_are_a_decibel_ladder) {
   // eight levels are strictly increasing. The rest is a pow, so it gets
   // a tolerance rather than bit-equality.
   checkScoreClaims(
-      "amp ~l:Fff == 1.0 && db ~x:0.0 == 1.0\n"
+      "amp ~l:Fff ==. 1.0 && db ~x:0.0 ==. 1.0\n"
       "  && near (amp ~l:Piano) 0.1\n"
       "  && near (amp ~l:Mf) 0.251188643\n"
       "  && near (db ~x:20.0) 10.0\n"
       "  && near (db ~x:(-6.0)) 0.501187233\n"
-      "  && amp ~l:Ppp < amp ~l:Pp && amp ~l:Pp < amp ~l:Piano\n"
-      "  && amp ~l:Piano < amp ~l:Mp && amp ~l:Mp < amp ~l:Mf\n"
-      "  && amp ~l:Mf < amp ~l:Forte && amp ~l:Forte < amp ~l:Ff\n"
-      "  && amp ~l:Ff < amp ~l:Fff");
+      "  && amp ~l:Ppp <. amp ~l:Pp && amp ~l:Pp <. amp ~l:Piano\n"
+      "  && amp ~l:Piano <. amp ~l:Mp && amp ~l:Mp <. amp ~l:Mf\n"
+      "  && amp ~l:Mf <. amp ~l:Forte && amp ~l:Forte <. amp ~l:Ff\n"
+      "  && amp ~l:Ff <. amp ~l:Fff");
 }
 
 TEST(build_score_ramp_interpolates_in_decibels) {
@@ -1650,13 +1650,13 @@ TEST(build_score_realize_resolves_tempo_and_tuning) {
   checkScoreClaims(
       "List.nth ~xs:(List.map ~f:(fun e:Event -> e.at)\n"
       "                       ~xs:(realize ~tempo:t ~tuning:tn ~p:l1))\n"
-      "         ~i:1 ~default:0s == 750ms\n"
+      "         ~i:1 ~default:0s ==. 750ms\n"
       "  && List.nth ~xs:(List.map ~f:(fun e:Event -> e.dur)\n"
       "                            ~xs:(realize ~tempo:t ~tuning:tn ~p:l1))\n"
-      "              ~i:0 ~default:0s == 500ms\n"
+      "              ~i:0 ~default:0s ==. 500ms\n"
       "  && List.nth ~xs:(List.map ~f:(fun e:Event -> e.freq)\n"
       "                            ~xs:(realize ~tempo:t ~tuning:tn ~p:l1))\n"
-      "              ~i:0 ~default:0.0 == 440.0\n"
+      "              ~i:0 ~default:0.0 ==. 440.0\n"
       "  && near (List.nth ~xs:(List.map ~f:(fun e:Event -> e.freq)\n"
       "                     ~xs:(realize ~tempo:t ~tuning:(just ~root:0\n"
       "                                                         ~ref_hz:440.0)\n"
@@ -1678,13 +1678,13 @@ TEST(build_resample_identity_matches_the_input) {
   TempDir warped, plain;
   write(warped, R"(
 open Core open Core.Osc open Core.Fx open Core.Arrange open Core.Render open Core.Io open Core.Time open Core.Sig open Core.Math
-let _ = (sine 440.0) * (exp_decay 4.0)
+let _ = (sine 440.0) *. (exp_decay 4.0)
   |> resample ~f:(fun t:Scalar -> 1.0)
   |> sample ~from:0s ~to:300ms |> render ~name:"out" ~rate:8000.0 ;;
 )");
   write(plain, R"(
 open Core open Core.Osc open Core.Fx open Core.Arrange open Core.Render open Core.Io open Core.Time open Core.Sig open Core.Math
-let _ = (sine 440.0) * (exp_decay 4.0)
+let _ = (sine 440.0) *. (exp_decay 4.0)
   |> sample ~from:0s ~to:300ms |> render ~name:"out" ~rate:8000.0 ;;
 )");
   CHECK(buildProject(warped.dir.string()).ok);
@@ -1719,7 +1719,7 @@ TEST(build_place_multi_overlaps_sum) {
 open Core open Core.Osc open Core.Fx open Core.Arrange open Core.Render open Core.Io open Core.Time open Core.Sig open Core.Math
 let level : Scalar Sample = sample (exp_decay 0.0) 0s 200ms ;;
 let _ = render "out" 8000.0
-  (sample ((place_multi level [0s; 100ms]) * 0.4) 0s 400ms) ;;
+  (sample ((place_multi level [0s; 100ms]) *. 0.4) 0s 400ms) ;;
 )");
   tp.write("build.json", projectManifest("overlap", {"o.synth"}));
   BuildResult r = buildProject(tp.dir.string());
@@ -1768,7 +1768,7 @@ TEST(build_place_multi_with_stateful_sample) {
   tp.write("s.synth", R"(
 open Core open Core.Osc open Core.Fx open Core.Arrange open Core.Render open Core.Io open Core.Time open Core.Sig open Core.Math
 let wet : Scalar Sample =
-  sample (reverb 100ms 0.3 0.5 ((sine 440.0) * (exp_decay 30.0))) 0s 150ms ;;
+  sample (reverb 100ms 0.3 0.5 ((sine 440.0) *. (exp_decay 30.0))) 0s 150ms ;;
 let _ = render "out" 8000.0 (sample (place_multi wet [0s; 300ms]) 0s 600ms) ;;
 )");
   tp.write("build.json", projectManifest("statepm", {"s.synth"}));
@@ -1790,14 +1790,14 @@ TEST(build_pipes_and_labels_match_classic_style) {
   classic.write("p.synth", R"(
 open Core open Core.Osc open Core.Fx open Core.Arrange open Core.Render open Core.Io open Core.Time open Core.Sig open Core.Math
 let voice : Scalar Signal =
-  soft_clip 0.8 (lowpass 900.0 ((saw 220.0) * 2.0)) ;;
+  soft_clip 0.8 (lowpass 900.0 ((saw 220.0) *. 2.0)) ;;
 let _ = render "out" 8000.0 (sample voice 0s 300ms) ;;
 )");
   classic.write("build.json", projectManifest("c", {"p.synth"}));
   piped.write("p.synth", R"(
 open Core open Core.Osc open Core.Fx open Core.Arrange open Core.Render open Core.Io open Core.Time open Core.Sig open Core.Math
 let voice : Scalar Signal =
-  saw 220.0 * 2.0 |> lowpass ~cutoff:900.0 |> soft_clip ~threshold:0.8 ;;
+  saw 220.0 *. 2.0 |> lowpass ~cutoff:900.0 |> soft_clip ~threshold:0.8 ;;
 let _ = sample voice ~from:0s ~to:300ms |> render ~name:"out" ~rate:8000.0 ;;
 )");
   piped.write("build.json", projectManifest("p", {"p.synth"}));
@@ -1819,10 +1819,10 @@ TEST(build_labeled_partial_application_evaluates) {
   TempDir tp;
   tp.write("p.synth", R"(
 open Core open Core.Osc open Core.Fx open Core.Arrange open Core.Render open Core.Io open Core.Time open Core.Sig open Core.Math
-let voice ~amp:Scalar ~freq:Scalar : Scalar Signal = (sine freq) * amp ;;
+let voice ~amp:Scalar ~freq:Scalar : Scalar Signal = (sine freq) *. amp ;;
 let quiet : Scalar -> Scalar Signal = voice ~amp:0.25 ;;
 let tones : Scalar Signal list = List.map sine [220.0; 330.0] ;;
-let sum : Scalar Signal = (mix_all tones) * 0.2 + quiet 440.0 ;;
+let sum : Scalar Signal = (mix_all tones) *. 0.2 +. quiet 440.0 ;;
 let _ = render "out" 8000.0 (sample sum 0s 200ms) ;;
 )");
   tp.write("build.json", projectManifest("partial", {"p.synth"}));
@@ -1841,8 +1841,8 @@ TEST(build_list_init_harmonic_stack) {
   tp.write("p.synth", R"(
 open Core open Core.Osc open Core.Fx open Core.Arrange open Core.Render open Core.Io open Core.Time open Core.Sig open Core.Math
 let harmonic i:Int : Scalar Signal =
-  sine (110.0 * (to_scalar i + 1.0)) * (1.0 / (to_scalar i + 1.0)) ;;
-let stack : Scalar Signal = mix_all (List.init 5 harmonic) * 0.3 ;;
+  sine (110.0 *. (to_scalar i +. 1.0)) *. (1.0 /. (to_scalar i +. 1.0)) ;;
+let stack : Scalar Signal = mix_all (List.init 5 harmonic) *. 0.3 ;;
 let _ = stack |> sample ~from:0s ~to:200ms |> render ~name:"out" ~rate:8000.0 ;;
 )");
   tp.write("build.json", projectManifest("li", {"p.synth"}));
@@ -1871,14 +1871,14 @@ TEST(build_time_steps_matches_manual_list) {
   TempDir stepped, manual;
   stepped.write("p.synth", R"(
 open Core open Core.Osc open Core.Fx open Core.Arrange open Core.Render open Core.Io open Core.Time open Core.Sig open Core.Math
-let hit : Scalar Sample = sine 660.0 * exp_decay 20.0 |> sample ~from:0s ~to:100ms ;;
+let hit : Scalar Sample = sine 660.0 *. exp_decay 20.0 |> sample ~from:0s ~to:100ms ;;
 let _ = place_multi hit (time_steps ~start:0s ~step:150ms ~count:4)
         |> sample ~from:0s ~to:600ms |> render ~name:"out" ~rate:8000.0 ;;
 )");
   stepped.write("build.json", projectManifest("ts", {"p.synth"}));
   manual.write("p.synth", R"(
 open Core open Core.Osc open Core.Fx open Core.Arrange open Core.Render open Core.Io open Core.Time open Core.Sig open Core.Math
-let hit : Scalar Sample = sine 660.0 * exp_decay 20.0 |> sample ~from:0s ~to:100ms ;;
+let hit : Scalar Sample = sine 660.0 *. exp_decay 20.0 |> sample ~from:0s ~to:100ms ;;
 let _ = place_multi hit [0s; 150ms; 300ms; 450ms]
         |> sample ~from:0s ~to:600ms |> render ~name:"out" ~rate:8000.0 ;;
 )");
@@ -1895,7 +1895,7 @@ TEST(build_repeat_and_count_validation) {
   TempDir tp;
   tp.write("p.synth", R"(
 open Core open Core.Osc open Core.Fx open Core.Arrange open Core.Render open Core.Io open Core.Time open Core.Sig open Core.Math
-let layers : Scalar Signal = mix_all (List.repeat 3 (sine 220.0)) * 0.2 ;;
+let layers : Scalar Signal = mix_all (List.repeat 3 (sine 220.0)) *. 0.2 ;;
 let _ = layers |> sample ~from:0s ~to:100ms |> render ~name:"out" ~rate:8000.0 ;;
 )");
   tp.write("build.json", projectManifest("rep", {"p.synth"}));
@@ -1944,7 +1944,7 @@ TEST(build_let_in_matches_flat_version) {
   nested.write("p.synth", R"(
 open Core open Core.Osc open Core.Fx open Core.Arrange open Core.Render open Core.Io open Core.Time open Core.Sig open Core.Math
 let song : Scalar Signal =
-  let hit : Scalar Sample = sine 440.0 * exp_decay 12.0
+  let hit : Scalar Sample = sine 440.0 *. exp_decay 12.0
                             |> sample ~from:0s ~to:150ms in
   let beats : Timestamp list = time_steps ~start:0s ~step:200ms ~count:5 in
   place_multi hit beats
@@ -1954,7 +1954,7 @@ let _ = song |> sample ~from:0s ~to:1s |> render ~name:"out" ~rate:8000.0 ;;
   nested.write("build.json", projectManifest("n", {"p.synth"}));
   flat.write("p.synth", R"(
 open Core open Core.Osc open Core.Fx open Core.Arrange open Core.Render open Core.Io open Core.Time open Core.Sig open Core.Math
-let hit : Scalar Sample = sine 440.0 * exp_decay 12.0
+let hit : Scalar Sample = sine 440.0 *. exp_decay 12.0
                           |> sample ~from:0s ~to:150ms ;;
 let beats : Timestamp list = time_steps ~start:0s ~step:200ms ~count:5 ;;
 let song : Scalar Signal = place_multi hit beats ;;
@@ -1982,7 +1982,7 @@ open Core open Core.Osc open Core.Fx open Core.Arrange open Core.Render open Cor
 let gain : Scalar = 0.9 ;;
 let voice : Scalar Signal =
   let gain : Scalar = 0.5 in
-  sine 440.0 * gain
+  sine 440.0 *. gain
 ;;
 let _ = voice |> sample ~from:0s ~to:50ms |> render ~name:"out" ~rate:8000.0 ;;
 )");
@@ -1994,7 +1994,7 @@ open Core open Core.Osc open Core.Fx open Core.Arrange open Core.Render open Cor
 let gain : Scalar = 0.1 ;;
 let voice : Scalar Signal =
   let gain : Scalar = 0.5 in
-  sine 440.0 * gain
+  sine 440.0 *. gain
 ;;
 let _ = voice |> sample ~from:0s ~to:50ms |> render ~name:"out" ~rate:8000.0 ;;
 )");
@@ -2011,7 +2011,7 @@ TEST(build_let_in_function_matches_flat_version) {
 open Core open Core.Osc open Core.Fx open Core.Arrange open Core.Render open Core.Io open Core.Time open Core.Sig open Core.Math
 let song : Scalar Signal =
   let pluck freq:Scalar ~gain:Scalar : Scalar Signal =
-    (sine freq) * (exp_decay 12.0) * gain in
+    (sine freq) *. (exp_decay 12.0) *. gain in
   let hit : Scalar -> Scalar Sample =
     fun f:Scalar -> pluck f ~gain:0.8 |> sample ~from:0s ~to:150ms in
   mix_all [place (hit 440.0) 0s; place (hit 660.0) 300ms]
@@ -2022,7 +2022,7 @@ let _ = song |> sample ~from:0s ~to:600ms |> render ~name:"out" ~rate:8000.0 ;;
   flat.write("p.synth", R"(
 open Core open Core.Osc open Core.Fx open Core.Arrange open Core.Render open Core.Io open Core.Time open Core.Sig open Core.Math
 let pluck freq:Scalar ~gain:Scalar : Scalar Signal =
-  (sine freq) * (exp_decay 12.0) * gain ;;
+  (sine freq) *. (exp_decay 12.0) *. gain ;;
 let hit f:Scalar : Scalar Sample =
   pluck f ~gain:0.8 |> sample ~from:0s ~to:150ms ;;
 let song : Scalar Signal =
@@ -2049,7 +2049,7 @@ TEST(build_let_in_function_captures_enclosing_locals) {
 open Core open Core.Osc open Core.Fx open Core.Arrange open Core.Render open Core.Io open Core.Time open Core.Sig open Core.Math
 let stack detune:Scalar : Scalar Signal =
   let base : Scalar = 220.0 in
-  let partial i:Scalar : Scalar Signal = sine (base + i * detune) in
+  let partial i:Scalar : Scalar Signal = sine (base +. i *. detune) in
   mix_all (List.map partial [0.0; 1.0; 2.0]) ;;
 let _ = stack 3.0 |> sample ~from:0s ~to:200ms
         |> render ~name:"out" ~rate:8000.0 ;;
@@ -2079,7 +2079,7 @@ TEST(build_lambda_place_equivalence) {
   auto write = [](TempDir& tp, const char* song) {
     std::string src = R"(
 open Core open Core.Osc open Core.Fx open Core.Arrange open Core.Render open Core.Io open Core.Time open Core.Sig open Core.Math
-let hit : Scalar Sample = sample ((sine 660.0) * (exp_decay 15.0)) 0s 150ms ;;
+let hit : Scalar Sample = sample ((sine 660.0) *. (exp_decay 15.0)) 0s 150ms ;;
 let song : Scalar Signal = )" + std::string(song) + R"( ;;
 let _ = render "out" 8000.0 (sample song 0s 900ms) ;;
 )";
@@ -2115,7 +2115,7 @@ TEST(build_lambda_captures_local) {
 open Core open Core.Osc open Core.Fx open Core.Arrange open Core.Render open Core.Io open Core.Time open Core.Sig open Core.Math
 let stack detune:Scalar : Scalar Signal =
   let base : Scalar = 220.0 in
-  mix_all (List.map (fun i:Scalar -> sine (base + i * detune)) [0.0; 1.0; 2.0]) ;;
+  mix_all (List.map (fun i:Scalar -> sine (base +. i *. detune)) [0.0; 1.0; 2.0]) ;;
 let _ = stack 3.0 |> sample ~from:0s ~to:200ms
         |> render ~name:"out" ~rate:8000.0 ;;
 )");
@@ -2147,7 +2147,7 @@ open Core open Core.Osc open Core.Fx open Core.Arrange open Core.Render open Cor
 let gain : Scalar = %s ;;
 let level : Scalar = %s ;;
 let voice : Scalar Signal =
-  mix_all (List.map (fun gain:Scalar -> sine (440.0 * gain) * level) [1.0; 2.0]) ;;
+  mix_all (List.map (fun gain:Scalar -> sine (440.0 *. gain) *. level) [1.0; 2.0]) ;;
 let _ = voice |> sample ~from:0s ~to:50ms |> render ~name:"out" ~rate:8000.0 ;;
 )";
   auto src = [&](const char* g, const char* l) {
@@ -2178,7 +2178,7 @@ TEST(build_open_matches_qualified_output) {
   TempDir opened, qualified;
   const char* instr =
       "open Core open Core.Osc open Core.Fx open Core.Arrange open Core.Render open Core.Io open Core.Time open Core.Sig open Core.Math\n"
-      "let tone freq:Scalar : Scalar Signal = sine freq * exp_decay 8.0 ;;\n";
+      "let tone freq:Scalar : Scalar Signal = sine freq *. exp_decay 8.0 ;;\n";
   opened.write("instr.synth", instr);
   opened.write("song.synth",
                "open Core open Core.Osc open Core.Fx open Core.Arrange open Core.Render open Core.Io open Core.Time open Core.Sig open Core.Math\nopen Instr\n"
@@ -2208,7 +2208,7 @@ TEST(build_open_stale_cache_invalidation) {
   TempDir tp;
   auto write = [&](const char* freq) {
     tp.write("instr.synth", std::string("open Core open Core.Osc open Core.Fx open Core.Arrange open Core.Render open Core.Io open Core.Time open Core.Sig open Core.Math\nlet tone : Scalar Signal = sine ") +
-                                freq + " * exp_decay 8.0 ;;\n");
+                                freq + " *. exp_decay 8.0 ;;\n");
   };
   write("440.0");
   tp.write("song.synth",
@@ -2237,7 +2237,7 @@ TEST(build_module_alias_stale_cache_invalidation) {
   TempDir tp;
   auto write = [&](const char* freq) {
     tp.write("instr.synth", std::string("open Core open Core.Osc open Core.Fx open Core.Arrange open Core.Render open Core.Io open Core.Time open Core.Sig open Core.Math\nlet tone : Scalar Signal = sine ") +
-                                freq + " * exp_decay 8.0 ;;\n");
+                                freq + " *. exp_decay 8.0 ;;\n");
   };
   write("440.0");
   tp.write("song.synth",
@@ -2268,7 +2268,7 @@ void writeRootTree(TempTree& tp) {
   tp.write("lib/basic/keys.synth",
            "open Core open Core.Osc open Core.Fx open Core.Arrange open Core.Render open Core.Io open Core.Time open Core.Sig open Core.Math\nimport Internal\n"
            "let strike freq:Scalar : Scalar Signal =\n"
-           "  sine freq * exp_decay 8.0 * Internal.base ;;\n"
+           "  sine freq *. exp_decay 8.0 *. Internal.base ;;\n"
            "let _ = strike 660.0 |> sample ~from:0s ~to:100ms\n"
            "        |> render ~name:\"keys-demo\" ~rate:8000.0 ;;\n");
   tp.write("lib/basic/internal.synth", "open Core open Core.Osc open Core.Fx open Core.Arrange open Core.Render open Core.Io open Core.Time open Core.Sig open Core.Math\nlet base : Scalar = 0.5 ;;\n");
@@ -2369,14 +2369,14 @@ TEST(build_library_interface_reexports_to_consumer) {
   tp.write("lib/fx/lib.synth",
            "open Core open Core.Osc open Core.Fx open Core.Arrange open Core.Render open Core.Io open Core.Time open Core.Sig open Core.Math\nimport Shape\n"
            "module Tone = Shape ;;\n"
-           "let bright freq:Scalar : Scalar Signal = Shape.body freq * 1.5 ;;\n");
+           "let bright freq:Scalar : Scalar Signal = Shape.body freq *. 1.5 ;;\n");
   tp.write("lib/fx/shape.synth",
            "open Core open Core.Osc open Core.Fx open Core.Arrange open Core.Render open Core.Io open Core.Time open Core.Sig open Core.Math\n"
-           "let body freq:Scalar : Scalar Signal = sine freq * exp_decay 8.0 ;;\n");
+           "let body freq:Scalar : Scalar Signal = sine freq *. exp_decay 8.0 ;;\n");
   tp.write("tunes/build.json", projectManifest("tunes", {"song.synth"}, {"Fx"}));
   tp.write("tunes/song.synth",
            "open Core open Core.Osc open Core.Fx open Core.Arrange open Core.Render open Core.Io open Core.Time open Core.Sig open Core.Math\nimport Fx\n"
-           "let _ = (Fx.bright 440.0 + Fx.Tone.body 220.0)\n"
+           "let _ = (Fx.bright 440.0 +. Fx.Tone.body 220.0)\n"
            "        |> sample ~from:0s ~to:100ms\n"
            "        |> render ~name:\"song\" ~rate:8000.0 ;;\n");
   RootBuildResult rr = buildRoot(tp.dir.string(), BuildOptions{});
@@ -2415,7 +2415,7 @@ TEST(build_cross_library_byte_identity) {
   inl.write("song.synth",
             "open Core open Core.Osc open Core.Fx open Core.Arrange open Core.Render open Core.Io open Core.Time open Core.Sig open Core.Math\nlet base : Scalar = 0.5 ;;\n"
             "let strike freq:Scalar : Scalar Signal =\n"
-            "  sine freq * exp_decay 8.0 * base ;;\n"
+            "  sine freq *. exp_decay 8.0 *. base ;;\n"
             "let _ = strike 440.0 |> sample ~from:0s ~to:200ms\n"
             "        |> render ~name:\"song\" ~rate:8000.0 ;;\n");
   inl.write("build.json", projectManifest("inline", {"song.synth"}));
@@ -2490,14 +2490,14 @@ TEST(build_core_qualified_end_to_end) {
                   "import Core\n"
                   "let _ = Core.Render.render \"out\" 8000.0\n"
                   "  (Core.Arrange.sample (Core.Arrange.mix_all (Core.List.init ~n:3\n"
-                  "     ~f:(fun i:Int -> Core.Osc.sine (110.0 * (Core.Math.to_scalar i + 1.0)))))\n"
+                  "     ~f:(fun i:Int -> Core.Osc.sine (110.0 *. (Core.Math.to_scalar i +. 1.0)))))\n"
                   "   0s 300ms) ;;\n");
   qualified.write("build.json", projectManifest("cq", {"q.synth"}));
   opened.write("o.synth",
                "open Core open Core.Osc open Core.Fx open Core.Arrange open Core.Render open Core.Io open Core.Time open Core.Sig open Core.Math\n"
                "let _ = render \"out\" 8000.0\n"
                "  (sample (mix_all (List.init ~n:3\n"
-               "     ~f:(fun i:Int -> sine (110.0 * (to_scalar i + 1.0)))))\n"
+               "     ~f:(fun i:Int -> sine (110.0 *. (to_scalar i +. 1.0)))))\n"
                "   0s 300ms) ;;\n");
   opened.write("build.json", projectManifest("co", {"o.synth"}));
   BuildResult rq = buildProject(qualified.dir.string());
@@ -2515,16 +2515,16 @@ TEST(build_render_stems_produces_named_targets) {
   TempDir stems, solo;
   stems.write("p.synth", R"(
 open Core open Core.Osc open Core.Fx open Core.Arrange open Core.Render open Core.Io open Core.Time open Core.Sig open Core.Math
-let lead : Scalar Sample = sine 440.0 * 0.5 |> sample ~from:0s ~to:200ms ;;
-let bass : Scalar Sample = sine 110.0 * 0.5 |> sample ~from:0s ~to:200ms ;;
+let lead : Scalar Sample = sine 440.0 *. 0.5 |> sample ~from:0s ~to:200ms ;;
+let bass : Scalar Sample = sine 110.0 *. 0.5 |> sample ~from:0s ~to:200ms ;;
 let _ = render_stems ~name:"mix" ~rate:8000.0
                      ~stems:[("lead", lead); ("bass", bass)] ;;
 )");
   stems.write("build.json", projectManifest("st", {"p.synth"}));
   solo.write("p.synth", R"(
 open Core open Core.Osc open Core.Fx open Core.Arrange open Core.Render open Core.Io open Core.Time open Core.Sig open Core.Math
-let lead : Scalar Sample = sine 440.0 * 0.5 |> sample ~from:0s ~to:200ms ;;
-let bass : Scalar Sample = sine 110.0 * 0.5 |> sample ~from:0s ~to:200ms ;;
+let lead : Scalar Sample = sine 440.0 *. 0.5 |> sample ~from:0s ~to:200ms ;;
+let bass : Scalar Sample = sine 110.0 *. 0.5 |> sample ~from:0s ~to:200ms ;;
 let _ = lead |> render ~name:"mix-lead" ~rate:8000.0 ;;
 let _ = bass |> render ~name:"mix-bass" ~rate:8000.0 ;;
 )");
@@ -2565,9 +2565,9 @@ TEST(build_render_vis_stems_single_stacked_svg) {
   TempDir tp;
   tp.write("p.synth", R"(
 open Core open Core.Osc open Core.Fx open Core.Arrange open Core.Render open Core.Io open Core.Time open Core.Sig open Core.Math
-let a : Scalar Sample = sine 440.0 * 0.5 |> sample ~from:0s ~to:200ms ;;
-let b : Scalar Sample = saw 110.0 * 0.5 |> sample ~from:0s ~to:100ms ;;
-let mix : Scalar Sample = sine 440.0 * 0.25 + saw 110.0 * 0.25
+let a : Scalar Sample = sine 440.0 *. 0.5 |> sample ~from:0s ~to:200ms ;;
+let b : Scalar Sample = saw 110.0 *. 0.5 |> sample ~from:0s ~to:100ms ;;
+let mix : Scalar Sample = sine 440.0 *. 0.25 +. saw 110.0 *. 0.25
                           |> sample ~from:0s ~to:200ms ;;
 let _ = render_vis_stems ~name:"stack" ~rate:8000.0
                          ~stems:[("mix", mix); ("lead", a); ("bass", b)] ;;
@@ -2599,7 +2599,7 @@ TEST(build_verbose_log_covers_phases_and_targets) {
   tp.write("p.synth", R"(
 open Core open Core.Osc open Core.Fx open Core.Arrange open Core.Render open Core.Io open Core.Time open Core.Sig open Core.Math
 let base : Scalar Signal = sine 440.0 ;;
-let half : Scalar Signal = base * 0.5 ;;
+let half : Scalar Signal = base *. 0.5 ;;
 let _ = half |> sample ~from:0s ~to:50ms |> render ~name:"one" ~rate:8000.0 ;;
 let _ = base |> sample ~from:0s ~to:50ms |> render ~name:"two" ~rate:8000.0 ;;
 )");
@@ -2677,8 +2677,8 @@ TEST(build_def_graph_stats) {
   tp.write("p.synth", R"(
 open Core open Core.Osc open Core.Fx open Core.Arrange open Core.Render open Core.Io open Core.Time open Core.Sig open Core.Math
 let base : Scalar Signal = sine 440.0 ;;
-let a : Scalar Signal = base * 0.5 ;;
-let b : Scalar Signal = base + a ;;
+let a : Scalar Signal = base *. 0.5 ;;
+let b : Scalar Signal = base +. a ;;
 let _ = b |> sample ~from:0s ~to:10ms |> render ~name:"t" ~rate:8000.0 ;;
 )");
   tp.write("build.json", projectManifest("stats", {"p.synth"}));
@@ -2722,7 +2722,7 @@ TEST(build_jitter_deterministic_and_distinct) {
   // both.
   const char* jittered = R"(
 open Core open Core.Osc open Core.Fx open Core.Arrange open Core.Render open Core.Io open Core.Time open Core.Sig open Core.Math
-let hit : Scalar Sample = sine 660.0 * exp_decay 20.0 |> sample ~from:0s ~to:100ms ;;
+let hit : Scalar Sample = sine 660.0 *. exp_decay 20.0 |> sample ~from:0s ~to:100ms ;;
 let beats : Timestamp list =
   time_steps ~start:100ms ~step:200ms ~count:5 |> jitter ~seed:7.0 ~spread:10ms ;;
 let _ = place_multi hit beats |> sample ~from:0s ~to:1200ms
@@ -2735,7 +2735,7 @@ let _ = place_multi hit beats |> sample ~from:0s ~to:1200ms
   b.write("build.json", projectManifest("jb", {"p.synth"}));
   c.write("p.synth", R"(
 open Core open Core.Osc open Core.Fx open Core.Arrange open Core.Render open Core.Io open Core.Time open Core.Sig open Core.Math
-let hit : Scalar Sample = sine 660.0 * exp_decay 20.0 |> sample ~from:0s ~to:100ms ;;
+let hit : Scalar Sample = sine 660.0 *. exp_decay 20.0 |> sample ~from:0s ~to:100ms ;;
 let beats : Timestamp list =
   time_steps ~start:100ms ~step:200ms ~count:5 |> jitter ~seed:8.0 ~spread:10ms ;;
 let _ = place_multi hit beats |> sample ~from:0s ~to:1200ms
@@ -2744,7 +2744,7 @@ let _ = place_multi hit beats |> sample ~from:0s ~to:1200ms
   c.write("build.json", projectManifest("jc", {"p.synth"}));
   d.write("p.synth", R"(
 open Core open Core.Osc open Core.Fx open Core.Arrange open Core.Render open Core.Io open Core.Time open Core.Sig open Core.Math
-let hit : Scalar Sample = sine 660.0 * exp_decay 20.0 |> sample ~from:0s ~to:100ms ;;
+let hit : Scalar Sample = sine 660.0 *. exp_decay 20.0 |> sample ~from:0s ~to:100ms ;;
 let beats : Timestamp list = time_steps ~start:100ms ~step:200ms ~count:5 ;;
 let _ = place_multi hit beats |> sample ~from:0s ~to:1200ms
         |> render ~name:"out" ~rate:8000.0 ;;
@@ -2795,7 +2795,7 @@ TEST(build_signal_fn_matches_exp_decay) {
   b.write("build.json", projectManifest("b", {"song.synth"}));
   b.write("song.synth",
           "open Core open Core.Osc open Core.Fx open Core.Arrange open Core.Render open Core.Io open Core.Time open Core.Sig open Core.Math\n"
-          "let _ = signal ~f:(fun t:Scalar -> exp (0.0 - 3.0 * t))\n"
+          "let _ = signal ~f:(fun t:Scalar -> exp (0.0 -. 3.0 *. t))\n"
           "        |> sample ~from:0s ~to:200ms\n"
           "        |> render ~name:\"out\" ~rate:8000.0 ;;\n");
   BuildResult rb = buildProject(b.dir.string());
@@ -2867,14 +2867,14 @@ TEST(build_inline_modules_end_to_end_and_cache) {
   const char* src = R"(
 open Core open Core.Osc open Core.Fx open Core.Arrange open Core.Render open Core.Io open Core.Time open Core.Sig open Core.Math
 module Voice = struct
-  let tone freq:Scalar : Scalar Signal = (sine freq) * (exp_decay 6.0) ;;
+  let tone freq:Scalar : Scalar Signal = (sine freq) *. (exp_decay 6.0) ;;
   module Fx = struct
     let damp ~input:'a Signal : 'a Signal = lowpass ~cutoff:900.0 input ;;
   end
 end ;;
 let _ = render "modular" 8000.0
   (sample (Voice.Fx.damp (Voice.tone 440.0)) 0s 100ms) ;;
-let _ = render "standalone" 8000.0 (sample ((saw 220.0) * 0.5) 0s 100ms) ;;
+let _ = render "standalone" 8000.0 (sample ((saw 220.0) *. 0.5) 0s 100ms) ;;
 )";
   tp.write("song.synth", src);
   tp.write("build.json", projectManifest("modtest", {"song.synth"}));
@@ -2914,8 +2914,8 @@ TEST(build_if_selects_render_and_branches_are_lazy) {
   tp.write("song.synth", R"(
 open Core open Core.Osc open Core.Fx open Core.Arrange open Core.Render open Core.Io open Core.Time open Core.Sig open Core.Math
 let tempo : Scalar = 128.0 ;;
-let fast : Bool = tempo >= 120.0 ;;
-let s : Scalar Signal = (sine (if fast then 440.0 else 220.0)) * 0.5 ;;
+let fast : Bool = tempo >=. 120.0 ;;
+let s : Scalar Signal = (sine (if fast then 440.0 else 220.0)) *. 0.5 ;;
 let xs : Scalar list =
   if true then [1.0]
   else List.init (0 - 1) (fun i:Int -> to_scalar i) ;;
@@ -2967,7 +2967,7 @@ let succ a:Scalar : Scalar = external "succ.cpp" ;;
 let halves ~xs:Scalar list : Scalar list = external "succ.cpp" ;;
 let freqs : Scalar list = halves [880.0; 884.0] ;;
 let tone : Scalar Signal =
-  (mix_all (List.map (fun f:Scalar -> sine (succ f)) freqs)) * 0.4 ;;
+  (mix_all (List.map (fun f:Scalar -> sine (succ f)) freqs)) *. 0.4 ;;
 let _ = render "ext" 8000.0 (sample tone 0s 100ms) ;;
 )");
   tp.write("build.json", projectManifest("exttest", {"song.synth"}));
@@ -3053,7 +3053,7 @@ TEST(build_int_arithmetic_matches_literals) {
 open Core open Core.Osc open Core.Fx open Core.Arrange open Core.Render open Core.Io open Core.Time open Core.Sig open Core.Math
 let n : Int = 110 * (7 / 2 + 1) ;;
 let toward_zero : Int = (0 - 7) / 2 ;;
-let freq : Scalar = to_scalar n - to_scalar (toward_zero + 3) ;;
+let freq : Scalar = to_scalar n -. to_scalar (toward_zero + 3) ;;
 let _ = sine freq |> sample ~from:0s ~to:100ms
         |> render ~name:"out" ~rate:8000.0 ;;
 )");
@@ -3127,15 +3127,15 @@ TEST(build_list_init_int_indices_match_manual) {
   built.write("p.synth", R"(
 open Core open Core.Osc open Core.Fx open Core.Arrange open Core.Render open Core.Io open Core.Time open Core.Sig open Core.Math
 let stack : Scalar Signal =
-  mix_all (List.init 3 (fun i:Int -> sine (110.0 * to_scalar (i + 1)))) ;;
-let _ = stack * 0.3 |> sample ~from:0s ~to:100ms
+  mix_all (List.init 3 (fun i:Int -> sine (110.0 *. to_scalar (i + 1)))) ;;
+let _ = stack *. 0.3 |> sample ~from:0s ~to:100ms
         |> render ~name:"out" ~rate:8000.0 ;;
 )");
   built.write("build.json", projectManifest("ii", {"p.synth"}));
   manual.write("p.synth", R"(
 open Core open Core.Osc open Core.Fx open Core.Arrange open Core.Render open Core.Io open Core.Time open Core.Sig open Core.Math
 let stack : Scalar Signal = mix_all [sine 110.0; sine 220.0; sine 330.0] ;;
-let _ = stack * 0.3 |> sample ~from:0s ~to:100ms
+let _ = stack *. 0.3 |> sample ~from:0s ~to:100ms
         |> render ~name:"out" ~rate:8000.0 ;;
 )");
   manual.write("build.json", projectManifest("im", {"p.synth"}));
@@ -3165,7 +3165,7 @@ SYNTH_EXTERNAL(twice) {
 open Core open Core.Osc open Core.Fx open Core.Arrange open Core.Render open Core.Io open Core.Time open Core.Sig open Core.Math
 let twice n:Int : Int = external "twice.cpp" ;;
 let layers : Scalar Signal =
-  mix_all (List.repeat (twice 2) (sine 220.0)) * 0.1 ;;
+  mix_all (List.repeat (twice 2) (sine 220.0)) *. 0.1 ;;
 let _ = layers |> sample ~from:0s ~to:100ms
         |> render ~name:"out" ~rate:8000.0 ;;
 )");
@@ -3189,7 +3189,7 @@ open Core open Core.Osc open Core.Fx open Core.Arrange open Core.Render
 type Voice = { osc : Scalar Signal; vel : Scalar } ;;
 let v : Voice = { osc = sine 440.0; vel = 0.5 } ;;
 let quiet : Voice = { v with vel = 0.25 } ;;
-let mixed : Scalar Signal = v.osc * v.vel + quiet.osc * quiet.vel ;;
+let mixed : Scalar Signal = v.osc *. v.vel +. quiet.osc *. quiet.vel ;;
 let _ = render "rec" 48000.0 (sample mixed 0s 100ms) ;;
 )");
   tp.write("build.json", projectManifest("rec-demo", {"song.synth"}));
@@ -3215,7 +3215,7 @@ TEST(build_record_through_external_boundary) {
 open Core open Core.Osc open Core.Arrange open Core.Render
 type Voice = { osc : Scalar Signal; vel : Scalar } ;;
 let mk f:Scalar : Voice = { osc = sine f; vel = 0.5 } ;;
-let flatten v:Voice : Scalar Signal = v.osc * v.vel ;;
+let flatten v:Voice : Scalar Signal = v.osc *. v.vel ;;
 let voices : Voice list = List.map ~f:mk ~xs:[220.0; 440.0] ;;
 let out : Scalar Signal = mix_all (List.map ~f:flatten ~xs:voices) ;;
 let _ = render "vox" 48000.0 (sample out 0s 50ms) ;;
@@ -3269,8 +3269,8 @@ type Wave = | Sine | Pulse of Scalar ;;
 let osc w:Wave ~freq:Scalar : Scalar Signal =
   match w with
   | Sine -> sine ~freq:freq
-  | Pulse duty -> square ~freq:freq * duty ;;
-let out : Scalar Signal = osc Sine ~freq:440.0 + osc (Pulse 0.25) ~freq:220.0 ;;
+  | Pulse duty -> square ~freq:freq *. duty ;;
+let out : Scalar Signal = osc Sine ~freq:440.0 +. osc (Pulse 0.25) ~freq:220.0 ;;
 let _ = render "waves" 48000.0 (sample out 0s 50ms) ;;
 )");
   tp.write("build.json", projectManifest("waves-demo", {"song.synth"}));
@@ -3311,7 +3311,7 @@ let waves : Wave list = List.map ~f:(fun d:Scalar -> Pulse d) ~xs:[0.25; 0.5] ;;
 let toSig w:Wave : Scalar Signal =
   match w with
   | Sine -> sine 440.0
-  | Pulse d -> square ~freq:110.0 * d ;;
+  | Pulse d -> square ~freq:110.0 *. d ;;
 let out : Scalar Signal = mix_all (List.map ~f:toSig ~xs:waves) ;;
 let _ = render "vw" 48000.0 (sample out 0s 20ms) ;;
 )");
@@ -3329,7 +3329,7 @@ open Core open Core.Osc open Core.Arrange open Core.Render
 type Env = { freq : Scalar; gain : Scalar } ;;
 let e : Env = { freq = 440.0; gain = 0.5 } ;;
 let out : Scalar Signal =
-  let { freq; gain = g } : Env = e in sine freq * g ;;
+  let { freq; gain = g } : Env = e in sine freq *. g ;;
 let _ = render "de" 48000.0 (sample out 0s 10ms) ;;
 )");
   tp.write("build.json", projectManifest("de-demo", {"song.synth"}));
@@ -3348,13 +3348,13 @@ type Chain = | End | Link of (Scalar, Chain) ;;
 let rec total c:Chain : Scalar =
   match c with
   | End -> 0.0
-  | Link (x, rest) -> x + total rest ;;
+  | Link (x, rest) -> x +. total rest ;;
 let gain : Scalar =
   let rec go n:Int ~acc:Scalar : Scalar =
-    if n <= 0 then acc else go (n - 1) ~acc:(acc / 2.0) in
+    if n <= 0 then acc else go (n - 1) ~acc:(acc /. 2.0) in
   go (fact 3) ~acc:32.0 ;;
 let t : Scalar = total (Link (0.125, Link (0.125, End))) ;;
-let out : Scalar Signal = sine 440.0 * (gain / 2.0 + t) ;;
+let out : Scalar Signal = sine 440.0 *. (gain /. 2.0 +. t) ;;
 let _ = render "rec" 48000.0 (sample out 0s 10ms) ;;
 )");
   tp.write("build.json", projectManifest("rec-demo", {"song.synth"}));
@@ -3451,19 +3451,19 @@ open Core open Core.Osc open Core.Arrange open Core.Render open Core.Time open C
 let rec sum xs:Scalar list : Scalar =
   match xs with
   | Nil -> 0.0
-  | Cons (x, rest) -> x + sum rest ;;
-let doubled : Scalar list = List.map ~f:(fun x:Scalar -> x * 2.0) ~xs:[1.0; 2.0; 3.0] ;;
+  | Cons (x, rest) -> x +. sum rest ;;
+let doubled : Scalar list = List.map ~f:(fun x:Scalar -> x *. 2.0) ~xs:[1.0; 2.0; 3.0] ;;
 let total : Scalar = sum doubled ;;
-let folded : Scalar = List.fold ~f:(fun a:Scalar x:Scalar -> a + x) ~init:0.0 ~xs:doubled ;;
+let folded : Scalar = List.fold ~f:(fun a:Scalar x:Scalar -> a +. x) ~init:0.0 ~xs:doubled ;;
 let harmonics : Scalar Signal list =
-  List.init ~n:3 ~f:(fun i:Int -> sine (110.0 * (to_scalar i + 1.0))) ;;
+  List.init ~n:3 ~f:(fun i:Int -> sine (110.0 *. (to_scalar i +. 1.0))) ;;
 let steps : Timestamp list = time_steps ~start:0s ~step:100ms ~count:3 ;;
 let first_step : Timestamp =
   match steps with
   | Nil -> 0s
   | Cons (t, _) -> t ;;
-let amp : Scalar = (total + folded) / 24.0 ;;
-let out : Scalar Signal = mix_all harmonics * amp ;;
+let amp : Scalar = (total +. folded) /. 24.0 ;;
+let out : Scalar Signal = mix_all harmonics *. amp ;;
 let _ = render "lists" 48000.0 (sample out first_step 50ms) ;;
 )");
   tp.write("build.json", projectManifest("lists-demo", {"song.synth"}));
@@ -3592,11 +3592,11 @@ let got : Timestamp =
   List.nth ~xs:(jitter ~seed:5.0 ~spread:(to_sec 0.1) ~steps:[1s]) ~i:0
            ~default:0s ;;
 )",
-              R"(got == to_sec (1.0 + (u0 * 2.0 - 1.0) * 0.1)
-  && u0 >= 0.0 && u0 < 1.0 && u1 >= 0.0 && u1 < 1.0
-  && u0 != u1
-  && hash ~seed:5.0 ~i:0 == u0
-  && hash ~seed:6.0 ~i:0 != u0)");
+              R"(got ==. to_sec (1.0 +. (u0 *. 2.0 -. 1.0) *. 0.1)
+  && u0 >=. 0.0 && u0 <. 1.0 && u1 >=. 0.0 && u1 <. 1.0
+  && u0 !=. u1
+  && hash ~seed:5.0 ~i:0 ==. u0
+  && hash ~seed:6.0 ~i:0 !=. u0)");
 }
 
 TEST(build_time_div_rem_values) {
@@ -3605,9 +3605,9 @@ open Core open Core.Time
 )",
               R"(div ~num:1s ~den:250ms == 4
   && div ~num:(to_sec 0.9) ~den:250ms == 3
-  && rem ~num:(to_sec 0.9) ~den:250ms == to_sec (0.9 - 0.25 * 3.0)
+  && rem ~num:(to_sec 0.9) ~den:250ms ==. to_sec (0.9 -. 0.25 *. 3.0)
   && div ~num:0s ~den:1s == 0
-  && rem ~num:1s ~den:250ms == 0s)");
+  && rem ~num:1s ~den:250ms ==. 0s)");
 }
 
 TEST(build_time_div_by_zero_is_a_diagnostic) {
@@ -3645,36 +3645,36 @@ let nth_t xs:Timestamp list i:Int : Timestamp =
               R"(per_bar ~t:t ~v:Sixteenth == 16
   && per_bar ~t:t ~v:Quarter == 4
   && per_bar ~t:c68 ~v:(Dotted Quarter) == 2
-  && bars ~t:t ~n:2.5 == bar ~t:t * 2.5
-  && bar_beats ~t:t ~n:8 == 32.0
+  && bars ~t:t ~n:2.5 ==. bar ~t:t *. 2.5
+  && bar_beats ~t:t ~n:8 ==. 32.0
   && List.length ~xs:lm == 4
-  && nth_t lm 0 == 0s
-  && nth_t lm 1 == at ~t:t ~bar:8 ~beat:0.0
-  && nth_t lm 2 == at ~t:t ~bar:16 ~beat:0.0
-  && nth_t lm 3 == at ~t:t ~bar:28 ~beat:0.0
-  && nth_t sg 1 == nth_t byhand 1
-  && nth_t sg 2 == nth_t byhand 2
-  && nth_t sg 7 == nth_t byhand 7)");
+  && nth_t lm 0 ==. 0s
+  && nth_t lm 1 ==. at ~t:t ~bar:8 ~beat:0.0
+  && nth_t lm 2 ==. at ~t:t ~bar:16 ~beat:0.0
+  && nth_t lm 3 ==. at ~t:t ~bar:28 ~beat:0.0
+  && nth_t sg 1 ==. nth_t byhand 1
+  && nth_t sg 2 ==. nth_t byhand 2
+  && nth_t sg 7 ==. nth_t byhand 7)");
 }
 
 TEST(build_groove_pattern_matches_place_multi) {
   const char* derived = R"(
 open Core open Core.Osc open Core.Fx open Core.Arrange open Core.Render open Core.Time
-let hit : Scalar Sample = sample (sine 440.0 * exp_decay 20.0) 0s 100ms ;;
+let hit : Scalar Sample = sample (sine 440.0 *. exp_decay 20.0) 0s 100ms ;;
 let steps : Timestamp list = time_steps ~start:0s ~step:250ms ~count:4 ;;
 let a : Scalar Signal = Groove.pattern ~hit:hit ~steps:steps ;;
 let b : Scalar Signal =
   Groove.humanized ~hit:hit ~steps:steps ~seed:3.0 ~spread:10ms ;;
-let _ = a + b |> sample ~from:0s ~to:2s |> render ~name:"out" ~rate:8000.0 ;;
+let _ = a +. b |> sample ~from:0s ~to:2s |> render ~name:"out" ~rate:8000.0 ;;
 )";
   const char* literal = R"(
 open Core open Core.Osc open Core.Fx open Core.Arrange open Core.Render open Core.Time
-let hit : Scalar Sample = sample (sine 440.0 * exp_decay 20.0) 0s 100ms ;;
+let hit : Scalar Sample = sample (sine 440.0 *. exp_decay 20.0) 0s 100ms ;;
 let steps : Timestamp list = time_steps ~start:0s ~step:250ms ~count:4 ;;
 let a : Scalar Signal = place_multi hit steps ;;
 let b : Scalar Signal =
   place_multi hit (jitter ~seed:3.0 ~spread:10ms ~steps:steps) ;;
-let _ = a + b |> sample ~from:0s ~to:2s |> render ~name:"out" ~rate:8000.0 ;;
+let _ = a +. b |> sample ~from:0s ~to:2s |> render ~name:"out" ~rate:8000.0 ;;
 )";
   checkSameBytes(derived, literal, "out.wav");
 }
@@ -3691,16 +3691,16 @@ let nth_t xs:Timestamp list i:Int : Timestamp =
   List.nth ~xs:xs ~i:i ~default:99s ;;
 )",
               R"(List.length ~xs:row == 4
-  && nth_t row 0 == nth_t g8 0
-  && nth_t row 1 == nth_t g8 3
-  && nth_t row 2 == nth_t g8 4
-  && nth_t row 3 == nth_t g8 7
+  && nth_t row 0 ==. nth_t g8 0
+  && nth_t row 1 ==. nth_t g8 3
+  && nth_t row 2 ==. nth_t g8 4
+  && nth_t row 3 ==. nth_t g8 7
   && List.length ~xs:e == 5
-  && nth_t e 0 == nth_t g16 0
-  && nth_t e 1 == nth_t g16 4
-  && nth_t e 2 == nth_t g16 7
-  && nth_t e 3 == nth_t g16 10
-  && nth_t e 4 == nth_t g16 13
+  && nth_t e 0 ==. nth_t g16 0
+  && nth_t e 1 ==. nth_t g16 4
+  && nth_t e 2 ==. nth_t g16 7
+  && nth_t e 3 ==. nth_t g16 10
+  && nth_t e 4 ==. nth_t g16 13
   && List.length ~xs:(Groove.euclid ~hits:0 ~steps:g8) == 0
   && List.length ~xs:(Groove.euclid ~hits:9 ~steps:g8) == 8
   && List.length ~xs:(Groove.mask ~keep:[] ~steps:g8) == 8)");
@@ -3760,22 +3760,22 @@ let ev es:Event list i:Int : Event =
   List.nth ~xs:es ~i:i ~default:edflt ;;
 let u1 : Scalar = Core.Math.hash ~seed:9.0 ~i:1 ;;
 )",
-              R"(span ~p:d == 2.0
+              R"(span ~p:d ==. 2.0
   && Pitch.step ~note:(stp d 0).note == 0
-  && (stp pat 2).at == 1.5 && (stp pat 2).len == 2.0
-  && (stp accented 0).vel == 1.0 && (stp accented 1).vel == 0.5
-  && (stp accented 2).vel == 1.0
-  && (stp rising 0).vel == amp ~l:Piano
-  && (stp rising 3).vel == amp ~l:Fff
-  && (stp loose 1).at == 0.5 + (u1 * 2.0 - 1.0) * 0.05
-  && (stp shuffled 0).at == 0.0
-  && (stp shuffled 1).at == 0.5 + 0.5 * 0.2
-  && (stp shuffled 2).at == 1.0
-  && (stp shuffled 3).at == 1.5 + 0.5 * 0.2
-  && (ev blue 0).freq == 440.0
-  && (ev plain 0).freq == 220.0
-  && (ev plain 1).at == beats ~t:t ~n:1.0
-  && (ev plain 2).dur == beats ~t:t ~n:2.0)");
+  && (stp pat 2).at ==. 1.5 && (stp pat 2).len ==. 2.0
+  && (stp accented 0).vel ==. 1.0 && (stp accented 1).vel ==. 0.5
+  && (stp accented 2).vel ==. 1.0
+  && (stp rising 0).vel ==. amp ~l:Piano
+  && (stp rising 3).vel ==. amp ~l:Fff
+  && (stp loose 1).at ==. 0.5 +. (u1 *. 2.0 -. 1.0) *. 0.05
+  && (stp shuffled 0).at ==. 0.0
+  && (stp shuffled 1).at ==. 0.5 +. 0.5 *. 0.2
+  && (stp shuffled 2).at ==. 1.0
+  && (stp shuffled 3).at ==. 1.5 +. 0.5 *. 0.2
+  && (ev blue 0).freq ==. 440.0
+  && (ev plain 0).freq ==. 220.0
+  && (ev plain 1).at ==. beats ~t:t ~n:1.0
+  && (ev plain 2).dur ==. beats ~t:t ~n:2.0)");
 }
 
 TEST(build_realize_stays_sugar_for_realize_with) {
@@ -3787,7 +3787,7 @@ let tune : Tuning = et12 ~ref_hz:440.0 ;;
 let p : Phrase = melody ~notes:[{ pc = A; oct = 4 }; { pc = E; oct = 4 }]
                         ~len:1.0 ;;
 let voice freq:Scalar dur:Timestamp vel:Scalar : Scalar Sample =
-  sine freq * vel |> sample ~from:0s ~to:dur ;;
+  sine freq *. vel |> sample ~from:0s ~to:dur ;;
 let _ = play ~voice:voice ~events:(realize ~tempo:t ~tuning:tune ~p:p)
   |> sample ~from:0s ~to:2s |> render ~name:"out" ~rate:8000.0 ;;
 )";
@@ -3799,7 +3799,7 @@ let tune : Tuning = et12 ~ref_hz:440.0 ;;
 let p : Phrase = melody ~notes:[{ pc = A; oct = 4 }; { pc = E; oct = 4 }]
                         ~len:1.0 ;;
 let voice freq:Scalar dur:Timestamp vel:Scalar : Scalar Sample =
-  sine freq * vel |> sample ~from:0s ~to:dur ;;
+  sine freq *. vel |> sample ~from:0s ~to:dur ;;
 let _ = play ~voice:voice
              ~events:(realize_with ~tempo:t ~pitch:(hz ~t:tune) ~p:p)
   |> sample ~from:0s ~to:2s |> render ~name:"out" ~rate:8000.0 ;;
@@ -3810,26 +3810,26 @@ let _ = play ~voice:voice
 TEST(build_fx_sugar_matches_hand_rolled) {
   const char* derived = R"(
 open Core open Core.Osc open Core.Fx open Core.Arrange open Core.Render
-let x : Scalar Signal = sine 330.0 * exp_decay 4.0 ;;
+let x : Scalar Signal = sine 330.0 *. exp_decay 4.0 ;;
 let e : Scalar Signal = echoes ~by:100ms ~gain:0.5 ~n:2 ~input:x ;;
 let v : Scalar Sample =
   gated ~attack:3ms ~decay:110ms ~sustain:0.5 ~release:60ms ~hold:400ms
         ~input:(sine 220.0) ;;
-let _ = e + place v 1s
+let _ = e +. place v 1s
   |> sample ~from:0s ~to:2s |> render ~name:"out" ~rate:8000.0 ;;
 )";
   const char* literal = R"(
 open Core open Core.Osc open Core.Fx open Core.Arrange open Core.Render
-let x : Scalar Signal = sine 330.0 * exp_decay 4.0 ;;
+let x : Scalar Signal = sine 330.0 *. exp_decay 4.0 ;;
 let e : Scalar Signal =
   mix_all [x;
-           delay ~by:100ms ~signal:x * 0.5;
-           delay ~by:200ms ~signal:x * 0.25] ;;
+           delay ~by:100ms ~signal:x *. 0.5;
+           delay ~by:200ms ~signal:x *. 0.25] ;;
 let v : Scalar Sample =
-  sine 220.0 * adsr ~attack:3ms ~decay:110ms ~sustain:0.5 ~release:60ms
+  sine 220.0 *. adsr ~attack:3ms ~decay:110ms ~sustain:0.5 ~release:60ms
                     ~hold:400ms
     |> sample ~from:0s ~to:460ms ;;
-let _ = e + place v 1s
+let _ = e +. place v 1s
   |> sample ~from:0s ~to:2s |> render ~name:"out" ~rate:8000.0 ;;
 )";
   checkSameBytes(derived, literal, "out.wav");
@@ -3838,8 +3838,8 @@ let _ = e + place v 1s
 TEST(build_mix_matches_hand_rolled) {
   const char* derived = R"(
 open Core open Core.Osc open Core.Fx open Core.Arrange open Core.Render open Core.Time
-let a : Scalar Signal = sine 220.0 * exp_decay 1.0 ;;
-let b : Scalar Signal = sine 331.0 * exp_decay 2.0 ;;
+let a : Scalar Signal = sine 220.0 *. exp_decay 1.0 ;;
+let b : Scalar Signal = sine 331.0 *. exp_decay 2.0 ;;
 let wide : Vector Signal = Mix.pan ~pos:0.4 ~input:a ;;
 let bus : Vector Signal =
   Mix.mix ~parts:[(Mix.db (-6.0), wide);
@@ -3852,22 +3852,22 @@ let _ = out |> sample ~from:0s ~to:1s |> render ~name:"out" ~rate:8000.0 ;;
   const char* literal = R"(
 open Core open Core.Osc open Core.Fx open Core.Arrange open Core.Render open Core.Time
 open Core.Math
-let a : Scalar Signal = sine 220.0 * exp_decay 1.0 ;;
-let b : Scalar Signal = sine 331.0 * exp_decay 2.0 ;;
+let a : Scalar Signal = sine 220.0 *. exp_decay 1.0 ;;
+let b : Scalar Signal = sine 331.0 *. exp_decay 2.0 ;;
 let wide : Vector Signal =
-  channels [a * sqrt ((1.0 - 0.4) * 0.5); a * sqrt ((1.0 + 0.4) * 0.5)] ;;
+  channels [a *. sqrt ((1.0 -. 0.4) *. 0.5); a *. sqrt ((1.0 +. 0.4) *. 0.5)] ;;
 let narrow : Vector Signal =
-  channels [b * sqrt ((1.0 - (-0.5)) * 0.5);
-            b * sqrt ((1.0 + (-0.5)) * 0.5)] ;;
+  channels [b *. sqrt ((1.0 -. (-0.5)) *. 0.5);
+            b *. sqrt ((1.0 +. (-0.5)) *. 0.5)] ;;
 let bus : Vector Signal =
-  mix_all [wide * Score.db ~x:(-6.0); narrow * 0.25] ;;
+  mix_all [wide *. Score.db ~x:(-6.0); narrow *. 0.25] ;;
 let dips : Scalar Signal =
   place_multi (adsr ~attack:0s ~decay:0s ~sustain:1.0 ~release:200ms
                     ~hold:60ms
                  |> sample ~from:0s ~to:260ms)
               [0s; 500ms] ;;
 let out : Vector Signal =
-  bus * Score.db ~x:(-2.0) * (1.0 - dips * 0.6) ;;
+  bus *. Score.db ~x:(-2.0) *. (1.0 -. dips *. 0.6) ;;
 let _ = out |> sample ~from:0s ~to:1s |> render ~name:"out" ~rate:8000.0 ;;
 )";
   checkSameBytes(derived, literal, "out.wav");
@@ -3895,7 +3895,7 @@ let _ = lowpass ~cutoff:800.0 ~input:x
 open Core open Core.Osc open Core.Fx open Core.Sig open Core.Arrange
 open Core.Render
 let riser : Scalar Signal =
-  resonant ~cutoff:(constant 100.0 + time * 900.0) ~q:4.0
+  resonant ~cutoff:(constant 100.0 +. time *. 900.0) ~q:4.0
            ~input:(saw 55.0) ;;
 let env : Scalar Signal = follow ~attack:5ms ~release:50ms ~input:riser ;;
 let gated2 : Scalar Signal =
@@ -3942,7 +3942,7 @@ let x : Scalar Signal =
 open Core open Core.Osc open Core.Fx open Core.Arrange
 let x : Scalar Signal =
   follow ~attack:5ms ~release:50ms
-         ~input:(channels [sine 220.0; sine 330.0] * 1.0) ;;
+         ~input:(channels [sine 220.0; sine 330.0] *. 1.0) ;;
 )",
               "follow");
   expectError(R"(
@@ -3958,7 +3958,7 @@ TEST(build_str_iter_renders_computed_names) {
   tp.write("s.synth", R"(
 open Core open Core.Osc open Core.Fx open Core.Arrange open Core.Render
 let section i:Int : Scalar Sample =
-  sine (220.0 + Core.Math.to_scalar i * 110.0) * exp_decay 8.0
+  sine (220.0 +. Core.Math.to_scalar i *. 110.0) *. exp_decay 8.0
     |> sample ~from:0s ~to:200ms ;;
 let _ = List.iter
   ~f:(fun i:Int ->
@@ -3981,14 +3981,14 @@ TEST(build_dsp_prelude_matches_classic_opens) {
   const char* viaDsp = R"(
 open Core
 open Core.Dsp
-let pluck freq:Scalar : Scalar Signal = sine freq * exp_decay 6.0 ;;
+let pluck freq:Scalar : Scalar Signal = sine freq *. exp_decay 6.0 ;;
 let win : Scalar Sample = sample (pluck 440.0) 0s 800ms ;;
 let _ = mix_all [place win 0s; place win 500ms]
   |> sample ~from:0s ~to:2s |> render ~name:"out" ~rate:8000.0 ;;
 )";
   const char* classic = R"(
 open Core open Core.Osc open Core.Fx open Core.Arrange open Core.Render open Core.Io open Core.Time open Core.Sig open Core.Math
-let pluck freq:Scalar : Scalar Signal = sine freq * exp_decay 6.0 ;;
+let pluck freq:Scalar : Scalar Signal = sine freq *. exp_decay 6.0 ;;
 let win : Scalar Sample = sample (pluck 440.0) 0s 800ms ;;
 let _ = mix_all [place win 0s; place win 500ms]
   |> sample ~from:0s ~to:2s |> render ~name:"out" ~rate:8000.0 ;;
@@ -3999,8 +3999,8 @@ let _ = mix_all [place win 0s; place win 500ms]
 TEST(build_local_inference_matches_annotated) {
   const char* inferred = R"(
 open Core open Core.Osc open Core.Fx open Core.Arrange open Core.Render
-let freq = 220.0 * 2.0 ;;
-let pluck f:Scalar = sine f * exp_decay 6.0 ;;
+let freq = 220.0 *. 2.0 ;;
+let pluck f:Scalar = sine f *. exp_decay 6.0 ;;
 let song =
   let win = sample (pluck freq) 0s 800ms in
   mix_all [place win 0s; place win 500ms] ;;
@@ -4008,8 +4008,8 @@ let _ = render "out" 8000.0 (sample song 0s 2s) ;;
 )";
   const char* annotated = R"(
 open Core open Core.Osc open Core.Fx open Core.Arrange open Core.Render
-let freq : Scalar = 220.0 * 2.0 ;;
-let pluck f:Scalar : Scalar Signal = sine f * exp_decay 6.0 ;;
+let freq : Scalar = 220.0 *. 2.0 ;;
+let pluck f:Scalar : Scalar Signal = sine f *. exp_decay 6.0 ;;
 let song : Scalar Signal =
   let win : Scalar Sample = sample (pluck freq) 0s 800ms in
   mix_all [place win 0s; place win 500ms] ;;
@@ -4022,13 +4022,13 @@ TEST(build_broadcast_row_fades_a_stereo_bus) {
   const char* broadcast = R"(
 open Core open Core.Osc open Core.Fx open Core.Arrange open Core.Render
 let bus : Vector Signal = channels [sine 220.0; sine 331.0] ;;
-let out : Vector Signal = bus * exp_decay 2.0 ;;
+let out : Vector Signal = bus *. exp_decay 2.0 ;;
 let _ = out |> sample ~from:0s ~to:1s |> render ~name:"out" ~rate:8000.0 ;;
 )";
   const char* perChannel = R"(
 open Core open Core.Osc open Core.Fx open Core.Arrange open Core.Render
 let env : Scalar Signal = exp_decay 2.0 ;;
-let out : Vector Signal = channels [sine 220.0 * env; sine 331.0 * env] ;;
+let out : Vector Signal = channels [sine 220.0 *. env; sine 331.0 *. env] ;;
 let _ = out |> sample ~from:0s ~to:1s |> render ~name:"out" ~rate:8000.0 ;;
 )";
   checkSameBytes(broadcast, perChannel, "out.wav");

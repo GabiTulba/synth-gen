@@ -58,7 +58,7 @@ open Core.Scale
    start below is written this way - a landmark plus a segment, a bar
    (`dur Whole`) or a beat - so nothing here has to be recomputed when
    the tempo changes. *)
-let on section:Timestamp n:Int : Timestamp = section + Timing.seg n ;;
+let on section:Timestamp n:Int : Timestamp = section +. Timing.seg n ;;
 
 (* ---------- what things play ---------- *)
 (* Every pitch in the arrangement is a position in `Harmony.prog` -
@@ -111,7 +111,7 @@ let kick_line : Scalar Signal =
            (* the last bar gallops at double time, on the offbeats *)
            Groove.humanized ~hit:Drums.kick_hit
              ~steps:(Timing.grid
-                       ~from:(on Timing.drop3 3 + Timing.dur Eighth)
+                       ~from:(on Timing.drop3 3 +. Timing.dur Eighth)
                        ~step:Eighth ~count:(2 * Timing.eighths - 1))
              ~seed:47.0 ~spread:3ms]
 ;;
@@ -122,12 +122,12 @@ let snare_line : Scalar Signal =
      after the drop hit. *)
   let roll ~before:Timestamp ~seed:Scalar : Scalar Signal =
     Groove.humanized ~hit:Drums.snare_hit
-      ~steps:(Timing.grid ~from:(before - Timing.dur Whole) ~step:Eighth
+      ~steps:(Timing.grid ~from:(before -. Timing.dur Whole) ~step:Eighth
                           ~count:6)
       ~seed:seed ~spread:4ms in
   let backbeat ~start:Timestamp ~bars:Int ~seed:Scalar : Scalar Signal =
     Groove.humanized ~hit:Drums.snare_hit
-      ~steps:(Timing.grid ~from:(start + Timing.dur Quarter) ~step:Half
+      ~steps:(Timing.grid ~from:(start +. Timing.dur Quarter) ~step:Half
                           ~count:(bars * Timing.halves))
       ~seed:seed ~spread:5ms in
   mix_all [roll ~before:Timing.drop1 ~seed:31.0;
@@ -152,7 +152,7 @@ let hat_line : Scalar Signal =
       ~steps:(Timing.grid ~from:start ~step:Quarter
                           ~count:(bars * Timing.quarters))
       ~seed:seed ~spread:8ms in
-  let off ~at:Timestamp : Timestamp = at + Timing.dur Eighth in
+  let off ~at:Timestamp : Timestamp = at +. Timing.dur Eighth in
   mix_all [eighths ~start:Timing.build ~bars:8 ~seed:21.0;
            quarters ~start:(off ~at:Timing.drop1) ~bars:8 ~seed:22.0;
            eighths ~start:(off ~at:Timing.drop2) ~bars:12 ~seed:23.0;
@@ -174,7 +174,7 @@ let alarm_line : Scalar Signal =
                    ~steps:(Timing.grid ~from:at ~step:Half
                                        ~count:(7 * Timing.halves)) in
   let dry : Scalar Signal =
-    blink Timing.intro + blink (Timing.dur Quarter) * 0.45 in
+    blink Timing.intro +. blink (Timing.dur Quarter) *. 0.45 in
   echoes ~by:(Timing.dur Eighth) ~gain:0.3 ~n:1 ~input:dry
 ;;
 
@@ -214,8 +214,8 @@ let bass_line : Scalar Signal =
                             ~count:(2 * Timing.quarters))
         ~seed:seed ~spread:5ms in
     quarters ~at:(on from n) ~freq:(bass_note n) ~seed:seed
-    + quarters ~at:(on from n + Timing.dur Eighth)
-               ~freq:(bass_note n * 2.0) ~seed:(seed + 0.5) in
+    +. quarters ~at:(on from n +. Timing.dur Eighth)
+               ~freq:(bass_note n *. 2.0) ~seed:(seed +. 0.5) in
   (* A section that walks all four chords of the cycle in order. *)
   let cycle ~f:(Int -> Scalar Signal) : Scalar Signal =
     mix_all (List.init ~n:4 ~f:f) in
@@ -228,17 +228,17 @@ let bass_line : Scalar Signal =
                         (* the last segment stops two eighths short:
                            that silence is the gap the drop lands in *)
                         ~less:(if n < 3 then 0 else 2)
-                        ~seed:(1.0 + Math.to_scalar n)) in
+                        ~seed:(1.0 +. Math.to_scalar n)) in
   let drop1 : Scalar Signal =
     cycle ~f:(fun n:Int ->
                 pump ~from:Timing.drop1 ~n:n
-                     ~seed:(5.0 + Math.to_scalar n)) in
+                     ~seed:(5.0 +. Math.to_scalar n)) in
   let breakdown : Scalar Signal =
     cycle ~f:(fun n:Int -> held ~from:Timing.breakdown ~n:n) in
   (* Six segments - the cycle plus its first two again - and the two
      ends of the drop are the sixteenth bursts. *)
   let drop2 : Scalar Signal =
-    let seed n:Int : Scalar = 9.0 + Math.to_scalar n in
+    let seed n:Int : Scalar = 9.0 +. Math.to_scalar n in
     mix_all [sixteenths ~from:Timing.drop2 ~n:0 ~seed:(seed 0);
              pump ~from:Timing.drop2 ~n:1 ~seed:(seed 1);
              pump ~from:Timing.drop2 ~n:2 ~seed:(seed 2);
@@ -251,9 +251,9 @@ let bass_line : Scalar Signal =
     mix_all [held ~from:Timing.tolling ~n:0;
              Bass.held (bass_note 1) |> place ~at:(on Timing.tolling 1);
              Bass.held (bass_note 3)
-               |> place ~at:(on Timing.tolling 1 + Timing.dur Whole)] in
+               |> place ~at:(on Timing.tolling 1 +. Timing.dur Whole)] in
   let drop3 : Scalar Signal =
-    let seed n:Int : Scalar = 15.0 + Math.to_scalar n in
+    let seed n:Int : Scalar = 15.0 +. Math.to_scalar n in
     mix_all [sixteenths ~from:Timing.drop3 ~n:0 ~seed:(seed 0);
              pump ~from:Timing.drop3 ~n:1 ~seed:(seed 1);
              pump ~from:Timing.drop3 ~n:2 ~seed:(seed 2);
@@ -278,7 +278,7 @@ let pad_line detune:Scalar : Scalar Signal =
                  ~steps:(Time.time_steps ~start:Timing.intro
                                          ~step:(Timing.seg 4)
                                          ~count:7)
-  + (one_cycle |> place ~at:Timing.outro) * 0.5
+  +. (one_cycle |> place ~at:Timing.outro) *. 0.5
 ;;
 
 (* ---------- distorted guitar (drops only) ---------- *)
@@ -296,9 +296,9 @@ let chug_part : Scalar Signal =
     mix_all (List.init ~n:segs
                ~f:(fun n:Int ->
                      chugs ~from:from ~n:n
-                           ~seed:(seed + Math.to_scalar n))) in
+                           ~seed:(seed +. Math.to_scalar n))) in
   across ~from:Timing.drop2 ~segs:6 ~seed:61.0
-  + across ~from:Timing.drop3 ~segs:4 ~seed:67.0
+  +. across ~from:Timing.drop3 ~segs:4 ~seed:67.0
 ;;
 
 (* Lead runs: four syncopated notes at the tail of each chord segment
@@ -314,14 +314,14 @@ let stab_part : Scalar Signal =
      timing, instead of four literals per line that have to agree. *)
   let run ~d1:Int ~d2:Int ~d3:Int ~from:Timestamp ~n:Int ~seed:Scalar
       : Scalar Signal =
-    let beat b:Scalar : Timestamp = on from n + Timing.beats b in
+    let beat b:Scalar : Timestamp = on from n +. Timing.beats b in
     let stab d:Int : Scalar Sample = Guitar.stab (lead_note d) in
     Groove.humanized ~hit:(stab d1) ~steps:[beat 5.0]
                      ~seed:seed ~spread:6ms
-    + Groove.humanized ~hit:(stab d2) ~steps:[beat 6.0; beat 7.0]
-                       ~seed:(seed + 0.3) ~spread:6ms
-    + Groove.humanized ~hit:(stab d3) ~steps:[beat 6.5]
-                       ~seed:(seed + 0.7) ~spread:6ms in
+    +. Groove.humanized ~hit:(stab d2) ~steps:[beat 6.0; beat 7.0]
+                       ~seed:(seed +. 0.3) ~spread:6ms
+    +. Groove.humanized ~hit:(stab d3) ~steps:[beat 6.5]
+                       ~seed:(seed +. 0.7) ~spread:6ms in
   let d2 : Timestamp = Timing.drop2 in
   let d3 : Timestamp = Timing.drop3 in
   mix_all [run ~d1:4 ~d2:2 ~d3:0 ~from:d2 ~n:0 ~seed:71.0;
@@ -351,10 +351,10 @@ let bell_part : Scalar Signal =
     mix_all (List.init ~n:4
                ~f:(fun i:Int ->
                      toll (bell_note i)
-                          ~at:(from + step * Math.to_scalar i))) in
+                          ~at:(from +. step *. Math.to_scalar i))) in
   let foreshadow : Scalar Signal =
     toll (bell_note 0) ~at:Timing.breakdown
-    + toll (bell_note 3) ~at:(on Timing.breakdown 2) in
+    +. toll (bell_note 3) ~at:(on Timing.breakdown 2) in
   let tolling : Scalar Signal =
     peal ~from:Timing.tolling ~step:(Timing.dur Whole) in
   let drop3 : Scalar Signal =
@@ -362,9 +362,9 @@ let bell_part : Scalar Signal =
   let outro : Scalar Signal =
     (* the last toll drops an octave, to the register the chugs sat in *)
     toll (bell_note 0) ~at:Timing.outro
-    + toll (bell_note 0) ~at:(on Timing.outro 1) * 0.6
-    + toll (chug_note 0)
-           ~at:(on Timing.outro 1 + Timing.dur Whole) * 0.45 in
+    +. toll (bell_note 0) ~at:(on Timing.outro 1) *. 0.6
+    +. toll (chug_note 0)
+           ~at:(on Timing.outro 1 +. Timing.dur Whole) *. 0.45 in
   Mix.mix ~parts:[(0.5, foreshadow); (0.75, tolling); (0.55, drop3);
                   (0.7, outro)]
 ;;
@@ -378,16 +378,16 @@ let chain_part : Scalar Signal =
   let tolling : Scalar Signal =
     Groove.pattern ~hit:Fx.chain_shake
                    ~steps:(List.map ~f:(fun b:Scalar ->
-                                          Timing.tolling + Timing.beats b)
+                                          Timing.tolling +. Timing.beats b)
                                     ~xs:[2.0; 6.0; 11.0; 14.0]) in
   let drop3 : Scalar Signal =
     Groove.pattern ~hit:Fx.chain_shake
                    ~steps:(Timing.grid
-                             ~from:(Timing.drop3 + Timing.dur Eighth)
+                             ~from:(Timing.drop3 +. Timing.dur Eighth)
                              ~step:Whole ~count:8) in
   let outro : Scalar Signal =
     let dying : Scalar Signal =
-      Fx.chain_shake |> place ~at:(Timing.outro + Timing.beats 1.0) in
+      Fx.chain_shake |> place ~at:(Timing.outro +. Timing.beats 1.0) in
     echoes ~by:700ms ~gain:0.5 ~n:2 ~input:dying in
   Mix.mix ~parts:[(0.5, tolling); (0.7, drop3); (0.4, outro)]
 ;;
@@ -398,45 +398,45 @@ let fx_line : Scalar Signal =
      placed by working back from the landmark and from its own length -
      a Sample is a record, so `to - from` is how long it runs. *)
   let riser_before at:Timestamp : Timestamp =
-    at - Timing.dur Quarter - (Fx.riser.to - Fx.riser.from) in
+    at -. Timing.dur Quarter -. (Fx.riser.to -. Fx.riser.from) in
   (* The first riser is gentler - the drums entrance it announces is the
      mildest arrival of the song. *)
-  (Fx.riser |> place ~at:(riser_before Timing.build)) * 0.55
-  + Groove.pattern ~hit:Fx.riser
+  (Fx.riser |> place ~at:(riser_before Timing.build)) *. 0.55
+  +. Groove.pattern ~hit:Fx.riser
       ~steps:(List.map ~f:riser_before
                        ~xs:[Timing.drop1; Timing.drop2; Timing.drop3])
-  + Groove.pattern ~hit:Fx.impact
+  +. Groove.pattern ~hit:Fx.impact
       ~steps:[Timing.drop1; Timing.drop2; Timing.tolling; Timing.drop3;
               Timing.outro]
 ;;
 
 (* ---------- stereo buses & master ---------- *)
 let drum_bus : Vector Signal =
-  channels [drum_line * 0.62; drum_line * 0.62] ;;
+  channels [drum_line *. 0.62; drum_line *. 0.62] ;;
 let bass_bus : Vector Signal =
-  channels [bass_line * 0.55; bass_line * 0.55] ;;
+  channels [bass_line *. 0.55; bass_line *. 0.55] ;;
 let pad_bus : Vector Signal =
-  channels [pad_line 0.8 * 0.38; pad_line 1.3 * 0.38] ;;
+  channels [pad_line 0.8 *. 0.38; pad_line 1.3 *. 0.38] ;;
 let guitar_bus : Vector Signal =
-  channels [chug_part * 0.62 + stab_part * 0.38;
-            chug_part * 0.44 + stab_part * 0.55] ;;
+  channels [chug_part *. 0.62 +. stab_part *. 0.38;
+            chug_part *. 0.44 +. stab_part *. 0.55] ;;
 (* Bells lean right, chains lean left, alarm slightly left; the
    Doppler whooshes cross the field in each breakdown and - quieter -
    over the long outro. *)
 let fx_bus : Vector Signal =
-  channels [fx_line * 0.5 + alarm_line * 0.4 + bell_part * 0.3
-              + chain_part * 0.42;
-            fx_line * 0.5 + alarm_line * 0.28 + bell_part * 0.42
-              + chain_part * 0.3]
-  + (Fx.doppler_whoosh
-       |> place ~at:(Timing.breakdown + Timing.beats 12.0)) * 0.55
-  + (Fx.doppler_whoosh
-       |> place ~at:(Timing.tolling + Timing.beats 2.0)) * 0.6
-  + (Fx.doppler_whoosh
-       |> place ~at:(Timing.outro + Timing.beats 11.0)) * 0.4 ;;
+  channels [fx_line *. 0.5 +. alarm_line *. 0.4 +. bell_part *. 0.3
+              +. chain_part *. 0.42;
+            fx_line *. 0.5 +. alarm_line *. 0.28 +. bell_part *. 0.42
+              +. chain_part *. 0.3]
+  +. (Fx.doppler_whoosh
+       |> place ~at:(Timing.breakdown +. Timing.beats 12.0)) *. 0.55
+  +. (Fx.doppler_whoosh
+       |> place ~at:(Timing.tolling +. Timing.beats 2.0)) *. 0.6
+  +. (Fx.doppler_whoosh
+       |> place ~at:(Timing.outro +. Timing.beats 11.0)) *. 0.4 ;;
 
 let master : Vector Signal =
-  pad_bus + drum_bus + bass_bus + guitar_bus + fx_bus
+  pad_bus +. drum_bus +. bass_bus +. guitar_bus +. fx_bus
     |> soft_clip ~threshold:0.9
 ;;
 

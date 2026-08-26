@@ -21,7 +21,7 @@ open Core.Sig
 open Core.Math
 
 let shape rate:Scalar : Scalar Signal =
-  pm ~carrier:rate ~modulator:(constant (pi / 2.0)) ;;
+  pm ~carrier:rate ~modulator:(constant (pi /. 2.0)) ;;
 
 (* A saw as a stack of six Doppler-swept FM partials: harmonic n at
    base*n with amplitude 1/n, each deviating by `depth` of its own
@@ -33,20 +33,20 @@ let swept_saw ~base:Scalar ~rate:Scalar ~depth:Scalar ~gain:Scalar
   let rec partials i:Int : Scalar Signal list =
     if i >= 6 then Nil
     else
-      let n : Scalar = to_scalar i + 1.0 in
+      let n : Scalar = to_scalar i +. 1.0 in
       let partial : Scalar Signal =
-        (fm ~carrier:(base * n) ~modulator:(shape rate * (base * n * depth)))
-          * (1.0 / n) in
+        (fm ~carrier:(base *. n) ~modulator:(shape rate *. (base *. n *. depth)))
+          *. (1.0 /. n) in
       Cons (partial, partials (i + 1)) in
-  mix_all (partials 0) * gain
+  mix_all (partials 0) *. gain
 ;;
 
 let proximity rate:Scalar : Scalar Signal =
-  (constant 1.0 - shape rate * shape rate) * 0.85 + 0.15
+  (constant 1.0 -. shape rate *. shape rate) *. 0.85 +. 0.15
 ;;
 
 (* shape runs +1 -> -1 over the pass and pan positions run -1 (left) to
    +1 (right), so the position is the shape negated. *)
 let pan src:Scalar Signal rate:Scalar : Vector Signal =
-  Mix.pan_sig ~pos:(shape rate * (-1.0)) ~input:src
+  Mix.pan_sig ~pos:(shape rate *. (-1.0)) ~input:src
 ;;

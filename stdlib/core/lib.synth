@@ -48,11 +48,11 @@ module Math = struct
      function would poison every expression it appears in. *)
   let pi : Scalar = 3.14159265358979312 ;;
   (* The four-line functions everyone writes inline. *)
-  let min ~a:Scalar ~b:Scalar : Scalar = if a < b then a else b ;;
-  let max ~a:Scalar ~b:Scalar : Scalar = if a > b then a else b ;;
+  let min ~a:Scalar ~b:Scalar : Scalar = if a <. b then a else b ;;
+  let max ~a:Scalar ~b:Scalar : Scalar = if a >. b then a else b ;;
   let clamp ~lo:Scalar ~hi:Scalar ~x:Scalar : Scalar =
-    if x < lo then lo else if x > hi then hi else x ;;
-  let lerp ~a:Scalar ~b:Scalar ~t:Scalar : Scalar = a + (b - a) * t ;;
+    if x <. lo then lo else if x >. hi then hi else x ;;
+  let lerp ~a:Scalar ~b:Scalar ~t:Scalar : Scalar = a +. (b -. a) *. t ;;
   (* Value-level randomness: jitter's splitmix64 exposed as a value.
      A pure, platform-stable function of (seed, index), uniform in
      [0, 1) - determinism and cacheability fully preserved. jitter IS
@@ -187,9 +187,9 @@ module List = struct
   let range ~from:Int ~count:Int : Int list =
     init ~n:count ~f:(fun i:Int -> from + i) ;;
   let sum ~xs:Scalar list : Scalar =
-    fold ~f:(fun acc:Scalar x:Scalar -> acc + x) ~init:0.0 ~xs:xs ;;
+    fold ~f:(fun acc:Scalar x:Scalar -> acc +. x) ~init:0.0 ~xs:xs ;;
   let maximum ~xs:Scalar list ~least:Scalar : Scalar =
-    fold ~f:(fun acc:Scalar x:Scalar -> if x > acc then x else acc)
+    fold ~f:(fun acc:Scalar x:Scalar -> if x >. acc then x else acc)
          ~init:least ~xs:xs ;;
   (* Iterate an effectful function (renders) over a list. The one List
      function that cannot be written in the language: `unit` has no
@@ -323,11 +323,11 @@ module Fx = struct
       ~release:Timestamp ~hold:Timestamp ~input:Scalar Signal
       : Scalar Sample =
     let body : Timestamp =
-      if hold > attack + decay then hold else attack + decay in
+      if hold >. attack +. decay then hold else attack +. decay in
     Arrange.sample
-      ~signal:(input * adsr ~attack:attack ~decay:decay ~sustain:sustain
+      ~signal:(input *. adsr ~attack:attack ~decay:decay ~sustain:sustain
                             ~release:release ~hold:hold)
-      ~from:0s ~to:(body + release) ;;
+      ~from:0s ~to:(body +. release) ;;
   (* Feedforward echo stack: input + sum of delay(by*i) * gain^i for
      i in 1..n - the hand-unrolled dry + delay*g + delay^2*g^2 pattern. *)
   let echoes ~by:Timestamp ~gain:Scalar ~n:Int ~input:'a Signal
@@ -337,9 +337,9 @@ module Fx = struct
                       List.init
                         ~n:n
                         ~f:(fun i:Int ->
-                              delay ~by:(by * Math.to_scalar (i + 1))
+                              delay ~by:(by *. Math.to_scalar (i + 1))
                                     ~signal:input
-                                * Math.pow ~x:gain
+                                *. Math.pow ~x:gain
                                            ~y:(Math.to_scalar (i + 1))))) ;;
 end ;;
 
@@ -470,7 +470,7 @@ module Pitch = struct
   (* Math.floor is a true floor (toward -inf), so octaves below C0 come
      back out correctly: of_step (-1) is B at octave -1. *)
   let of_step ~step:Int : Note =
-    let oct : Int = Math.floor ~x:(Math.to_scalar step / 12.0) in
+    let oct : Int = Math.floor ~x:(Math.to_scalar step /. 12.0) in
     { pc = List.nth ~xs:[C; Cs; D; Ds; E; F; Fs; G; Gs; A; As; B]
                     ~i:(step - oct * 12) ~default:C;
       oct = oct } ;;
@@ -482,7 +482,7 @@ module Pitch = struct
      - the voicing ~count:1 + nth idiom, named. *)
   let wrap_to ~note:Note ~low:Note : Note =
     let d : Int = step ~note:note - step ~note:low in
-    let o : Int = Math.floor ~x:(Math.to_scalar d / 12.0) in
+    let o : Int = Math.floor ~x:(Math.to_scalar d /. 12.0) in
     shift ~note:note ~by:(0 - 12 * o) ;;
 
   (* --- Temperaments ---------------------------------------------------
@@ -494,22 +494,22 @@ module Pitch = struct
       ratios = List.init ~n:n
                  ~f:(fun i:Int ->
                        Math.pow ~x:2.0
-                                ~y:(Math.to_scalar i / Math.to_scalar n));
+                                ~y:(Math.to_scalar i /. Math.to_scalar n));
       octave = 2.0 } ;;
   let et12 ~ref_hz:Scalar : Tuning = et ~n:12 ~ref_hz:ref_hz ~ref_step:57 ;;
   (* 5-limit just intonation, and 3-limit Pythagorean: the ratios every
      step of the octave sits at, relative to `root`. *)
   let just ~root:Int ~ref_hz:Scalar : Tuning =
     { ref_hz = ref_hz; ref_step = 57; root = root;
-      ratios = [1.0; 16.0 / 15.0; 9.0 / 8.0; 6.0 / 5.0; 5.0 / 4.0;
-                4.0 / 3.0; 45.0 / 32.0; 3.0 / 2.0; 8.0 / 5.0; 5.0 / 3.0;
-                9.0 / 5.0; 15.0 / 8.0];
+      ratios = [1.0; 16.0 /. 15.0; 9.0 /. 8.0; 6.0 /. 5.0; 5.0 /. 4.0;
+                4.0 /. 3.0; 45.0 /. 32.0; 3.0 /. 2.0; 8.0 /. 5.0; 5.0 /. 3.0;
+                9.0 /. 5.0; 15.0 /. 8.0];
       octave = 2.0 } ;;
   let pyth ~root:Int ~ref_hz:Scalar : Tuning =
     { ref_hz = ref_hz; ref_step = 57; root = root;
-      ratios = [1.0; 256.0 / 243.0; 9.0 / 8.0; 32.0 / 27.0; 81.0 / 64.0;
-                4.0 / 3.0; 729.0 / 512.0; 3.0 / 2.0; 128.0 / 81.0;
-                27.0 / 16.0; 16.0 / 9.0; 243.0 / 128.0];
+      ratios = [1.0; 256.0 /. 243.0; 9.0 /. 8.0; 32.0 /. 27.0; 81.0 /. 64.0;
+                4.0 /. 3.0; 729.0 /. 512.0; 3.0 /. 2.0; 128.0 /. 81.0;
+                27.0 /. 16.0; 16.0 /. 9.0; 243.0 /. 128.0];
       octave = 2.0 } ;;
 
   (* --- Pitch to frequency ---------------------------------------------
@@ -527,10 +527,10 @@ module Pitch = struct
     else
       let raw s:Int : Scalar =
         let o : Int =
-          Math.floor ~x:(Math.to_scalar (s - t.root) / Math.to_scalar n) in
+          Math.floor ~x:(Math.to_scalar (s - t.root) /. Math.to_scalar n) in
         List.nth ~xs:t.ratios ~i:(s - t.root - n * o) ~default:1.0
-          * Math.pow ~x:t.octave ~y:(Math.to_scalar o) in
-      t.ref_hz * raw step / raw t.ref_step ;;
+          *. Math.pow ~x:t.octave ~y:(Math.to_scalar o) in
+      t.ref_hz *. raw step /. raw t.ref_step ;;
   (* `t` comes first so a tuning partially applies:
      `let p : Note -> Scalar = hz ~t:(just ~root:0 ~ref_hz:440.0)`. *)
   let hz ~t:Tuning ~note:Note : Scalar =
@@ -540,13 +540,13 @@ module Pitch = struct
   (* --- Cents: continuous, and the same in every temperament ------------
      A Note is discrete and temperament-relative; cents are neither, so
      they act on frequencies rather than on notes. *)
-  let cents ~n:Scalar : Scalar = Math.pow ~x:2.0 ~y:(n / 1200.0) ;;
+  let cents ~n:Scalar : Scalar = Math.pow ~x:2.0 ~y:(n /. 1200.0) ;;
   let detune ~freq:Scalar ~cents:Scalar : Scalar =
-    freq * Math.pow ~x:2.0 ~y:(cents / 1200.0) ;;
+    freq *. Math.pow ~x:2.0 ~y:(cents /. 1200.0) ;;
   let to_cents ~ratio:Scalar : Scalar =
-    1200.0 * Math.log ~x:ratio / Math.log ~x:2.0 ;;
+    1200.0 *. Math.log ~x:ratio /. Math.log ~x:2.0 ;;
   let ratio ~num:Int ~den:Int : Scalar =
-    Math.to_scalar num / Math.to_scalar den ;;
+    Math.to_scalar num /. Math.to_scalar den ;;
 end ;;
 
 (* --- Tempo: meters, note values and the beat grid - written in
@@ -578,12 +578,12 @@ module Tempo = struct
   (* --- The pulse ------------------------------------------------------
      `t` comes first throughout, as it does in Pitch.hz, so a tempo
      partially applies and leaves the call sites alone. *)
-  let beat ~t:Tempo : Timestamp = Time.to_min ~x:(1.0 / t.bpm) ;;
-  let beats ~t:Tempo ~n:Scalar : Timestamp = beat ~t:t * n ;;
+  let beat ~t:Tempo : Timestamp = Time.to_min ~x:(1.0 /. t.bpm) ;;
+  let beats ~t:Tempo ~n:Scalar : Timestamp = beat ~t:t *. n ;;
   let bar ~t:Tempo : Timestamp =
     beats ~t:t ~n:(Math.to_scalar t.meter.beats) ;;
   (* n bars, fractional is fine - the sibling `beats` already has. *)
-  let bars ~t:Tempo ~n:Scalar : Timestamp = bar ~t:t * n ;;
+  let bars ~t:Tempo ~n:Scalar : Timestamp = bar ~t:t *. n ;;
 
   (* --- Note values ----------------------------------------------------
      A whole note is `unit` beats whatever the meter - four beats in
@@ -598,10 +598,10 @@ module Tempo = struct
       | Eighth -> 0.125
       | Sixteenth -> 0.0625
       | ThirtySecond -> 0.03125
-      | Dotted inner -> 1.5 * frac inner
+      | Dotted inner -> 1.5 *. frac inner
       | Tuplet (n, m, inner) ->
-          Math.to_scalar m / Math.to_scalar n * frac inner in
-    beats ~t:t ~n:(Math.to_scalar t.meter.unit * frac v) ;;
+          Math.to_scalar m /. Math.to_scalar n *. frac inner in
+    beats ~t:t ~n:(Math.to_scalar t.meter.unit *. frac v) ;;
   (* How many of a note value fit in one bar: the count a grid's ~count
      wants, correct in any meter, compound included. *)
   let per_bar ~t:Tempo ~v:Value : Int =
@@ -615,7 +615,7 @@ module Tempo = struct
      `grid` is the tempo-aware Time.time_steps: the call names the tempo
      and the note value instead of a precomputed step. *)
   let at ~t:Tempo ~bar:Int ~beat:Scalar : Timestamp =
-    beats ~t:t ~n:(Math.to_scalar (bar * t.meter.beats) + beat) ;;
+    beats ~t:t ~n:(Math.to_scalar (bar * t.meter.beats) +. beat) ;;
   let grid ~t:Tempo ~from:Timestamp ~step:Value ~count:Int : Timestamp list =
     Time.time_steps ~start:from ~step:(value ~t:t ~v:step) ~count:count ;;
   (* The counterpart of Time.jitter: jitter humanizes by hashing, swing
@@ -629,7 +629,7 @@ module Tempo = struct
       match xs with
       | Nil -> Nil
       | Cons (x, rest) ->
-          Cons (if off then x + step * amount else x,
+          Cons (if off then x +. step *. amount else x,
                 go rest (Math.not ~b:off)) in
     go steps false ;;
   (* grid and swing in one call, so the step is named once - a
@@ -643,7 +643,7 @@ module Tempo = struct
      part that breaks when a section is re-lengthened mid-writing)
      becomes one edit; the named landmarks stay yours to bind. *)
   let marks ~t:Tempo ~bars:Int list : Timestamp list =
-    List.map ~f:(fun b:Int -> bar ~t:t * Math.to_scalar b)
+    List.map ~f:(fun b:Int -> bar ~t:t *. Math.to_scalar b)
              ~xs:(List.scan ~f:(fun acc:Int n:Int -> acc + n) ~init:0
                             ~xs:bars) ;;
 
@@ -698,7 +698,7 @@ module Scale = struct
      `%`, and a degree, an inversion and a voicing all wrap - downwards
      as well as up, which is the case a truncating divide gets wrong. *)
   let wrap_div ~n:Int ~k:Int : Int =
-    Math.floor ~x:(Math.to_scalar n / Math.to_scalar k) ;;
+    Math.floor ~x:(Math.to_scalar n /. Math.to_scalar k) ;;
   let wrap_rem ~n:Int ~k:Int : Int = n - k * wrap_div ~n:n ~k:k ;;
 
   (* --- Degrees --------------------------------------------------------
@@ -835,7 +835,7 @@ module Scale = struct
       let lift : Int =
         Math.ceil ~x:(Math.to_scalar (Pitch.step ~note:low
                                         - Pitch.step ~note:base)
-                        / 12.0) in
+                        /. 12.0) in
       List.init ~n:count
         ~f:(fun i:Int ->
               let o : Int = wrap_div ~n:i ~k:k in
@@ -894,7 +894,7 @@ module Score = struct
      normalization, so the headroom above is the composer's. *)
   type Level = | Ppp | Pp | Piano | Mp | Mf | Forte | Ff | Fff ;;
 
-  let db ~x:Scalar : Scalar = Math.pow ~x:10.0 ~y:(x / 20.0) ;;
+  let db ~x:Scalar : Scalar = Math.pow ~x:10.0 ~y:(x /. 20.0) ;;
   let level_db ~l:Level : Scalar =
     match l with
     | Fff -> 0.0 | Ff -> (-4.0) | Forte -> (-8.0) | Mf -> (-12.0)
@@ -909,8 +909,8 @@ module Score = struct
       ~f:(fun i:Int ->
             db ~x:(if n <= 1 then b
                    else a
-                          + (b - a) * Math.to_scalar i
-                              / Math.to_scalar (n - 1))) ;;
+                          +. (b -. a) *. Math.to_scalar i
+                              /. Math.to_scalar (n - 1))) ;;
 
   (* --- Builders -------------------------------------------------------
      `line` lays items end to end from beat 0; a `Rest` advances the
@@ -924,8 +924,8 @@ module Score = struct
           | Play (n, len) ->
               Cons ({ note = n; at = at; len = len; vel = 1.0;
                       bend = 0.0 },
-                    go ~items:rest ~at:(at + len))
-          | Rest len -> go ~items:rest ~at:(at + len) in
+                    go ~items:rest ~at:(at +. len))
+          | Rest len -> go ~items:rest ~at:(at +. len) in
     { steps = go ~items:items ~at:0.0 } ;;
   let melody ~notes:Pitch.Note list ~len:Scalar : Phrase =
     line ~items:(List.map ~f:(fun n:Pitch.Note -> Play (n, len)) ~xs:notes) ;;
@@ -946,7 +946,7 @@ module Score = struct
                         { note = List.nth ~xs:notes
                                           ~i:(Scale.wrap_rem ~n:i ~k:k)
                                           ~default:(Pitch.of_step ~step:0);
-                          at = Math.to_scalar i * step;
+                          at = Math.to_scalar i *. step;
                           len = step; vel = 1.0; bend = 0.0 }) } ;;
   (* Rhythm without a dummy note: unpitched steps laid end to end (they
      carry of_step 0, which `strike` ignores). `hits` is the even case:
@@ -962,10 +962,10 @@ module Score = struct
      Every one of these is a pure edit: a Phrase in, a Phrase out. *)
   let span ~p:Phrase : Scalar =
     List.fold ~f:(fun acc:Scalar s:Step ->
-                    if s.at + s.len > acc then s.at + s.len else acc)
+                    if s.at +. s.len >. acc then s.at +. s.len else acc)
               ~init:0.0 ~xs:p.steps ;;
   let move ~p:Phrase ~beats:Scalar : Phrase =
-    { steps = List.map ~f:(fun s:Step -> { s with at = s.at + beats })
+    { steps = List.map ~f:(fun s:Step -> { s with at = s.at +. beats })
                        ~xs:p.steps } ;;
   (* One after another: each phrase starts where the last one ended. A
      left fold carrying (offset, steps-so-far): linear work, one fold
@@ -974,7 +974,7 @@ module Score = struct
   let seq ~ps:Phrase list : Phrase =
     let step acc:(Scalar, Step list) p:Phrase : (Scalar, Step list) =
       let (off, ss) : (Scalar, Step list) = acc in
-      (off + span ~p:p,
+      (off +. span ~p:p,
        List.append ~xs:ss ~ys:(move ~p:p ~beats:off).steps) in
     let (off, ss) : (Scalar, Step list) =
       List.fold ~f:step ~init:(0.0, Nil) ~xs:ps in
@@ -1009,7 +1009,7 @@ module Score = struct
       { steps = List.mapi
                   ~f:(fun i:Int s:Step ->
                         { s with vel = s.vel
-                                         * List.nth
+                                         *. List.nth
                                              ~xs:vs
                                              ~i:(Scale.wrap_rem ~n:i ~k:k)
                                              ~default:1.0 })
@@ -1031,9 +1031,9 @@ module Score = struct
     { steps = List.mapi
                 ~f:(fun i:Int s:Step ->
                       let at2 : Scalar =
-                        s.at + (Math.hash ~seed:seed ~i:i * 2.0 - 1.0)
-                                 * spread in
-                      { s with at = if at2 < 0.0 then 0.0 else at2 })
+                        s.at +. (Math.hash ~seed:seed ~i:i *. 2.0 -. 1.0)
+                                 *. spread in
+                      { s with at = if at2 <. 0.0 then 0.0 else at2 })
                 ~xs:p.steps } ;;
   (* `shuffle`, not `swing`: Tempo.swing stays for Timestamp lists (the
      module's name-dodging convention). Steps landing on odd multiples
@@ -1041,12 +1041,12 @@ module Score = struct
   let shuffle ~p:Phrase ~grid:Scalar ~amount:Scalar : Phrase =
     { steps = List.map
                 ~f:(fun s:Step ->
-                      let q : Scalar = s.at / grid in
+                      let q : Scalar = s.at /. grid in
                       let k : Int = Math.round ~x:q in
                       let near : Scalar =
-                        Math.abs ~x:(q - Math.to_scalar k) in
-                      if Scale.wrap_rem ~n:k ~k:2 == 1 && near < 0.000001
-                      then { s with at = s.at + grid * amount }
+                        Math.abs ~x:(q -. Math.to_scalar k) in
+                      if Scale.wrap_rem ~n:k ~k:2 == 1 && near <. 0.000001
+                      then { s with at = s.at +. grid *. amount }
                       else s)
                 ~xs:p.steps } ;;
   (* Articulation: `staccato` shortens every note by a ratio of its
@@ -1054,7 +1054,7 @@ module Score = struct
      leaving the last as written. (legato's next-attack search is a
      fold per step - quadratic, and fine at musical sizes.) *)
   let staccato ~p:Phrase ~ratio:Scalar : Phrase =
-    { steps = List.map ~f:(fun s:Step -> { s with len = s.len * ratio })
+    { steps = List.map ~f:(fun s:Step -> { s with len = s.len *. ratio })
                        ~xs:p.steps } ;;
   let legato ~p:Phrase : Phrase =
     { steps = List.map
@@ -1062,10 +1062,10 @@ module Score = struct
                       let nxt : Scalar =
                         List.fold
                           ~f:(fun acc:Scalar o:Step ->
-                                if o.at > s.at && (acc <= s.at || o.at < acc)
+                                if o.at >. s.at && (acc <=. s.at || o.at <. acc)
                                 then o.at else acc)
                           ~init:s.at ~xs:p.steps in
-                      { s with len = if nxt > s.at then nxt - s.at
+                      { s with len = if nxt >. s.at then nxt -. s.at
                                      else s.len })
                 ~xs:p.steps } ;;
 
@@ -1080,7 +1080,7 @@ module Score = struct
       ~p:Phrase : Event list =
     List.map
       ~f:(fun s:Step ->
-            { freq = pitch s.note * Pitch.cents ~n:s.bend;
+            { freq = pitch s.note *. Pitch.cents ~n:s.bend;
               at = Tempo.beats ~t:tempo ~n:s.at;
               dur = Tempo.beats ~t:tempo ~n:s.len;
               vel = s.vel })
@@ -1119,30 +1119,30 @@ module Mix = struct
   (* Equal-power pan: pos runs -1 (left) .. +1 (right). *)
   let pan ~pos:Scalar ~input:Scalar Signal : Vector Signal =
     Arrange.channels
-      ~chans:[input * Math.sqrt ~x:((1.0 - pos) * 0.5);
-              input * Math.sqrt ~x:((1.0 + pos) * 0.5)] ;;
+      ~chans:[input *. Math.sqrt ~x:((1.0 -. pos) *. 0.5);
+              input *. Math.sqrt ~x:((1.0 +. pos) *. 0.5)] ;;
   (* The same law with the position automated - autopans, Doppler
      sweeps. *)
   let pan_sig ~pos:Scalar Signal ~input:Scalar Signal : Vector Signal =
     Arrange.channels
-      ~chans:[input * Math.sqrt ~x:((1.0 - pos) * 0.5);
-              input * Math.sqrt ~x:((1.0 + pos) * 0.5)] ;;
+      ~chans:[input *. Math.sqrt ~x:((1.0 -. pos) *. 0.5);
+              input *. Math.sqrt ~x:((1.0 +. pos) *. 0.5)] ;;
   (* Weighted mix: the gains stay readable next to their parts, and
      with `db` they read as decibels - mix [(db (-6.0), drums); ...]. *)
   let mix ~parts:(Scalar, 'a Signal) list : 'a Signal =
     Arrange.mix_all
       ~signals:(List.map
                   ~f:(fun part:(Scalar, 'a Signal) ->
-                        let (g, s) : (Scalar, 'a Signal) = part in s * g)
+                        let (g, s) : (Scalar, 'a Signal) = part in s *. g)
                   ~xs:parts) ;;
   (* Decibels, reachable from mixing code without open Core.Score. *)
   let db ~x:Scalar : Scalar = Score.db ~x:x ;;
   let gain_db ~x:Scalar ~input:'a Signal : 'a Signal =
-    input * db ~x:x ;;
+    input *. db ~x:x ;;
   (* Mono gain over any bus: the operator table's broadcast row, named.
      Fading a Vector master with an envelope is vca ~gain:env. *)
   let vca ~gain:Scalar Signal ~input:'a Signal : 'a Signal =
-    input * gain ;;
+    input *. gain ;;
   (* Grid sidechain: a 1 -> 1-depth -> 1 dip placed at every timestamp,
      multiplied onto the bus - pumping pads under a four-floor kick, no
      envelope follower needed (program-dependent sidechaining is
@@ -1156,9 +1156,9 @@ module Mix = struct
     let dips : Scalar Signal =
       Arrange.place_multi
         ~sample:(Arrange.sample ~signal:shape ~from:0s
-                                ~to:(dip + recover))
+                                ~to:(dip +. recover))
         ~ats:ats in
-    vca ~gain:(1.0 - dips * depth) ~input:input ;;
+    vca ~gain:(1.0 -. dips *. depth) ~input:input ;;
 end ;;
 
 (* --- Str: computed names (str.cpp) ------------------------------------

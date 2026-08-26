@@ -43,7 +43,7 @@ open Core
 open Core.Osc open Core.Fx open Core.Arrange open Core.Render
 
 let pluck freq:Scalar : Scalar Signal =
-  (sine freq) * (exp_decay 6.0)
+  (sine freq) *. (exp_decay 6.0)
 ;;
 
 let pluck_sample freq:Scalar : Scalar Sample =

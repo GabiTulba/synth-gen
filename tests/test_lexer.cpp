@@ -5,7 +5,7 @@ using namespace synth;
 
 TEST(lexer_basic_tokens) {
   DiagnosticBag diags;
-  auto toks = lex("let f x:Scalar : Scalar = x * 2.0 ;;", "t", diags);
+  auto toks = lex("let f x:Scalar : Scalar = x *. 2.0 ;;", "t", diags);
   CHECK(!diags.hasErrors());
   CHECK(toks[0].kind == Tok::Let);
   CHECK(toks[1].kind == Tok::Ident);
@@ -132,6 +132,56 @@ TEST(lexer_comparison_and_logic_operators) {
   // A lone '|' is the variant/match bar ('|>' and '||' win when they fit).
   CHECK(toks[10].kind == Tok::Bar);
   CHECK(!diags.hasErrors());
+}
+
+TEST(lexer_dot_suffixed_operators) {
+  // The continuous half of the operator set (§3): one token each.
+  DiagnosticBag diags;
+  auto toks = lex("+. -. *. /. <. <=. >. >=. ==. !=.", "t", diags);
+  CHECK(!diags.hasErrors());
+  CHECK(toks[0].kind == Tok::PlusDot);
+  CHECK(toks[1].kind == Tok::MinusDot);
+  CHECK(toks[2].kind == Tok::StarDot);
+  CHECK(toks[3].kind == Tok::SlashDot);
+  CHECK(toks[4].kind == Tok::LtDot);
+  CHECK(toks[5].kind == Tok::LeDot);
+  CHECK(toks[6].kind == Tok::GtDot);
+  CHECK(toks[7].kind == Tok::GeDot);
+  CHECK(toks[8].kind == Tok::EqEqDot);
+  CHECK(toks[9].kind == Tok::BangEqDot);
+  CHECK(toks[10].kind == Tok::Eof);
+}
+
+TEST(lexer_dot_operators_are_longest_match) {
+  // '>=.' beats '>=' beats '>'; the bare forms still lex on their own,
+  // and a '.' that follows a name is still a projection dot.
+  DiagnosticBag diags;
+  auto toks = lex(">=. >= > >. a.b -> -.", "t", diags);
+  CHECK(!diags.hasErrors());
+  CHECK(toks[0].kind == Tok::GeDot);
+  CHECK(toks[1].kind == Tok::Ge);
+  CHECK(toks[2].kind == Tok::Gt);
+  CHECK(toks[3].kind == Tok::GtDot);
+  CHECK(toks[4].kind == Tok::Ident);
+  CHECK(toks[5].kind == Tok::Dot);
+  CHECK(toks[6].kind == Tok::Ident);
+  // '->' still wins over '-' + '.', and '-.' is not an arrow.
+  CHECK(toks[7].kind == Tok::Arrow);
+  CHECK(toks[8].kind == Tok::MinusDot);
+}
+
+TEST(lexer_dot_operator_against_a_scalar_literal) {
+  // No whitespace needed: the number lexer stops at the operator, and a
+  // '.' with no digit after it never continues a literal.
+  DiagnosticBag diags;
+  auto toks = lex("1.0*.2.0 3.0>.4", "t", diags);
+  CHECK(!diags.hasErrors());
+  CHECK(toks[0].kind == Tok::Number);
+  CHECK(toks[1].kind == Tok::StarDot);
+  CHECK(toks[2].kind == Tok::Number);
+  CHECK(toks[3].kind == Tok::Number);
+  CHECK(toks[4].kind == Tok::GtDot);
+  CHECK(toks[5].kind == Tok::IntNum);
 }
 
 TEST(lexer_arrow_and_ge_disambiguation) {

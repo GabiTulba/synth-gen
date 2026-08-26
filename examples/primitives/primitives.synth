@@ -16,88 +16,88 @@ open Core.Math
 
 (* Generators *)
 let _ =
-  sine 440.0 * 0.8 |> sample ~from:0s ~to:1s
+  sine 440.0 *. 0.8 |> sample ~from:0s ~to:1s
                    |> render ~name:"sine" ~rate:48000.0 ;;
 let _ =
-  saw 220.0 * 0.5 |> sample ~from:0s ~to:1s
+  saw 220.0 *. 0.5 |> sample ~from:0s ~to:1s
                   |> render ~name:"saw" ~rate:48000.0 ;;
 let _ =
-  square 220.0 * 0.4 |> sample ~from:0s ~to:1s
+  square 220.0 *. 0.4 |> sample ~from:0s ~to:1s
                      |> render ~name:"square" ~rate:48000.0 ;;
 let _ =
-  noise 2000.0 * 0.5 |> sample ~from:0s ~to:1s
+  noise 2000.0 *. 0.5 |> sample ~from:0s ~to:1s
                      |> render ~name:"noise" ~rate:48000.0 ;;
 
 (* Envelopes *)
 let _ =
-  sine 440.0 * exp_decay 3.0 * 0.8
+  sine 440.0 *. exp_decay 3.0 *. 0.8
     |> sample ~from:0s ~to:1500ms
     |> render ~name:"exp_decay" ~rate:48000.0 ;;
 let _ =
   sine 440.0
-      * (adsr ~attack:60ms ~decay:120ms ~sustain:0.6 ~release:350ms
+      *. (adsr ~attack:60ms ~decay:120ms ~sustain:0.6 ~release:350ms
               ~hold:650ms)
-      * 0.8
+      *. 0.8
     |> sample ~from:0s ~to:1s
     |> render ~name:"adsr" ~rate:48000.0 ;;
 
 (* Filters, on a bright source so the difference is audible *)
 let _ =
-  (saw 220.0 |> lowpass ~cutoff:600.0) * 0.7
+  (saw 220.0 |> lowpass ~cutoff:600.0) *. 0.7
     |> sample ~from:0s ~to:1s
     |> render ~name:"lowpass" ~rate:48000.0 ;;
 let _ =
-  (saw 220.0 |> highpass ~cutoff:2500.0) * 0.7
+  (saw 220.0 |> highpass ~cutoff:2500.0) *. 0.7
     |> sample ~from:0s ~to:1s
     |> render ~name:"highpass" ~rate:48000.0 ;;
 
 (* Modulation *)
 let _ =
-  (fm ~carrier:220.0 ~modulator:(sine 110.0 * 180.0)) * 0.6
+  (fm ~carrier:220.0 ~modulator:(sine 110.0 *. 180.0)) *. 0.6
     |> sample ~from:0s ~to:1s
     |> render ~name:"fm" ~rate:48000.0 ;;
 let _ =
-  (pm ~carrier:220.0 ~modulator:(sine 110.0 * 2.5)) * 0.6
+  (pm ~carrier:220.0 ~modulator:(sine 110.0 *. 2.5)) *. 0.6
     |> sample ~from:0s ~to:1s
     |> render ~name:"pm" ~rate:48000.0 ;;
 let _ =
-  (sine 440.0 |> am ~modulator:(sine 4.0) ~depth:0.6) * 0.5
+  (sine 440.0 |> am ~modulator:(sine 4.0) ~depth:0.6) *. 0.5
     |> sample ~from:0s ~to:1500ms
     |> render ~name:"am" ~rate:48000.0 ;;
 
 (* Time effects, fed by a short blip so the tail is obvious *)
 let blip : Scalar Signal =
-  (sine 660.0 * exp_decay 12.0 |> sample ~from:0s ~to:250ms)
+  (sine 660.0 *. exp_decay 12.0 |> sample ~from:0s ~to:250ms)
     |> place ~at:0s ;;
 let _ =
   (mix_all [blip;
-            (blip |> delay ~by:300ms) * 0.5;
-            (blip |> delay ~by:600ms) * 0.25]) * 0.7
+            (blip |> delay ~by:300ms) *. 0.5;
+            (blip |> delay ~by:600ms) *. 0.25]) *. 0.7
     |> sample ~from:0s ~to:1500ms
     |> render ~name:"delay" ~rate:48000.0 ;;
 let _ =
-  (blip |> reverb ~decay:900ms ~damping:0.4 ~mix:0.5) * 0.7
+  (blip |> reverb ~decay:900ms ~damping:0.4 ~mix:0.5) *. 0.7
     |> sample ~from:0s ~to:2s
     |> render ~name:"reverb" ~rate:48000.0 ;;
 (* resample: f multiplies the playback rate, so a rate that ramps from
    0.5 to 1.5 is a tape slowing down and speeding back up. *)
 let _ =
-  (saw 220.0 * 0.4 |> resample ~f:(fun t:Scalar -> 0.5 + t / 2.0))
+  (saw 220.0 *. 0.4 |> resample ~f:(fun t:Scalar -> 0.5 +. t /. 2.0))
     |> sample ~from:0s ~to:2s
     |> render ~name:"resample" ~rate:48000.0 ;;
 
 (* Combination *)
 let _ =
-  (channels [sine 440.0; sine 443.0]) * 0.5
+  (channels [sine 440.0; sine 443.0]) *. 0.5
     |> sample ~from:0s ~to:1500ms
     |> render ~name:"channels" ~rate:48000.0 ;;
 let _ =
-  (mix_all [sine 261.63; sine 329.63; sine 392.0]) * 0.25
+  (mix_all [sine 261.63; sine 329.63; sine 392.0]) *. 0.25
     |> sample ~from:0s ~to:1500ms
     |> render ~name:"mix_all" ~rate:48000.0 ;;
 
 (* Distortion, on an overdriven sine so the shaping is audible *)
-let hot : Scalar Signal = sine 220.0 * 3.0 ;;
+let hot : Scalar Signal = sine 220.0 *. 3.0 ;;
 let _ =
   hot |> hard_clip ~threshold:0.5
       |> sample ~from:0s ~to:1s
@@ -122,13 +122,13 @@ let _ =
 let _ =
   mix_all (List.init 6 (fun i:Int ->
     let n : Scalar = to_scalar (i + 1) in
-    sine (110.0 * n) * (1.0 / n))) * 0.3
+    sine (110.0 *. n) *. (1.0 /. n))) *. 0.3
     |> sample ~from:0s ~to:1500ms
     |> render ~name:"list_init" ~rate:48000.0 ;;
 
 let _ =
   let tick : Scalar Sample =
-    sine 880.0 * exp_decay 25.0 |> sample ~from:0s ~to:120ms in
+    sine 880.0 *. exp_decay 25.0 |> sample ~from:0s ~to:120ms in
   place_multi tick (time_steps ~start:0s ~step:250ms ~count:6)
     |> sample ~from:0s ~to:1600ms
     |> render ~name:"time_steps" ~rate:48000.0 ;;
@@ -139,10 +139,10 @@ let _ =
 let bpm : Scalar = 140.0 ;;
 let _ =
   let tick : Scalar Sample =
-    sine 880.0 * exp_decay 25.0 |> sample ~from:0s ~to:(to_ms 120.0) in
+    sine 880.0 *. exp_decay 25.0 |> sample ~from:0s ~to:(to_ms 120.0) in
   place_multi tick
-    (time_steps ~start:0s ~step:(to_min (1.0 / bpm)) ~count:8)
-    |> sample ~from:0s ~to:(to_sec (8.0 * 60.0 / bpm))
+    (time_steps ~start:0s ~step:(to_min (1.0 /. bpm)) ~count:8)
+    |> sample ~from:0s ~to:(to_sec (8.0 *. 60.0 /. bpm))
     |> render ~name:"to_sec" ~rate:48000.0 ;;
 
 (* Signal constructors: `constant` holds a level forever (here a gain on
@@ -151,28 +151,28 @@ let _ =
    function of time. constant_multi/signal_multi are the per-channel
    forms. *)
 let _ =
-  sine 440.0 * constant 0.4
+  sine 440.0 *. constant 0.4
     |> sample ~from:0s ~to:800ms
     |> render ~name:"constant" ~rate:48000.0 ;;
 
 let _ =
-  sine 330.0 * sqrt time * 0.5
+  sine 330.0 *. sqrt time *. 0.5
     |> sample ~from:0s ~to:1200ms
     |> render ~name:"time" ~rate:48000.0 ;;
 
 let _ =
-  sine 440.0 * signal ~f:(fun t:Scalar -> exp (0.0 - 4.0 * t)) * 0.6
+  sine 440.0 *. signal ~f:(fun t:Scalar -> exp (0.0 -. 4.0 *. t)) *. 0.6
     |> sample ~from:0s ~to:1200ms
     |> render ~name:"signal_fn" ~rate:48000.0 ;;
 
 let _ =
-  channels [sine 440.0; sine 554.37] * constant_multi [0.6; 0.2]
+  channels [sine 440.0; sine 554.37] *. constant_multi [0.6; 0.2]
     |> sample ~from:0s ~to:800ms
     |> render ~name:"constant_multi" ~rate:48000.0 ;;
 
 let _ =
   channels [sine 440.0; sine 440.0]
-    * signal_multi ~fs:[(fun t:Scalar -> 1.0 - t); (fun t:Scalar -> t)]
+    *. signal_multi ~fs:[(fun t:Scalar -> 1.0 -. t); (fun t:Scalar -> t)]
     |> sample ~from:0s ~to:1s
     |> render ~name:"signal_multi" ~rate:48000.0 ;;
 
@@ -185,16 +185,16 @@ let _ =
     |> render ~name:"pow" ~rate:48000.0 ;;
 
 let _ =
-  sine 440.0 * exp (0.0 - 6.0 * time) * 0.6
+  sine 440.0 *. exp (0.0 -. 6.0 *. time) *. 0.6
     |> sample ~from:0s ~to:1200ms
     |> render ~name:"exp" ~rate:48000.0 ;;
 
 let _ =
-  sine 440.0 * (log (1.0 + time * 20.0) / log 21.0) * 0.5
+  sine 440.0 *. (log (1.0 +. time *. 20.0) /. log 21.0) *. 0.5
     |> sample ~from:0s ~to:1200ms
     |> render ~name:"log" ~rate:48000.0 ;;
 
 let _ =
-  sine 440.0 * sqrt (time * 0.8) * 0.6
+  sine 440.0 *. sqrt (time *. 0.8) *. 0.6
     |> sample ~from:0s ~to:1200ms
     |> render ~name:"sqrt" ~rate:48000.0 ;;

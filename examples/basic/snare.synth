@@ -15,7 +15,7 @@ import Voices
 
 let snare : Scalar Signal =
   (Voices.Drums.snare ~tone:185.0 ~tone_decay:18.0 ~tone_amp:0.5
-                      ~noise_freq:1800.0 ~noise_decay:22.0) * 0.6
+                      ~noise_freq:1800.0 ~noise_decay:22.0) *. 0.6
 ;;
 
 let _ =

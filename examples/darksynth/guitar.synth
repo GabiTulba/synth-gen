@@ -11,8 +11,8 @@ open Core.Pitch
    grind of a doubled guitar track, and it reads as an interval rather
    than as 1.012. The sub is a plain octave down, so it stays a ratio. *)
 let dist freq:Scalar : Scalar Signal =
-  saw freq + saw (detune ~freq:freq ~cents:20.651)
-    + square (freq * 0.5) * 0.5
+  saw freq +. saw (detune ~freq:freq ~cents:20.651)
+    +. square (freq *. 0.5) *. 0.5
     |> lowpass ~cutoff:750.0
     |> hard_clip ~threshold:0.45
 ;;
@@ -26,8 +26,8 @@ let chug freq:Scalar : Scalar Sample =
 (* No clean octave partial here - a pure upper harmonic rings piano-like.
    Three detuned saws clipped hard snarl instead. *)
 let stab freq:Scalar : Scalar Sample =
-  saw freq + saw (detune ~freq:freq ~cents:34.283)
-    + saw (detune ~freq:freq ~cents:(-6.939))
+  saw freq +. saw (detune ~freq:freq ~cents:34.283)
+    +. saw (detune ~freq:freq ~cents:(-6.939))
     |> lowpass ~cutoff:1400.0
     |> hard_clip ~threshold:0.35
     |> gated ~attack:2ms ~decay:120ms ~sustain:0.4 ~release:120ms

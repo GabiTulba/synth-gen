@@ -23,7 +23,7 @@ let dur v:Value : Timestamp = value ~t:tempo ~v:v ;;
 let beats n:Scalar : Timestamp = Tempo.beats ~t:tempo ~n:n ;;
 (* `n` chord segments in. A segment is two bars: one chord of the cycle,
    and the unit the whole arrangement is cut into. *)
-let seg n:Int : Timestamp = bars ~t:tempo ~n:(2.0 * Math.to_scalar n) ;;
+let seg n:Int : Timestamp = bars ~t:tempo ~n:(2.0 *. Math.to_scalar n) ;;
 (* `n` bars measured in *beats*, which is the unit a Score phrase
    positions itself in: `Score.chord ~len:(span 2)` is one segment. *)
 let span n:Int : Scalar = bar_beats ~t:tempo ~n:n ;;

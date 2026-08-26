@@ -52,7 +52,7 @@ let half_notes : Scalar Signal =
 let wide : Vector Signal = Io.load_multi ~path:"strum.wav" ;;
 let left : Scalar Signal = channel ~n:0 ~input:wide ;;
 let right : Scalar Signal = channel ~n:1 ~input:wide ;;
-let strum : Scalar Signal = (left + right) * 0.5 ;;
+let strum : Scalar Signal = (left +. right) *. 0.5 ;;
 
 (* --- Buses ------------------------------------------------------------
    Mono parts take a place in the field; the weighted mix reads its

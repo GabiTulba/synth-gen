@@ -25,13 +25,13 @@ module D = Effects.Doppler
    written once, and each call varies only the base and its mix weight. *)
 let source : Scalar Signal =
   let harmonic ~base:Scalar ~weight:Scalar : Scalar Signal =
-    D.swept_saw ~base:base ~rate:0.25 ~depth:0.08 ~gain:0.4 * weight in
-  (harmonic ~base:220.0 ~weight:0.55 + harmonic ~base:440.0 ~weight:0.45)
-    * D.proximity 0.25
+    D.swept_saw ~base:base ~rate:0.25 ~depth:0.08 ~gain:0.4 *. weight in
+  (harmonic ~base:220.0 ~weight:0.55 +. harmonic ~base:440.0 ~weight:0.45)
+    *. D.proximity 0.25
 ;;
 
 let doppler : Vector Signal =
-  D.pan source 0.25 * 1.5
+  D.pan source 0.25 *. 1.5
 ;;
 
 let _ =

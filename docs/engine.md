@@ -61,7 +61,7 @@ overhead only).
 
 ## Fused arithmetic
 
-`makeBinOp` does not build a node per operator: elementwise `+ - * /`
+`makeBinOp` does not build a node per operator: elementwise `+. -. *. /.`
 chains merge into a single fused node holding the non-arithmetic
 subtrees as inputs and a small postfix program over them (constants
 become immediates, duplicate inputs dedup, inlining capped so shared

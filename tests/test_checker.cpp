@@ -61,7 +61,7 @@ TEST(checker_full_example_passes) {
   std::string f = tp.write("pluck.synth", R"(
 open Core open Core.Osc open Core.Fx open Core.Arrange open Core.Render open Core.Io open Core.Time open Core.Sig open Core.Math
 let pluck freq:Scalar : Scalar Signal =
-  (sine freq) * (exp_decay 6.0)
+  (sine freq) *. (exp_decay 6.0)
 ;;
 let pluck_sample freq:Scalar : Scalar Sample =
   sample (pluck freq) 0s 800ms
@@ -147,10 +147,10 @@ TEST(checker_operator_broadcasting) {
   TempProject tp;
   std::string f = tp.write("ok.synth", R"(
 open Core open Core.Osc open Core.Fx open Core.Arrange open Core.Render open Core.Io open Core.Time open Core.Sig open Core.Math
-let a : Scalar Signal = sine 440.0 * 0.5 ;;
-let b : Scalar Signal = 0.5 * sine 440.0 ;;
-let c : Scalar Signal = sine 440.0 + saw 220.0 ;;
-let d : Scalar = 1.0 + 2.0 ;;
+let a : Scalar Signal = sine 440.0 *. 0.5 ;;
+let b : Scalar Signal = 0.5 *. sine 440.0 ;;
+let c : Scalar Signal = sine 440.0 +. saw 220.0 ;;
+let d : Scalar = 1.0 +. 2.0 ;;
 )");
   DiagnosticBag diags;
   checkProject({f}, diags);
@@ -160,10 +160,95 @@ let d : Scalar = 1.0 + 2.0 ;;
 TEST(checker_operator_rejects_time_plus_signal) {
   TempProject tp;
   std::string f =
-      tp.write("bad.synth", "open Core open Core.Osc open Core.Fx open Core.Arrange open Core.Render open Core.Io open Core.Time open Core.Sig open Core.Math\nlet a : Scalar Signal = sine 440.0 + 1s ;;");
+      tp.write("bad.synth", "open Core open Core.Osc open Core.Fx open Core.Arrange open Core.Render open Core.Io open Core.Time open Core.Sig open Core.Math\nlet a : Scalar Signal = sine 440.0 +. 1s ;;");
   DiagnosticBag diags;
   checkProject({f}, diags);
   CHECK(diags.hasErrors());
+}
+
+// The bare/'.'-suffixed split (spec §3): bare operators are Int-only,
+// '.'-suffixed ones cover the continuous kinds, and neither crosses over.
+TEST(checker_dot_operators_cover_the_continuous_kinds) {
+  TempProject tp;
+  std::string f = tp.write("ok.synth", R"(
+open Core open Core.Osc open Core.Fx open Core.Arrange open Core.Render open Core.Io open Core.Time open Core.Sig open Core.Math
+let a : Scalar = 2.0 +. 3.0 ;;
+let b : Scalar = 6.0 /. 3.0 ;;
+let c : Bool = 2.0 >. 3.0 ;;
+let d : Bool = 1.0 <=. 2.0 && 1.0 ==. 1.0 && 1.0 !=. 2.0 ;;
+let e : Timestamp = 1s +. 500ms ;;
+let g : Timestamp = 1s *. 1.5 ;;
+let h : Bool = 1s <. 2s ;;
+let i : Scalar Signal = sine 440.0 *. 0.5 ;;
+)");
+  DiagnosticBag diags;
+  checkProject({f}, diags);
+  for (auto& d : diags.items) std::cerr << d.message << "\n";
+  CHECK(!diags.hasErrors());
+}
+
+TEST(checker_bare_operators_stay_int_only) {
+  TempProject tp;
+  std::string f = tp.write("ok.synth", R"(
+open Core open Core.Osc open Core.Fx open Core.Arrange open Core.Render open Core.Io open Core.Time open Core.Sig open Core.Math
+let a : Int = 2 + 3 * 4 ;;
+let b : Int = 7 / 2 ;;
+let c : Bool = 2 > 3 ;;
+let d : Bool = 2 <= 3 && 2 == 2 && 2 != 3 ;;
+)");
+  DiagnosticBag diags;
+  checkProject({f}, diags);
+  for (auto& d : diags.items) std::cerr << d.message << "\n";
+  CHECK(!diags.hasErrors());
+}
+
+TEST(checker_bare_operator_on_scalars_names_the_dotted_form) {
+  TempProject tp;
+  std::string f = tp.write(
+      "bad.synth",
+      "open Core open Core.Osc open Core.Fx open Core.Arrange open Core.Render open Core.Io open Core.Time open Core.Sig open Core.Math\n"
+      "let a : Scalar = 0.5 * 2.0 ;;");
+  DiagnosticBag diags;
+  checkProject({f}, diags);
+  CHECK(diags.hasErrors());
+  bool hinted = false;
+  for (auto& d : diags.items)
+    if (d.message.find("'*.'") != std::string::npos) hinted = true;
+  CHECK(hinted);
+}
+
+TEST(checker_dotted_operator_on_ints_names_the_bare_form) {
+  TempProject tp;
+  std::string f = tp.write(
+      "bad.synth",
+      "open Core open Core.Osc open Core.Fx open Core.Arrange open Core.Render open Core.Io open Core.Time open Core.Sig open Core.Math\n"
+      "let a : Int = 2 +. 3 ;;");
+  DiagnosticBag diags;
+  checkProject({f}, diags);
+  CHECK(diags.hasErrors());
+  bool hinted = false;
+  for (auto& d : diags.items)
+    if (d.message.find("'+'") != std::string::npos) hinted = true;
+  CHECK(hinted);
+}
+
+TEST(checker_operators_never_mix_int_with_the_continuous_kinds) {
+  // Neither spelling is a way in: to_scalar is still the only crossing.
+  const char* bad[] = {"let a : Scalar = 2 +. 3.0 ;;",
+                       "let a : Scalar = 2.0 +. 3 ;;",
+                       "let a : Timestamp = 1s *. 2 ;;",
+                       "let a : Bool = 2 <. 3.0 ;;",
+                       "let a : Bool = 2.0 > 3.0 ;;"};
+  for (const char* line : bad) {
+    TempProject tp;
+    std::string f = tp.write(
+        "bad.synth",
+        std::string("open Core open Core.Osc open Core.Fx open Core.Arrange open Core.Render open Core.Io open Core.Time open Core.Sig open Core.Math\n") +
+            line);
+    DiagnosticBag diags;
+    checkProject({f}, diags);
+    CHECK(diags.hasErrors());
+  }
 }
 
 TEST(checker_higher_order_map) {
@@ -182,7 +267,7 @@ TEST(checker_fold) {
   TempProject tp;
   std::string f = tp.write("ok.synth", R"(
 open Core open Core.Osc open Core.Fx open Core.Arrange open Core.Render open Core.Io open Core.Time open Core.Sig open Core.Math
-let add a:Scalar b:Scalar : Scalar = a + b ;;
+let add a:Scalar b:Scalar : Scalar = a +. b ;;
 let total : Scalar = List.fold add 0.0 [1.0; 2.0; 3.0] ;;
 )");
   DiagnosticBag diags;
@@ -194,7 +279,7 @@ TEST(checker_imports_and_qualified_access) {
   TempProject tp;
   tp.write("a.synth",
            "open Core open Core.Osc open Core.Fx open Core.Arrange open Core.Render open Core.Io open Core.Time open Core.Sig open Core.Math\nlet f amp:Scalar freq:Scalar : Scalar Signal = "
-           "sine freq * amp ;;");
+           "sine freq *. amp ;;");
   std::string b = tp.write("b.synth",
                            "open Core open Core.Osc open Core.Fx open Core.Arrange open Core.Render open Core.Io open Core.Time open Core.Sig open Core.Math\nimport A\nlet g : Scalar Signal = A.f 0.8 440.0 ;;");
   DiagnosticBag diags;
@@ -235,8 +320,8 @@ struct LibFixture {
     tp.write("lib/basic/lib.synth", libraryInterface({"Keys"}));
     tp.write("lib/basic/keys.synth",
              "open Core open Core.Osc open Core.Fx open Core.Arrange open Core.Render open Core.Io open Core.Time open Core.Sig open Core.Math\nimport Internal\n"
-             "let gain : Scalar = Internal.base * 2.0 ;;\n"
-             "let strike freq:Scalar : Scalar Signal = sine freq * gain ;;\n");
+             "let gain : Scalar = Internal.base *. 2.0 ;;\n"
+             "let strike freq:Scalar : Scalar Signal = sine freq *. gain ;;\n");
     tp.write("lib/basic/internal.synth", "open Core open Core.Osc open Core.Fx open Core.Arrange open Core.Render open Core.Io open Core.Time open Core.Sig open Core.Math\nlet base : Scalar = 0.25 ;;\n");
     reg = discoverLibraries(tp.dir.string(), regDiags);
   }
@@ -364,7 +449,7 @@ TEST(checker_library_short_name_scoped_to_library) {
   std::string song = tp.write(
       "song.synth",
       "open Core open Core.Osc open Core.Fx open Core.Arrange open Core.Render open Core.Io open Core.Time open Core.Sig open Core.Math\nimport A\nimport B\n"
-      "let x : Scalar = A.Util.ua + B.Util.ub ;;\n");
+      "let x : Scalar = A.Util.ua +. B.Util.ub ;;\n");
   ModuleLoadContext ctx;
   ctx.registry = &reg;
   ctx.deps = {"A", "B"};
@@ -430,9 +515,9 @@ TEST(checker_library_siblings_need_no_manifest_listing) {
   tp.write("chain/lib.synth", libraryInterface({"Top"}));
   tp.write("chain/bottom.synth", "open Core open Core.Osc open Core.Fx open Core.Arrange open Core.Render open Core.Io open Core.Time open Core.Sig open Core.Math\nlet base : Scalar = 0.25 ;;\n");
   tp.write("chain/middle.synth",
-           "open Core open Core.Osc open Core.Fx open Core.Arrange open Core.Render open Core.Io open Core.Time open Core.Sig open Core.Math\nimport Bottom\nlet mid : Scalar = Bottom.base * 2.0 ;;\n");
+           "open Core open Core.Osc open Core.Fx open Core.Arrange open Core.Render open Core.Io open Core.Time open Core.Sig open Core.Math\nimport Bottom\nlet mid : Scalar = Bottom.base *. 2.0 ;;\n");
   tp.write("chain/top.synth",
-           "open Core open Core.Osc open Core.Fx open Core.Arrange open Core.Render open Core.Io open Core.Time open Core.Sig open Core.Math\nimport Middle\nlet top : Scalar = Middle.mid + 1.0 ;;\n");
+           "open Core open Core.Osc open Core.Fx open Core.Arrange open Core.Render open Core.Io open Core.Time open Core.Sig open Core.Math\nimport Middle\nlet top : Scalar = Middle.mid +. 1.0 ;;\n");
   DiagnosticBag regDiags;
   LibraryRegistry reg = discoverLibraries(tp.dir.string(), regDiags);
   CHECK(!regDiags.hasErrors());
@@ -467,10 +552,10 @@ struct IfaceFixture {
     tp.write("fx/lib.synth",
              "open Core open Core.Osc open Core.Fx open Core.Arrange open Core.Render open Core.Io open Core.Time open Core.Sig open Core.Math\nimport Delay\n"
              "module Echo = Delay ;;\n"
-             "let slap s:Scalar Signal : Scalar Signal = Delay.tap s * 0.5 ;;\n");
+             "let slap s:Scalar Signal : Scalar Signal = Delay.tap s *. 0.5 ;;\n");
     tp.write("fx/delay.synth",
              "open Core open Core.Osc open Core.Fx open Core.Arrange open Core.Render open Core.Io open Core.Time open Core.Sig open Core.Math\nimport Taps\n"
-             "let tap s:Scalar Signal : Scalar Signal = s * Taps.spread ;;\n");
+             "let tap s:Scalar Signal : Scalar Signal = s *. Taps.spread ;;\n");
     tp.write("fx/taps.synth", "open Core open Core.Osc open Core.Fx open Core.Arrange open Core.Render open Core.Io open Core.Time open Core.Sig open Core.Math\nlet spread : Scalar = 1.5 ;;\n");
     reg = discoverLibraries(tp.dir.string(), regDiags);
   }
@@ -587,7 +672,7 @@ TEST(checker_open_file_unqualified_defs) {
   LibFixture fx;
   std::string song = fx.tp.write(
       "song.synth",
-      "open Core open Core.Osc open Core.Fx open Core.Arrange open Core.Render open Core.Io open Core.Time open Core.Sig open Core.Math\nopen Basic.Keys\nlet s : Scalar Signal = strike 440.0 * gain ;;\n");
+      "open Core open Core.Osc open Core.Fx open Core.Arrange open Core.Render open Core.Io open Core.Time open Core.Sig open Core.Math\nopen Basic.Keys\nlet s : Scalar Signal = strike 440.0 *. gain ;;\n");
   ModuleLoadContext ctx = fx.consumerCtx({"Basic"});
   DiagnosticBag diags;
   Program prog = checkProject({song}, diags, &ctx);
@@ -731,10 +816,10 @@ TEST(checker_core_qualified_access) {
   std::string f = tp.write("ok.synth", R"(
 import Core
 let tone : Scalar Signal = Core.Osc.sine 440.0 ;;
-let xs : Scalar list = Core.List.map (fun x:Scalar -> x * 2.0) [1.0] ;;
+let xs : Scalar list = Core.List.map (fun x:Scalar -> x *. 2.0) [1.0] ;;
 let ys : Scalar list = Core.List.init ~n:3 ~f:(fun i:Int -> Core.Math.to_scalar i) ;;
 let zs : Scalar list = Core.List.repeat 2 5.0 ;;
-let t : Scalar = Core.List.fold (fun a:Scalar b:Scalar -> a + b) 0.0 zs ;;
+let t : Scalar = Core.List.fold (fun a:Scalar b:Scalar -> a +. b) 0.0 zs ;;
 )");
   DiagnosticBag diags;
   Program prog = checkProject({f}, diags);
@@ -758,7 +843,7 @@ TEST(checker_core_open_forms) {
 open Core open Core.Osc open Core.Fx open Core.Arrange open Core.Render open Core.Io open Core.Time open Core.Sig open Core.Math
 let tone : Scalar Signal = sine 440.0 ;;
 let stack : Scalar Signal =
-  mix_all (List.init ~n:3 ~f:(fun i:Int -> sine (110.0 * (to_scalar i + 1.0)))) ;;
+  mix_all (List.init ~n:3 ~f:(fun i:Int -> sine (110.0 *. (to_scalar i +. 1.0)))) ;;
 )");
   DiagnosticBag d1;
   Program p1 = checkProject({f}, d1);
@@ -771,8 +856,8 @@ let stack : Scalar Signal =
   std::string g = tp.write("ok2.synth", R"(
 open Core open Core.Osc open Core.Fx open Core.Arrange open Core.Render open Core.Io open Core.Time open Core.Sig open Core.Math
 open Core.List
-let xs : Scalar list = map (fun x:Scalar -> x + 1.0) (repeat 3 0.0) ;;
-let t : Scalar = fold (fun a:Scalar b:Scalar -> a + b) 0.0 (init 3 (fun i:Int -> to_scalar i)) ;;
+let xs : Scalar list = map (fun x:Scalar -> x +. 1.0) (repeat 3 0.0) ;;
+let t : Scalar = fold (fun a:Scalar b:Scalar -> a +. b) 0.0 (init 3 (fun i:Int -> to_scalar i)) ;;
 )");
   DiagnosticBag d2;
   Program p2 = checkProject({g}, d2);
@@ -842,8 +927,8 @@ TEST(checker_modulation_primitives) {
   TempProject tp;
   std::string f = tp.write("ok.synth", R"(
 open Core open Core.Osc open Core.Fx open Core.Arrange open Core.Render open Core.Io open Core.Time open Core.Sig open Core.Math
-let vibrato : Scalar Signal = fm 440.0 ((sine 5.0) * 20.0) ;;
-let bell : Scalar Signal = pm 440.0 ((sine 220.0) * 3.0) ;;
+let vibrato : Scalar Signal = fm 440.0 ((sine 5.0) *. 20.0) ;;
+let bell : Scalar Signal = pm 440.0 ((sine 220.0) *. 3.0) ;;
 let tremolo : Scalar Signal = am (sine 440.0) (sine 4.0) 0.5 ;;
 let wide : Vector Signal =
   am (channels [sine 440.0; sine 442.0]) (sine 4.0) 0.5 ;;
@@ -882,7 +967,7 @@ TEST(checker_delay_primitive) {
 open Core open Core.Osc open Core.Fx open Core.Arrange open Core.Render open Core.Io open Core.Time open Core.Sig open Core.Math
 let dry : Scalar Signal = sine 440.0 ;;
 let echo : Scalar Signal =
-  mix_all [dry; (delay 250ms dry) * 0.5; (delay 500ms dry) * 0.25] ;;
+  mix_all [dry; (delay 250ms dry) *. 0.5; (delay 500ms dry) *. 0.25] ;;
 let wide : Vector Signal = delay 10ms (channels [sine 440.0; sine 442.0]) ;;
 )");
   DiagnosticBag diags;
@@ -905,7 +990,7 @@ TEST(checker_reverb_primitive) {
   TempProject tp;
   std::string f = tp.write("ok.synth", R"(
 open Core open Core.Osc open Core.Fx open Core.Arrange open Core.Render open Core.Io open Core.Time open Core.Sig open Core.Math
-let dry : Scalar Signal = (sine 440.0) * (exp_decay 6.0) ;;
+let dry : Scalar Signal = (sine 440.0) *. (exp_decay 6.0) ;;
 let wet : Scalar Signal = reverb 800ms 0.4 0.3 dry ;;
 let hall : Vector Signal =
   reverb 2s 0.6 0.5 (channels [sine 440.0; sine 442.0]) ;;
@@ -932,7 +1017,7 @@ TEST(checker_noise_primitive) {
   std::string f = tp.write("ok.synth", R"(
 open Core open Core.Osc open Core.Fx open Core.Arrange open Core.Render open Core.Io open Core.Time open Core.Sig open Core.Math
 let hiss : Scalar Signal = noise 4000.0 ;;
-let snare : Scalar Signal = (noise 1800.0) * (exp_decay 25.0) ;;
+let snare : Scalar Signal = (noise 1800.0) *. (exp_decay 25.0) ;;
 let airy : Scalar Signal = reverb 300ms 0.5 0.4 snare ;;
 )");
   DiagnosticBag diags;
@@ -972,8 +1057,8 @@ TEST(checker_clip_primitives) {
   TempProject tp;
   std::string f = tp.write("ok.synth", R"(
 open Core open Core.Osc open Core.Fx open Core.Arrange open Core.Render open Core.Io open Core.Time open Core.Sig open Core.Math
-let crunchy : Scalar Signal = hard_clip 0.6 ((sine 220.0) * 2.0) ;;
-let warm : Scalar Signal = soft_clip 0.8 ((saw 110.0) * 3.0) ;;
+let crunchy : Scalar Signal = hard_clip 0.6 ((sine 220.0) *. 2.0) ;;
+let warm : Scalar Signal = soft_clip 0.8 ((saw 110.0) *. 3.0) ;;
 let wide : Vector Signal =
   soft_clip 0.5 (channels [sine 440.0; sine 442.0]) ;;
 )");
@@ -997,7 +1082,7 @@ TEST(checker_place_multi_primitive) {
   TempProject tp;
   std::string f = tp.write("ok.synth", R"(
 open Core open Core.Osc open Core.Fx open Core.Arrange open Core.Render open Core.Io open Core.Time open Core.Sig open Core.Math
-let hit : Scalar Sample = sample ((sine 440.0) * (exp_decay 8.0)) 0s 200ms ;;
+let hit : Scalar Sample = sample ((sine 440.0) *. (exp_decay 8.0)) 0s 200ms ;;
 let pattern : Scalar Signal = place_multi hit [0s; 250ms; 500ms; 1s] ;;
 let wide : Vector Signal =
   place_multi (sample (channels [sine 440.0; sine 442.0]) 0s 100ms) [0s; 1s] ;;
@@ -1023,7 +1108,7 @@ TEST(checker_labeled_args_any_order) {
   TempProject tp;
   std::string f = tp.write("ok.synth", R"(
 open Core open Core.Osc open Core.Fx open Core.Arrange open Core.Render open Core.Io open Core.Time open Core.Sig open Core.Math
-let voice ~amp:Scalar ~freq:Scalar : Scalar Signal = (sine freq) * amp ;;
+let voice ~amp:Scalar ~freq:Scalar : Scalar Signal = (sine freq) *. amp ;;
 let a : Scalar Signal = voice ~amp:0.5 ~freq:440.0 ;;
 let b : Scalar Signal = voice ~freq:440.0 ~amp:0.5 ;;
 let c : Scalar Signal = voice 0.5 440.0 ;;
@@ -1040,7 +1125,7 @@ TEST(checker_labeled_partial_application_curries) {
   TempProject tp;
   std::string f = tp.write("ok.synth", R"(
 open Core open Core.Osc open Core.Fx open Core.Arrange open Core.Render open Core.Io open Core.Time open Core.Sig open Core.Math
-let voice ~amp:Scalar ~freq:Scalar : Scalar Signal = (sine freq) * amp ;;
+let voice ~amp:Scalar ~freq:Scalar : Scalar Signal = (sine freq) *. amp ;;
 let half : Scalar -> Scalar Signal = voice ~amp:0.5 ;;
 let tone : Scalar Signal = half 440.0 ;;
 )");
@@ -1100,7 +1185,7 @@ TEST(checker_computed_callee) {
   // annotated binding in between, and function-typed parameters.
   std::string f = tp.write("ok.synth", R"(
 open Core open Core.Osc open Core.Fx open Core.Arrange open Core.Render open Core.Io open Core.Time open Core.Sig open Core.Math
-let add a:Scalar b:Scalar : Scalar = a + b ;;
+let add a:Scalar b:Scalar : Scalar = a +. b ;;
 let three : Scalar = (add 1.0) 2.0 ;;
 let damped : Scalar Signal = (lowpass ~cutoff:600.0) (saw 220.0) ;;
 let twice f:(Scalar -> Scalar) x:Scalar : Scalar = f (f x) ;;
@@ -1122,7 +1207,7 @@ let two : Scalar = twice (add 1.0) 0.0 ;;
   // Over-application through a computed callee still errors.
   std::string h = tp.write("bad2.synth", R"(
 open Core open Core.Osc open Core.Fx open Core.Arrange open Core.Render open Core.Io open Core.Time open Core.Sig open Core.Math
-let add a:Scalar b:Scalar : Scalar = a + b ;;
+let add a:Scalar b:Scalar : Scalar = a +. b ;;
 let x : Scalar = (add 1.0) 2.0 3.0 ;;
 )");
   DiagnosticBag d2;
@@ -1137,10 +1222,10 @@ open Core open Core.Osc open Core.Fx open Core.Arrange open Core.Render open Cor
 let hit : Scalar Sample = sample (sine 440.0) 0s 100ms ;;
 let song : Scalar Signal =
   mix_all (List.map (fun t:Timestamp -> place hit t) [0s; 500ms; 1s]) ;;
-let two : Scalar = (fun x:Scalar -> x + 1.0) 1.0 ;;
-let curried : Scalar = ((fun a:Scalar b:Scalar -> a + b) 1.0) 2.0 ;;
+let two : Scalar = (fun x:Scalar -> x +. 1.0) 1.0 ;;
+let curried : Scalar = ((fun a:Scalar b:Scalar -> a +. b) 1.0) 2.0 ;;
 let scaled base:Scalar : Scalar list =
-  List.map (fun x:Scalar -> x * base) [1.0; 2.0] ;;
+  List.map (fun x:Scalar -> x *. base) [1.0; 2.0] ;;
 )");
   DiagnosticBag diags;
   Program prog = checkProject({f}, diags);
@@ -1160,7 +1245,7 @@ open Core open Core.Osc open Core.Fx open Core.Arrange open Core.Render open Cor
 let gain : Scalar Signal = sine 2.0 ;;
 let xs : Scalar list =
   let base : Scalar = 10.0 in
-  List.map (fun gain:Scalar -> gain * base) [1.0; 2.0] ;;
+  List.map (fun gain:Scalar -> gain *. base) [1.0; 2.0] ;;
 )");
   DiagnosticBag diags;
   Program prog = checkProject({f}, diags);
@@ -1217,9 +1302,9 @@ TEST(checker_positional_partial_application) {
   // prefix of a user function curries the rest.
   std::string f = tp.write("ok.synth", R"(
 open Core open Core.Osc open Core.Fx open Core.Arrange open Core.Render open Core.Io open Core.Time open Core.Sig open Core.Math
-let f x:Scalar ~y:Scalar : Scalar = x + y ;;
+let f x:Scalar ~y:Scalar : Scalar = x +. y ;;
 let g : Scalar -> Scalar = f ~y:1.0 ;;
-let add a:Scalar b:Scalar : Scalar = a + b ;;
+let add a:Scalar b:Scalar : Scalar = a +. b ;;
 let inc : Scalar -> Scalar = add 1.0 ;;
 let three : Scalar = inc 2.0 ;;
 let sums : Scalar list = List.map (add 1.0) [1.0; 2.0] ;;
@@ -1237,7 +1322,7 @@ let sums : Scalar list = List.map (add 1.0) [1.0; 2.0] ;;
   // Over-application still errors.
   std::string h = tp.write("bad.synth", R"(
 open Core open Core.Osc open Core.Fx open Core.Arrange open Core.Render open Core.Io open Core.Time open Core.Sig open Core.Math
-let add a:Scalar b:Scalar : Scalar = a + b ;;
+let add a:Scalar b:Scalar : Scalar = a +. b ;;
 let x : Scalar = add 1.0 2.0 3.0 ;;
 )");
   DiagnosticBag d2;
@@ -1277,7 +1362,7 @@ TEST(checker_list_builders) {
   TempProject tp;
   std::string f = tp.write("ok.synth", R"(
 open Core open Core.Osc open Core.Fx open Core.Arrange open Core.Render open Core.Io open Core.Time open Core.Sig open Core.Math
-let harmonic i:Int : Scalar Signal = sine (110.0 * (to_scalar i + 1.0)) ;;
+let harmonic i:Int : Scalar Signal = sine (110.0 *. (to_scalar i +. 1.0)) ;;
 let stack : Scalar Signal list = List.init 5 harmonic ;;
 let fives : Scalar list = List.repeat 3 5.0 ;;
 let beats : Timestamp list = time_steps ~start:0s ~step:250ms ~count:8 ;;
@@ -1339,11 +1424,11 @@ TEST(checker_let_in_shadowing_and_scope) {
 open Core open Core.Osc open Core.Fx open Core.Arrange open Core.Render open Core.Io open Core.Time open Core.Sig open Core.Math
 let x : Scalar = 1.0 ;;
 let shadowed p:Scalar : Scalar =
-  let x : Scalar = p + 10.0 in
-  let p : Scalar = x * 2.0 in
-  p + x
+  let x : Scalar = p +. 10.0 in
+  let p : Scalar = x *. 2.0 in
+  p +. x
 ;;
-let outer_still_scalar : Scalar = x + 1.0 ;;
+let outer_still_scalar : Scalar = x +. 1.0 ;;
 )");
   DiagnosticBag diags;
   Program prog = checkProject({f}, diags);
@@ -1400,9 +1485,9 @@ TEST(checker_let_in_function_binding) {
   std::string f = tp.write("ok.synth", R"(
 open Core open Core.Osc open Core.Fx open Core.Arrange open Core.Render open Core.Io open Core.Time open Core.Sig open Core.Math
 let song : Scalar Signal =
-  let pluck freq:Scalar ~gain:Scalar : Scalar Signal = (sine freq) * gain in
+  let pluck freq:Scalar ~gain:Scalar : Scalar Signal = (sine freq) *. gain in
   let quiet : Scalar -> Scalar Signal = pluck ~gain:0.25 in
-  pluck 440.0 ~gain:0.5 + quiet 330.0
+  pluck 440.0 ~gain:0.5 +. quiet 330.0
 ;;
 )");
   DiagnosticBag diags;
@@ -1419,7 +1504,7 @@ TEST(checker_let_in_function_body_mismatch) {
   // The local function's body must match its declared return type.
   std::string f = tp.write(
       "bad.synth",
-      "open Core open Core.Osc open Core.Fx open Core.Arrange open Core.Render open Core.Io open Core.Time open Core.Sig open Core.Math\nlet x : Scalar = let f y:Scalar : Timestamp = y + 1.0 in 2.0 ;;");
+      "open Core open Core.Osc open Core.Fx open Core.Arrange open Core.Render open Core.Io open Core.Time open Core.Sig open Core.Math\nlet x : Scalar = let f y:Scalar : Timestamp = y +. 1.0 in 2.0 ;;");
   DiagnosticBag diags;
   checkProject({f}, diags);
   CHECK(diags.hasErrors());
@@ -1441,7 +1526,7 @@ TEST(checker_let_in_function_param_scope_ends_at_body) {
   // the body of the `in`.
   std::string f = tp.write("bad.synth", R"(
 open Core open Core.Osc open Core.Fx open Core.Arrange open Core.Render open Core.Io open Core.Time open Core.Sig open Core.Math
-let a : Scalar = let f y:Scalar : Scalar = y + 1.0 in f y ;;
+let a : Scalar = let f y:Scalar : Scalar = y +. 1.0 in f y ;;
 )");
   DiagnosticBag diags;
   checkProject({f}, diags);
@@ -1456,7 +1541,7 @@ TEST(checker_let_in_function_shares_enclosing_type_variables) {
   std::string f = tp.write("ok.synth", R"(
 open Core open Core.Osc open Core.Fx open Core.Arrange open Core.Render open Core.Io open Core.Time open Core.Sig open Core.Math
 let dampen ~input:'a Signal : 'a Signal =
-  let boost x:'a Signal : 'a Signal = x * 2.0 in
+  let boost x:'a Signal : 'a Signal = x *. 2.0 in
   lowpass ~cutoff:600.0 (boost input)
 ;;
 let mono : Scalar Signal = dampen (saw 220.0) ;;
@@ -1516,9 +1601,9 @@ open Core open Core.Osc open Core.Fx open Core.Arrange open Core.Render open Cor
 let dc : Scalar Signal = constant 0.5 ;;
 let pair : Vector Signal = constant_multi [0.3; 0.7] ;;
 let ramp : Scalar Signal = time ;;
-let fade : Scalar Signal = signal ~f:(fun t:Scalar -> exp (0.0 - 3.0 * t)) ;;
+let fade : Scalar Signal = signal ~f:(fun t:Scalar -> exp (0.0 -. 3.0 *. t)) ;;
 let wide : Vector Signal =
-  signal_multi ~fs:[(fun t:Scalar -> t); (fun t:Scalar -> 1.0 - t)] ;;
+  signal_multi ~fs:[(fun t:Scalar -> t); (fun t:Scalar -> 1.0 -. t)] ;;
 )");
   DiagnosticBag diags;
   Program prog = checkProject({f}, diags);
@@ -1543,7 +1628,7 @@ let l : Scalar = log 10.0 ;;
 let p : Scalar = pow 2.0 10.0 ;;
 let shaped : Scalar Signal = pow (sine 220.0) 3.0 ;;
 let curve : Scalar Signal = sqrt time ;;
-let fade : Scalar Signal = exp (0.0 - time) ;;
+let fade : Scalar Signal = exp (0.0 -. time) ;;
 )");
   DiagnosticBag diags;
   Program prog = checkProject({f}, diags);
@@ -1561,7 +1646,7 @@ TEST(checker_timestamp_conversions) {
   std::string f = tp.write("t.synth", R"(
 open Core open Core.Osc open Core.Fx open Core.Arrange open Core.Render open Core.Io open Core.Time open Core.Sig open Core.Math
 let bpm : Scalar = 120.0 ;;
-let beat : Timestamp = to_min (1.0 / bpm) ;;
+let beat : Timestamp = to_min (1.0 /. bpm) ;;
 let lead : Timestamp = to_ms 250.0 ;;
 let tail : Timestamp = to_sec 1.5 ;;
 let steps : Timestamp list = time_steps ~start:lead ~step:beat ~count:4 ;;
@@ -1596,16 +1681,16 @@ TEST(checker_timestamp_arithmetic) {
   TempProject tp;
   std::string f = tp.write("t.synth", R"(
 open Core open Core.Osc open Core.Fx open Core.Arrange open Core.Render open Core.Io open Core.Time open Core.Sig open Core.Math
-let beat : Timestamp = to_min (1.0 / 120.0) ;;
-let bar : Timestamp = beat * 4.0 ;;
-let bar2 : Timestamp = 4.0 * beat ;;
-let half : Timestamp = beat / 2.0 ;;
-let dotted : Timestamp = beat + beat / 2.0 ;;
-let upbeat : Timestamp = bar - beat ;;
-let clamped : Timestamp = 0s - 1s ;;
-let window : Timestamp = 250ms + 100ms * 2.0 ;;
+let beat : Timestamp = to_min (1.0 /. 120.0) ;;
+let bar : Timestamp = beat *. 4.0 ;;
+let bar2 : Timestamp = 4.0 *. beat ;;
+let half : Timestamp = beat /. 2.0 ;;
+let dotted : Timestamp = beat +. beat /. 2.0 ;;
+let upbeat : Timestamp = bar -. beat ;;
+let clamped : Timestamp = 0s -. 1s ;;
+let window : Timestamp = 250ms +. 100ms *. 2.0 ;;
 let grid : Timestamp list = time_steps ~start:bar ~step:half ~count:8 ;;
-let cmp : Bool = bar > beat ;;
+let cmp : Bool = bar >. beat ;;
 )");
   DiagnosticBag diags;
   Program prog = checkProject({f}, diags);
@@ -1629,21 +1714,21 @@ TEST(checker_timestamp_arithmetic_type_errors) {
   // Timestamp does not divide a Scalar.
   for (const char* body :
        {"open Core open Core.Osc open Core.Fx open Core.Arrange open Core.Render open Core.Io open Core.Time open Core.Sig open Core.Math"
-        "\nlet x : Timestamp = 1s * 2s ;;",
+        "\nlet x : Timestamp = 1s *. 2s ;;",
         "open Core open Core.Osc open Core.Fx open Core.Arrange open Core.Render open Core.Io open Core.Time open Core.Sig open Core.Math"
-        "\nlet x : Scalar = 1s / 500ms ;;",
+        "\nlet x : Scalar = 1s /. 500ms ;;",
         "open Core open Core.Osc open Core.Fx open Core.Arrange open Core.Render open Core.Io open Core.Time open Core.Sig open Core.Math"
-        "\nlet x : Timestamp = 1s / 500ms ;;",
+        "\nlet x : Timestamp = 1s /. 500ms ;;",
         "open Core open Core.Osc open Core.Fx open Core.Arrange open Core.Render open Core.Io open Core.Time open Core.Sig open Core.Math"
-        "\nlet x : Timestamp = 1s + 2.0 ;;",
+        "\nlet x : Timestamp = 1s +. 2.0 ;;",
         "open Core open Core.Osc open Core.Fx open Core.Arrange open Core.Render open Core.Io open Core.Time open Core.Sig open Core.Math"
-        "\nlet x : Timestamp = 2.0 - 1s ;;",
+        "\nlet x : Timestamp = 2.0 -. 1s ;;",
         "open Core open Core.Osc open Core.Fx open Core.Arrange open Core.Render open Core.Io open Core.Time open Core.Sig open Core.Math"
         "\nlet x : Timestamp = 1s * 2 ;;",
         "open Core open Core.Osc open Core.Fx open Core.Arrange open Core.Render open Core.Io open Core.Time open Core.Sig open Core.Math"
-        "\nlet x : Timestamp = 2.0 / 1s ;;",
+        "\nlet x : Timestamp = 2.0 /. 1s ;;",
         "open Core open Core.Osc open Core.Fx open Core.Arrange open Core.Render open Core.Io open Core.Time open Core.Sig open Core.Math"
-        "\nlet x : Scalar = 1s + 1s ;;",
+        "\nlet x : Scalar = 1s +. 1s ;;",
         "open Core open Core.Osc open Core.Fx open Core.Arrange open Core.Render open Core.Io open Core.Time open Core.Sig open Core.Math"
         "\nlet x : Timestamp = -1s ;;"}) {
     TempProject tp;
@@ -1976,7 +2061,7 @@ let len : Scalar = span ~p:p1 ;;
 let edited : Phrase =
   p2 |> move ~beats:8.0 |> transpose ~semitones:(-12) |> in_key ~s:key
      |> staccato ~ratio:0.9 |> legato
-     |> velocity ~f:(fun v:Scalar -> v * amp ~l:Mf) ;;
+     |> velocity ~f:(fun v:Scalar -> v *. amp ~l:Mf) ;;
 let joined : Phrase = seq ~ps:[p1; p2] ;;
 let piled : Phrase = layer ~ps:[p3; p4] ;;
 let twice : Phrase = loop ~p:p2 ~n:2 ;;
@@ -1985,15 +2070,15 @@ let quiet : Scalar = db ~x:(-6.0) ;;
 let cresc : Scalar list = ramp ~from:Pp ~to:Forte ~n:8 ;;
 let evs : Event list = realize ~tempo:t ~tuning:tn ~p:edited ;;
 let voice freq:Scalar dur:Timestamp vel:Scalar : Scalar Sample =
-  sine freq * vel |> sample ~from:0s ~to:dur ;;
+  sine freq *. vel |> sample ~from:0s ~to:dur ;;
 let out : Scalar Signal = play ~voice:voice ~events:evs ;;
 (* polymorphic in the channel layout, like the primitives it wraps *)
 let wide voice_f:Scalar dur:Timestamp vel:Scalar : Vector Sample =
-  channels [sine voice_f * vel; sine (voice_f * 2.0) * vel]
+  channels [sine voice_f *. vel; sine (voice_f *. 2.0) *. vel]
     |> sample ~from:0s ~to:dur ;;
 let stereo : Vector Signal = play ~voice:wide ~events:evs ;;
 let hit vel:Scalar : Scalar Sample =
-  noise 200.0 * vel |> sample ~from:0s ~to:100ms ;;
+  noise 200.0 *. vel |> sample ~from:0s ~to:100ms ;;
 let drums : Scalar Signal = strike ~voice:hit ~events:evs ;;
 (* reachable qualified, without opening Score *)
 let q : Scalar = Core.Score.amp ~l:Core.Score.Fff ;;
@@ -2105,7 +2190,7 @@ TEST(checker_resample_typing) {
   TempProject tp;
   std::string f = tp.write("ok.synth", R"(
 open Core open Core.Osc open Core.Fx open Core.Arrange open Core.Render open Core.Io open Core.Time open Core.Sig open Core.Math
-let warped : Scalar Signal = resample (saw 110.0) ~f:(fun t:Scalar -> 1.0 + t) ;;
+let warped : Scalar Signal = resample (saw 110.0) ~f:(fun t:Scalar -> 1.0 +. t) ;;
 let piped : Scalar Signal = saw 110.0 |> resample ~f:(fun t:Scalar -> 0.5) ;;
 let wide : Vector Signal =
   channels [sine 220.0; sine 330.0] |> resample ~f:(fun t:Scalar -> 2.0) ;;
@@ -2208,7 +2293,7 @@ TEST(checker_polymorphic_higher_order_definition) {
   std::string f = tp.write("poly.synth", R"(
 open Core open Core.Osc open Core.Fx open Core.Arrange open Core.Render open Core.Io open Core.Time open Core.Sig open Core.Math
 let twice ~f:('a -> 'a) ~x:'a : 'a = f (f x) ;;
-let quad : Scalar = twice ~f:(fun n:Scalar -> n * 2.0) ~x:1.0 ;;
+let quad : Scalar = twice ~f:(fun n:Scalar -> n *. 2.0) ~x:1.0 ;;
 let filtered : Scalar Signal =
   twice ~f:(lowpass ~cutoff:600.0) ~x:(saw 220.0)
 ;;
@@ -2331,7 +2416,7 @@ TEST(checker_inline_module_defs_and_refs) {
 open Core open Core.Osc open Core.Fx open Core.Arrange open Core.Render open Core.Io open Core.Time open Core.Sig open Core.Math
 module Voices = struct
   let base : Scalar = 220.0 ;;
-  let up : Scalar = base * 2.0 ;;
+  let up : Scalar = base *. 2.0 ;;
   module Fx = struct
     let damp ~input:'a Signal : 'a Signal = lowpass ~cutoff:600.0 input ;;
   end
@@ -2408,7 +2493,7 @@ module Kit = struct
   end
 end ;;
 open Kit
-let tone : Scalar Signal = (sine hz) * Sub.gain ;;
+let tone : Scalar Signal = (sine hz) *. Sub.gain ;;
 )");
   DiagnosticBag diags;
   Program prog = checkProject({f}, diags);
@@ -2498,8 +2583,8 @@ TEST(checker_bool_and_if) {
   std::string f = tp.write("song.synth", R"(
 open Core open Core.Osc open Core.Fx open Core.Arrange open Core.Render open Core.Io open Core.Time open Core.Sig open Core.Math
 let tempo : Scalar = 128.0 ;;
-let fast : Bool = tempo >= 120.0 && not (tempo > 200.0) ;;
-let late : Bool = 500ms < 1s || false ;;
+let fast : Bool = tempo >=. 120.0 && not (tempo >. 200.0) ;;
+let late : Bool = 500ms <. 1s || false ;;
 let voice ~freq:Scalar ~crisp:Bool : Scalar Signal =
   if crisp then highpass ~cutoff:900.0 (saw freq)
   else lowpass ~cutoff:500.0 (sine freq) ;;
@@ -2525,7 +2610,7 @@ TEST(checker_if_branches_can_be_polymorphic) {
 open Core open Core.Osc open Core.Fx open Core.Arrange open Core.Render open Core.Io open Core.Time open Core.Sig open Core.Math
 let pick ~c:Bool ~a:'a ~b:'a : 'a = if c then a else b ;;
 let n : Scalar = pick true 1.0 2.0 ;;
-let t : Timestamp = pick (1.0 < 2.0) 250ms 500ms ;;
+let t : Timestamp = pick (1.0 <. 2.0) 250ms 500ms ;;
 )");
   DiagnosticBag diags;
   Program prog = checkProject({f}, diags);
@@ -2567,11 +2652,11 @@ TEST(checker_comparisons_are_build_time_only) {
   TempProject tp;
   std::string f = tp.write("bad.synth",
                            "open Core open Core.Osc open Core.Fx open Core.Arrange open Core.Render open Core.Io open Core.Time open Core.Sig open Core.Math\n"
-                           "let c : Bool = (sine 440.0) < 0.5 ;;\n"
-                           "let d : Bool = 1.0 < 2.0 < 3.0 ;;\n"
+                           "let c : Bool = (sine 440.0) <. 0.5 ;;\n"
+                           "let d : Bool = 1.0 <. 2.0 < 3.0 ;;\n"
                            "let e : Bool = true && 1.0 ;;\n"
                            "let g : Scalar = true + 1.0 ;;\n"
-                           "let h : Bool = 1s == 1.0 ;;");
+                           "let h : Bool = 1s ==. 1.0 ;;");
   DiagnosticBag diags;
   checkProject({f}, diags);
   CHECK(diags.items.size() == 5);
@@ -2584,7 +2669,7 @@ open Core open Core.Osc open Core.Fx open Core.Arrange open Core.Render open Cor
 let loud : Bool = false ;;
 let s : Scalar Signal = sine 440.0 ;;
 let _ =
-  if loud then render "a" 8000.0 (sample (s * 2.0) 0s 100ms)
+  if loud then render "a" 8000.0 (sample (s *. 2.0) 0s 100ms)
   else render "b" 8000.0 (sample s 0s 100ms) ;;
 )");
   DiagnosticBag diags;
@@ -2717,7 +2802,7 @@ let n : Int = 3 + 4 * 2 ;;
 let d : Int = 7 / 2 ;;
 let neg : Int = -n ;;
 let b : Bool = n < 12 && d == 3 ;;
-let s : Scalar = to_scalar n * 1.5 ;;
+let s : Scalar = to_scalar n *. 1.5 ;;
 let r : Int = round 2.6 ;;
 let fl : Int = floor 2.6 ;;
 let ce : Int = ceil 2.4 ;;
@@ -3117,7 +3202,7 @@ TEST(checker_record_in_signal_pipeline) {
 open Core open Core.Osc open Core.Fx
 type Voice = { osc : Scalar Signal; vel : Scalar } ;;
 let v : Voice = { osc = sine 440.0; vel = 0.5 } ;;
-let out : Scalar Signal = v.osc * v.vel ;;
+let out : Scalar Signal = v.osc *. v.vel ;;
 )");
   DiagnosticBag diags;
   Program prog = checkProject({f}, diags);
@@ -3282,11 +3367,11 @@ TEST(checker_destructuring_let) {
 type Env = { attack : Timestamp; release : Timestamp } ;;
 let bounds : (Scalar, Scalar) = (0.1, 0.9) ;;
 let mid : Scalar =
-  let (lo, hi) : (Scalar, Scalar) = bounds in (lo + hi) / 2.0 ;;
+  let (lo, hi) : (Scalar, Scalar) = bounds in (lo +. hi) /. 2.0 ;;
 let env : Env = { attack = 5ms; release = 100ms } ;;
 let a : Timestamp =
   let { attack; release = r } : Env = env in
-  if attack < r then attack else r ;;
+  if attack <. r then attack else r ;;
 )");
   DiagnosticBag diags;
   Program prog = checkProject({f}, diags);
@@ -3393,7 +3478,7 @@ type Chain = | End | Link of (Scalar, Chain) ;;
 let rec total c:Chain : Scalar =
   match c with
   | End -> 0.0
-  | Link (x, rest) -> x + total rest ;;
+  | Link (x, rest) -> x +. total rest ;;
 let t : Scalar = total (Link (1.0, Link (2.0, End))) ;;
 )");
   DiagnosticBag diags;
@@ -3434,7 +3519,7 @@ TEST(checker_lists_are_matchable_variants) {
 let rec sum xs:Scalar list : Scalar =
   match xs with
   | Nil -> 0.0
-  | Cons (x, rest) -> x + sum rest ;;
+  | Cons (x, rest) -> x +. sum rest ;;
 let s : Scalar = sum [1.0; 2.0; 3.0] ;;
 let manual : Scalar list = Cons (1.0, Cons (2.0, Nil)) ;;
 let head xs:'a list ~fallback:'a : 'a =
@@ -3505,8 +3590,8 @@ TEST(checker_math_additions_roster) {
   TempProject tp;
   std::string f = tp.write("m.synth", R"(
 open Core open Core.Math
-let s : Scalar = sin pi + cos 0.0 + tan 0.1 + atan 1.0 + abs (-2.0) ;;
-let sig : Scalar Signal = Core.Sig.signal ~f:(fun t:Scalar -> sin (t * 2.0 * pi)) ;;
+let s : Scalar = sin pi +. cos 0.0 +. tan 0.1 +. atan 1.0 +. abs (-2.0) ;;
+let sig : Scalar Signal = Core.Sig.signal ~f:(fun t:Scalar -> sin (t *. 2.0 *. pi)) ;;
 let m1 : Scalar = min 1.0 2.0 ;;
 let m2 : Scalar = max 1.0 2.0 ;;
 let c : Scalar = clamp ~lo:0.0 ~hi:1.0 ~x:1.5 ;;
@@ -3570,7 +3655,7 @@ TEST(checker_new_fx_and_osc_roster) {
   std::string f = tp.write("fx.synth", R"(
 open Core open Core.Osc open Core.Fx open Core.Sig open Core.Arrange
 let sweep : Scalar Signal =
-  lowpass_mod ~cutoff:(constant 400.0 + time * 800.0) ~input:(saw 110.0) ;;
+  lowpass_mod ~cutoff:(constant 400.0 +. time *. 800.0) ~input:(saw 110.0) ;;
 let hp : Vector Signal =
   highpass_mod ~cutoff:(constant 100.0)
                ~input:(channels [sine 100.0; sine 200.0]) ;;
@@ -3624,11 +3709,11 @@ TEST(checker_signal_broadcast_row) {
 open Core open Core.Osc open Core.Fx open Core.Arrange
 let bus : Vector Signal = channels [sine 220.0; sine 221.0] ;;
 let env : Scalar Signal = exp_decay 2.0 ;;
-let faded : Vector Signal = bus * env ;;
-let other : Vector Signal = env * bus ;;
-let summed : Vector Signal = bus + env ;;
+let faded : Vector Signal = bus *. env ;;
+let other : Vector Signal = env *. bus ;;
+let summed : Vector Signal = bus +. env ;;
 let ducked ~input:'a Signal ~gain:Scalar Signal : 'a Signal =
-  input * gain ;;
+  input *. gain ;;
 let d : Vector Signal = ducked ~input:bus ~gain:env ;;
 )");
   DiagnosticBag diags;
@@ -3640,7 +3725,7 @@ let d : Vector Signal = ducked ~input:bus ~gain:env ;;
   // Two rigid element types still do not combine.
   std::string g = tp.write("b2.synth", R"(
 open Core
-let bad ~x:'a Signal ~y:'b Signal : 'a Signal = x * y ;;
+let bad ~x:'a Signal ~y:'b Signal : 'a Signal = x *. y ;;
 )");
   DiagnosticBag d2;
   checkProject({g}, d2);
@@ -3651,7 +3736,7 @@ TEST(checker_groove_roster) {
   TempProject tp;
   std::string f = tp.write("g.synth", R"(
 open Core open Core.Osc open Core.Fx open Core.Arrange open Core.Time
-let hit : Scalar Sample = sample (sine 440.0 * exp_decay 20.0) 0s 100ms ;;
+let hit : Scalar Sample = sample (sine 440.0 *. exp_decay 20.0) 0s 100ms ;;
 let grid16 : Timestamp list = time_steps ~start:0s ~step:125ms ~count:16 ;;
 let straight : Scalar Signal = Groove.pattern ~hit:hit ~steps:grid16 ;;
 let loose : Scalar Signal =
@@ -3774,7 +3859,7 @@ let l : Scalar Signal = sine 220.0 ;;
 let r : Scalar Signal = sine 331.0 ;;
 let wide : Vector Signal = Mix.pan ~pos:0.3 ~input:l ;;
 let auto : Vector Signal =
-  Mix.pan_sig ~pos:(Core.Sig.signal ~f:(fun t:Scalar -> t - 1.0))
+  Mix.pan_sig ~pos:(Core.Sig.signal ~f:(fun t:Scalar -> t -. 1.0))
               ~input:l ;;
 let master : Vector Signal =
   Mix.mix ~parts:[(Mix.db (-6.0), wide); (0.5, auto)] ;;
@@ -3823,7 +3908,7 @@ TEST(checker_list_additions_roster) {
   std::string f = tp.write("l.synth", R"(
 open Core
 let ixs : Scalar list =
-  List.mapi ~f:(fun i:Int x:Scalar -> Core.Math.to_scalar i * x)
+  List.mapi ~f:(fun i:Int x:Scalar -> Core.Math.to_scalar i *. x)
             ~xs:[1.0; 2.0; 3.0] ;;
 let front : Int list = List.take ~n:2 ~xs:[1; 2; 3; 4] ;;
 let back : Int list = List.drop ~n:2 ~xs:[1; 2; 3; 4] ;;
@@ -3843,11 +3928,11 @@ TEST(checker_dsp_prelude) {
   std::string f = tp.write("d.synth", R"(
 open Core
 open Core.Dsp
-let pluck freq:Scalar : Scalar Signal = sine freq * exp_decay 6.0 ;;
+let pluck freq:Scalar : Scalar Signal = sine freq *. exp_decay 6.0 ;;
 let low : Scalar Signal = lowpass ~cutoff:800.0 (saw_bl 110.0) ;;
 let win : Scalar Sample = sample (pluck 440.0) 0s 800ms ;;
 let both : Scalar Signal = mix_all [place win 0s; place win 500ms] ;;
-let n : Scalar = to_scalar (round 2.5) + pi ;;
+let n : Scalar = to_scalar (round 2.5) +. pi ;;
 let _ = render "dsp-demo" 8000.0 (sample both 0s 1s) ;;
 )");
   DiagnosticBag diags;
@@ -3863,11 +3948,11 @@ TEST(checker_local_inference) {
   // synthesizes them from the body.
   std::string f = tp.write("i.synth", R"(
 open Core open Core.Osc open Core.Fx
-let freq = 220.0 * 2.0 ;;
-let tone f:Scalar = sine f * exp_decay 4.0 ;;
+let freq = 220.0 *. 2.0 ;;
+let tone f:Scalar = sine f *. exp_decay 4.0 ;;
 let voiced =
   let gain = 0.5 in
-  let scaled g:Scalar = tone freq * g in
+  let scaled g:Scalar = tone freq *. g in
   scaled gain ;;
 )");
   DiagnosticBag diags;

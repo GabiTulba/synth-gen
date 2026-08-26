@@ -1889,44 +1889,100 @@ class ModuleChecker {
   // §4.4). Comparisons and Bool combinators are build-time only: signals
   // are lazy per-sample streams, and a sample-wise select would be a
   // different (signal-producing) operation, deliberately absent in v1.
+  // How an operator was spelled, and how its counterpart would be: the
+  // two spellings differ only in the trailing '.', so error messages can
+  // hand back the one the operand types actually call for.
+  static std::string opText(BinOpKind op, bool dotted) {
+    std::string base;
+    switch (op) {
+      case BinOpKind::Add: base = "+"; break;
+      case BinOpKind::Sub: base = "-"; break;
+      case BinOpKind::Mul: base = "*"; break;
+      case BinOpKind::Div: base = "/"; break;
+      case BinOpKind::Lt: base = "<"; break;
+      case BinOpKind::Le: base = "<="; break;
+      case BinOpKind::Gt: base = ">"; break;
+      case BinOpKind::Ge: base = ">="; break;
+      case BinOpKind::Eq: base = "=="; break;
+      case BinOpKind::Ne: base = "!="; break;
+      case BinOpKind::And: base = "&&"; break;
+      case BinOpKind::Or: base = "||"; break;
+    }
+    return dotted ? base + "." : base;
+  }
+
+  // The kinds the '.'-suffixed operators work on. Int is the one numeric
+  // kind left out, which is the whole point of the split.
+  bool isContinuousKind(const TypePtr& t) const {
+    using K = Type::Kind;
+    return t->kind == K::Scalar || t->kind == K::Timestamp ||
+           t->kind == K::Vector || isSignalType(t);
+  }
+
+  // Operators come in two spellings and each accepts one half of the
+  // numeric kinds: bare (`+`, `<`) is Int-only, '.'-suffixed (`+.`, `<.`)
+  // covers the continuous kinds - Scalar, Timestamp, Vector, Signal.
+  // Nothing is overloaded across the divide, so no operator's result kind
+  // depends on inference, and `2 / 3` (truncating) can never be confused
+  // with `2.0 /. 3.0`.
   TypePtr checkBinOp(Expr& e, std::map<std::string, TypePtr>& env) {
     TypePtr l = check(*e.items[0], env);
     TypePtr r = check(*e.items[1], env);
     auto is = [](const TypePtr& t, Type::Kind k) { return t->kind == k; };
     using K = Type::Kind;
-    switch (e.op) {
-      case BinOpKind::Lt:
-      case BinOpKind::Le:
-      case BinOpKind::Gt:
-      case BinOpKind::Ge:
-      case BinOpKind::Eq:
-      case BinOpKind::Ne:
-        if ((is(l, K::Scalar) && is(r, K::Scalar)) ||
-            (is(l, K::Int) && is(r, K::Int)) ||
-            (is(l, K::Timestamp) && is(r, K::Timestamp)))
-          return tBool();
-        fail(e.span, "comparison is not defined for " + typeName(l) +
-                         " and " + typeName(r) +
-                         " (compare two Ints, two Scalars, or two "
-                         "Timestamps)");
-      case BinOpKind::And:
-      case BinOpKind::Or:
-        if (is(l, K::Bool) && is(r, K::Bool)) return tBool();
-        fail(e.span, "'&&' and '||' need Bool operands, got " +
-                         typeName(l) + " and " + typeName(r));
-      default:
-        break;
+    const std::string here = "'" + opText(e.op, e.dotted) + "'";
+    const std::string other = "'" + opText(e.op, !e.dotted) + "'";
+    bool isCmp = e.op == BinOpKind::Lt || e.op == BinOpKind::Le ||
+                 e.op == BinOpKind::Gt || e.op == BinOpKind::Ge ||
+                 e.op == BinOpKind::Eq || e.op == BinOpKind::Ne;
+
+    // `&&` and `||` have no '.' form to lex, so they need no split.
+    if (e.op == BinOpKind::And || e.op == BinOpKind::Or) {
+      if (is(l, K::Bool) && is(r, K::Bool)) return tBool();
+      fail(e.span, "'&&' and '||' need Bool operands, got " + typeName(l) +
+                       " and " + typeName(r));
     }
-    if (is(l, K::Scalar) && is(r, K::Scalar)) return tScalar();
-    // Ints stay Ints: whole-number arithmetic for counts and indices
-    // (`/` divides towards zero). They never mix with the continuous
-    // kinds implicitly - conversion is explicit (to_scalar, round, ...).
-    if (is(l, K::Int) && is(r, K::Int)) return tInt();
-    if (is(l, K::Int) || is(r, K::Int))
-      fail(e.span, "operator is not defined for " + typeName(l) + " and " +
+
+    // The bare half: Ints only. Ints stay Ints - whole-number arithmetic
+    // for counts and indices, where `/` divides towards zero.
+    if (!e.dotted) {
+      if (is(l, K::Int) && is(r, K::Int)) return isCmp ? tBool() : tInt();
+      if (isContinuousKind(l) && isContinuousKind(r))
+        fail(e.span, here + " is the Int operator; write " + other +
+                         " for " + typeName(l) + " and " + typeName(r));
+      fail(e.span, here + " is not defined for " + typeName(l) + " and " +
                        typeName(r) +
-                       " (an Int does not mix with other numeric types "
-                       "implicitly; convert with to_scalar)");
+                       " (it takes two Ints; " + other +
+                       " takes Scalars, Timestamps, Vectors and Signals, "
+                       "and an Int only crosses over through to_scalar)");
+    }
+
+    // The '.' half: everything continuous, and never an Int. Two Ints
+    // are a wrong-spelling slip and the bare form is the fix; a lone Int
+    // beside a continuous operand is a missing conversion, and pointing
+    // at the bare operator there would only be wrong a second time.
+    if (is(l, K::Int) && is(r, K::Int))
+      fail(e.span, here + " is not defined for two Ints; write " + other +
+                       " for Int arithmetic");
+    if (is(l, K::Int) || is(r, K::Int))
+      fail(e.span, here + " is not defined for " + typeName(l) + " and " +
+                       typeName(r) +
+                       " (an Int does not mix with the continuous kinds "
+                       "implicitly; convert it with to_scalar)");
+
+    if (isCmp) {
+      if ((is(l, K::Scalar) && is(r, K::Scalar)) ||
+          (is(l, K::Timestamp) && is(r, K::Timestamp)))
+        return tBool();
+      fail(e.span, "comparison is not defined for " + typeName(l) +
+                       " and " + typeName(r) +
+                       " (" + here +
+                       " compares two Scalars or two Timestamps, " + other +
+                       " two Ints; a Signal has no single value to "
+                       "compare)");
+    }
+
+    if (is(l, K::Scalar) && is(r, K::Scalar)) return tScalar();
     // Timestamps: durations add and subtract, and scale by a Scalar
     // (either order for `*`, left operand only for `/`). The table is
     // deliberately partial - it adds a dimensional rule rather than
@@ -1950,20 +2006,20 @@ class ModuleChecker {
              "Scalar, and a Timestamp deliberately has no way back to one "
              "(there is no inverse of to_sec/to_ms/to_min). Carry the "
              "Scalar you divided by instead, or keep the result a "
-             "Timestamp with 'beat / 2.0'");
+             "Timestamp with 'beat /. 2.0'");
       if (both)
         fail(e.span, "two Timestamps do not multiply (the result would not "
                      "be a duration); scale a Timestamp by a Scalar "
-                     "instead, as in 'beat * 1.5'");
+                     "instead, as in 'beat *. 1.5'");
       if (add)
-        fail(e.span, "operator is not defined for " + typeName(l) + " and " +
+        fail(e.span, here + " is not defined for " + typeName(l) + " and " +
                          typeName(r) +
                          " (a Timestamp only adds to another Timestamp; "
                          "convert with to_sec/to_ms/to_min first)");
-      fail(e.span, "operator is not defined for " + typeName(l) + " and " +
+      fail(e.span, here + " is not defined for " + typeName(l) + " and " +
                        typeName(r) +
-                       " (scale a Timestamp by a Scalar: 'beat * 1.5' or "
-                       "'1.5 * beat', and 'beat / 2.0')");
+                       " (scale a Timestamp by a Scalar: 'beat *. 1.5' or "
+                       "'1.5 *. beat', and 'beat /. 2.0')");
     }
     if (is(l, K::Vector) && is(r, K::Vector)) return tVector();
     if ((is(l, K::Vector) && is(r, K::Scalar)) ||
@@ -1973,7 +2029,7 @@ class ModuleChecker {
       if (typeEquals(l->items[0], r->items[0])) return l;
       // The mono broadcast row: a Scalar Signal lifts across the other
       // side's channels, mirroring the Scalar broadcast row and am's
-      // mono-modulator rule - `bus * envelope` works on any bus. The
+      // mono-modulator rule - `bus *. envelope` works on any bus. The
       // Scalar side never decides the element type, so a rigid 'a Signal
       // stays 'a Signal.
       if (r->items[0]->kind == K::Scalar) return l;
@@ -1983,7 +2039,7 @@ class ModuleChecker {
     }
     if (isSignalType(l) && is(r, K::Scalar)) return l;
     if (is(l, K::Scalar) && isSignalType(r)) return r;
-    fail(e.span, "operator is not defined for " + typeName(l) + " and " +
+    fail(e.span, here + " is not defined for " + typeName(l) + " and " +
                      typeName(r));
   }
 };

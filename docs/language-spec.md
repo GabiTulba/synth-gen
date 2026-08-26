@@ -42,8 +42,12 @@ accepts and how it is typed and evaluated. The design document
 - **String literals**: `"..."` with escapes `\n`, `\t`, `\\`, `\"`.
 - **Punctuation**: `;;` `;` `:` `=` `(` `)` `[` `]` `{` `}` `,` `.`
   `->` `~` `|>` `|` `+` `-` `*` `/` `<` `<=` `>` `>=` `==` `!=` `&&`
-  `||`. A lone `|` is the variant/match bar; `|>` and `||` win where
-  they fit.
+  `||`, and the `.`-suffixed operators `+.` `-.` `*.` `/.` `<.` `<=.`
+  `>.` `>=.` `==.` `!=.` (§3). A lone `|` is the variant/match bar;
+  `|>` and `||` win where they fit. Operators are longest-match, so
+  `>=.` beats `>=` and `>.` beats `>`; a `.` binds to the operator on
+  its left rather than starting a projection, which is unambiguous
+  because a `.` never followed an operator before.
 
 ## 2. Grammar
 
@@ -121,9 +125,11 @@ or-expr     ::= and-expr { "||" and-expr }
 and-expr    ::= comparison { "&&" comparison }
 comparison  ::= additive { cmp-op additive }
 cmp-op      ::= "<" | "<=" | ">" | ">=" | "==" | "!="
-additive    ::= multiplicative { ("+" | "-") multiplicative }
-multiplicative ::= unary { ("*" | "/") unary }
-unary       ::= "-" unary | app
+              | "<." | "<=." | ">." | ">=." | "==." | "!=."
+additive    ::= multiplicative
+                { ("+" | "-" | "+." | "-.") multiplicative }
+multiplicative ::= unary { ("*" | "/" | "*." | "/.") unary }
+unary       ::= ("-" | "-.") unary | app
 app         ::= atom { arg }                        (application, left)
 arg         ::= atom | "~" Ident ":" atom           (labeled argument)
 atom        ::= atom-base { "." Ident }             (record projection;
@@ -148,11 +154,16 @@ Notes:
   return-type annotation may be omitted — the checker infers it from
   the body (see §3, local inference). `let rec` and `external` bodies
   still require it, as do destructuring bindings.
-- Application binds tighter than operators: `sine 440.0 * 0.5` is
-  `(sine 440.0) * 0.5`. `*`/`/` bind tighter than `+`/`-`; all are
+- Application binds tighter than operators: `sine 440.0 *. 0.5` is
+  `(sine 440.0) *. 0.5`. `*`/`/` bind tighter than `+`/`-`, and each
+  `.`-suffixed operator sits at its bare counterpart's level; all are
   left-associative.
 - Unary minus negates its operand and preserves its type: defined for
-  `Int`, `Scalar`, `Vector`, and `t Signal`.
+  `Int`, `Scalar`, `Vector`, and `t Signal`. It is the one operator the
+  discrete/continuous split (§3) leaves alone — with a single operand
+  there is nothing to disambiguate — so `-` covers every numeric kind
+  and `-.` is accepted as the same operator, for lines written in the
+  dotted style.
 - List elements are separated by `;` (OCaml style); `[]` is legal
   wherever the element type is determined — see §3.
 - Record projection `r.field` binds tighter than application
@@ -410,7 +421,7 @@ let osc w:Wave ~freq:Scalar : Scalar Signal =
   match w with
   | Sine -> sine ~freq:freq
   | Saw -> saw ~freq:freq
-  | Pulse duty -> square ~freq:freq * duty
+  | Pulse duty -> square ~freq:freq *. duty
 ;;
 ```
 
@@ -448,7 +459,7 @@ let rec fact n:Int : Int = if n <= 1 then 1 else n * fact (n - 1) ;;
 let rec sum xs:Scalar list : Scalar =
   match xs with
   | Nil -> 0.0
-  | Cons (x, rest) -> x + sum rest
+  | Cons (x, rest) -> x +. sum rest
 ;;
 ```
 
@@ -495,7 +506,7 @@ Two rules make one check stand for every instantiation:
   variable. `let f ~x:'a : Scalar = x` and
   `let f ~x:'a : 'a = lowpass ~cutoff:1.0 x` are both rejected: each
   would decide something that is the caller's to decide. Operators are
-  included: `x * 2.0` on an `'a` is not defined (on an `'a Signal` it is,
+  included: `x *. 2.0` on an `'a` is not defined (on an `'a Signal` it is,
   by the Signal/Scalar row of the table below).
 - **Every variable in the result must occur in a parameter**, so the call
   site can determine it. `let bad ~x:Scalar : 'a Signal = sine x` is
@@ -515,36 +526,52 @@ generalizes.
 
 ### Operators (pointwise lifting + Scalar broadcasting)
 
-For `+ - * /` with operand types L and R:
+Every operator comes in two spellings, and each accepts one half of the
+numeric kinds:
+
+- **bare** — `+ - * /` and `< <= > >= == !=` — takes two **Int**s;
+- **`.`-suffixed** — `+. -. *. /.` and `<. <=. >. >=. ==. !=.` — takes
+  the **continuous** kinds: Scalar, Timestamp, Vector and Signal.
+
+Nothing is overloaded across that divide, so an operator's result kind
+never depends on inference, and truncating `7 / 2` (`3`) can never be
+mistaken for `7.0 /. 2.0` (`3.5`). The two spellings share a precedence
+level, so switching a line between them never reparenthesizes it.
+
+For `+. -. *. /.` with operand types L and R:
 
 | L | R | Result |
 |---|---|--------|
 | Scalar | Scalar | Scalar |
-| Int | Int | Int (`/` divides towards zero; division by zero is a build error) |
 | Vector | Vector | Vector (element-wise; channel counts must match at build time) |
 | Vector | Scalar (either order) | Vector |
 | t Signal | t Signal | t Signal (pointwise) |
 | t Signal | Scalar (either order) | t Signal (broadcast) |
-| t Signal | Scalar Signal (either order) | t Signal (mono broadcast: the Scalar Signal lifts across the other side's channels, mirroring `am`'s mono-modulator rule — `bus * envelope` fades a stereo bus) |
-| Timestamp | Timestamp | Timestamp (`+` `-` only) |
-| Timestamp | Scalar | Timestamp (`*` either order, `/` with the Timestamp on the left) |
+| t Signal | Scalar Signal (either order) | t Signal (mono broadcast: the Scalar Signal lifts across the other side's channels, mirroring `am`'s mono-modulator rule — `bus *. envelope` fades a stereo bus) |
+| Timestamp | Timestamp | Timestamp (`+.` `-.` only) |
+| Timestamp | Scalar | Timestamp (`*.` either order, `/.` with the Timestamp on the left) |
 
-Anything else (e.g. `Timestamp + Signal`, or `Int + Scalar` — Ints do
-not broadcast; convert explicitly with `to_scalar`) is a type error.
+`+ - * /` take `Int | Int -> Int`, where `/` divides towards zero and
+division by zero is a build error.
+
+Anything else is a type error: `1s +. sine 440.0` (no row above),
+`2 +. 3.0` or `1s *. 2` (an Int never reaches a `.` operator), and
+`0.5 * 2.0` (a Scalar never reaches a bare one — the error names `*.`).
+Ints do not broadcast and do not convert implicitly; cross over with
+`to_scalar`.
 
 The Timestamp rows are a *dimensional* rule, not a numeric one:
 durations add and subtract, and a duration scales by a dimensionless
 Scalar, so musical time can be written as musical time —
-`beat * 1.5` is a dotted note, `bar - beat` is the upbeat before it,
-`to_ms 250.0 + 100ms` composes a window. The combinations left out are
-left out on purpose. `1s * 2s` is not a duration; `1s / 500ms` would
+`beat *. 1.5` is a dotted note, `bar -. beat` is the upbeat before it,
+`to_ms 250.0 +. 100ms` composes a window. The combinations left out are
+left out on purpose. `1s *. 2s` is not a duration; `1s /. 500ms` would
 hand back the bare Scalar that `to_sec`/`to_ms`/`to_min` deliberately
-have no inverse for (§6); `1s + 2.0` mixes a duration with a number —
-convert the Scalar first. `1s * 2` is rejected by the Int rule above:
-scale by `2.0`, or convert with `to_scalar`.
+have no inverse for (§6); `1s +. 2.0` mixes a duration with a number —
+convert the Scalar first.
 
 Every Timestamp result **clamps at the epoch**. The timeline starts at
-`0s` and a negative instant has no meaning, so `100ms - 900ms` is `0s`
+`0s` and a negative instant has no meaning, so `100ms -. 900ms` is `0s`
 rather than an error or a negative Timestamp — the same clamping
 `jitter` applies to a humanized step (§6). Unary `-` on a Timestamp
 stays a type error for the same reason: there is nothing for it to
@@ -562,17 +589,20 @@ while the graph is assembled, never a per-sample stream.
 - **`Bool`** is an atomic type with literals `true`/`false`. It works
   everywhere a type does: parameters (`~crisp:Bool`), lists, tuples,
   `'a` instantiation.
-- **Comparisons** `<` `<=` `>` `>=` `==` `!=` take two Ints, two
-  Scalars, or two Timestamps and produce a `Bool`. Signals are *not* comparable: a lazy
+- **Comparisons** split the same way as the arithmetic operators:
+  `<` `<=` `>` `>=` `==` `!=` take two **Int**s, and `<.` `<=.` `>.`
+  `>=.` `==.` `!=.` take two **Scalar**s or two **Timestamp**s. Both
+  produce a `Bool`. Signals are *not* comparable: a lazy
   signal has no single value, and a sample-wise select would be a
   different, signal-producing operation (deliberately absent in v1 —
   see §7). Comparing under `signal ~f`'s symbolic substitution is
-  likewise a build-time error. Chained comparisons (`a < b < c`) parse
+  likewise a build-time error. Chained comparisons (`a <. b <. c`) parse
   left-associatively and are rejected by typing (Bool has no ordering).
 - **`&&` / `||`** combine Bools and short-circuit: only the deciding
   operand is evaluated. `not` is a Core primitive (`b:Bool -> Bool`).
   Precedence, loosest to tightest: `|>`, `||`, `&&`, comparisons,
-  `+ -`, `* /`, application.
+  `+ - +. -.`, `* / *. /.`, application — each `.` operator sits at the
+  same level as its bare counterpart.
 - **`if c then a else b`** is an expression: `c` must be `Bool` (a rigid
   `'a` does not qualify — the caller never promised a Bool), both
   branches are required and must have the same type, which is the
@@ -1188,7 +1218,7 @@ part. See [`core-library.md`](core-library.md) for the details.
 `to_sec`/`to_ms`/`to_min` are the computed counterpart of the literal
 suffixes — `to_ms 250.0` is `250ms` — and are what a duration derived
 from a tempo, a loop index, or a parameter has to go through:
-`to_min (1.0 / bpm)` is one beat. There is deliberately no conversion
+`to_min (1.0 /. bpm)` is one beat. There is deliberately no conversion
 back: a Timestamp that can decay into a bare number is how unit
 confusion gets in.
 

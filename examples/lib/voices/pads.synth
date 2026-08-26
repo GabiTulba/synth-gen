@@ -17,5 +17,5 @@ open Core.Sig
 open Core.Math
 
 let detuned ~freq:Scalar ~detune:Scalar : Scalar Signal =
-  (saw (freq - detune) + saw (freq + detune)) * 0.5
+  (saw (freq -. detune) +. saw (freq +. detune)) *. 0.5
 ;;

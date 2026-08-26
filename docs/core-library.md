@@ -97,7 +97,7 @@ about opens that bind nothing a file uses.
   `-inf`/NaN. Angles are radians. Because `signal ~f`'s body is applied
   symbolically to the time ramp, every one of these extends what
   `signal ~f` can express — a custom LFO is
-  `signal ~f:(fun t -> sin (2.0 * pi * rate * t))`.
+  `signal ~f:(fun t -> sin (2.0 *. pi *. rate *. t))`.
 - **`pi`** is a plain constant — the documented exception to "presets
   are functions": evaluating one number literal is free, and `pi` as a
   function would poison every arithmetic expression it appears in.
@@ -159,12 +159,12 @@ computed render names (see `Str`).
   frequency is `carrier + modulator(t)` Hz, phase integrated from the
   epoch, so FM operators cascade.
 - **`pm carrier modulator`** — `sin(2π·carrier·t + modulator(t))`; the
-  modulator is in radians. `pm ~modulator:(constant (pi / 2.0))` is the
+  modulator is in radians. `pm ~modulator:(constant (pi /. 2.0))` is the
   sine-with-phase idiom (a cosine).
 - **`am carrier modulator depth`** — classic AM,
   `carrier · (1 + depth·modulator)`; a mono modulator applies to every
   channel of a multi-channel carrier. Ring modulation stays plain
-  `carrier * modulator`. Modulators must be mono; checked at graph
+  `carrier *. modulator`. Modulators must be mono; checked at graph
   build.
 
 ### `Core.Time`
@@ -182,7 +182,7 @@ computed render names (see `Str`).
   answers "what is left" as a Timestamp. Floor convention, pairing
   with `Scale.wrap_div`: `num == den * div + rem` with
   `0s <= rem < den`. Division by `0s` is a build error. No unit ever
-  decays — this is deliberately not `Timestamp / Timestamp → Scalar`.
+  decays — this is deliberately not `Timestamp /. Timestamp → Scalar`.
 - **`time_steps ~start ~step ~count`** — the arithmetic grid; counts
   are capped at 1,000,000.
 - **`jitter ~seed ~spread ~steps`** — humanizes a rhythm: each
@@ -218,7 +218,7 @@ computed render names (see `Str`).
   **The segments are linear** (musically relevant: for an exponential
   decay shape, multiply `exp_decay` in, or shape a product of
   envelopes) and the envelope is identically zero past
-  `max hold (attack + decay) + release`, which is what gates placed
+  `max hold (attack +. decay) +. release`, which is what gates placed
   tails into structural silence.
 - **`lowpass` / `highpass`** are one-pole 6 dB/oct designs evaluated
   statefully from the epoch; a placed sample's filters warm up from the
@@ -238,7 +238,7 @@ computed render names (see `Str`).
 - **`follow ~attack ~release ~input`** — envelope follower: |input|
   smoothed with separate attack/release one-poles. The listening half
   of compressors, gates, auto-wahs and program-dependent sidechains:
-  `vca ~gain:(1.0 - follow ... * depth)` ducks a bus under whatever
+  `vca ~gain:(1.0 -. follow ... *. depth)` ducks a bus under whatever
   the followed signal does. The input must be mono — follow a bus
   after mixing it down.
 - **`delay ~by ~signal`** — feedforward delay: the input shifted `by`
@@ -264,10 +264,10 @@ computed render names (see `Str`).
   [0,1], validated at construction.
 - **`hard_clip`** clamps flat at ±threshold; **`soft_clip`** saturates
   as `threshold·tanh(x/threshold)`. Thresholds must be positive. Drive
-  is the ordinary idiom: `soft_clip 0.5 (x * 3.0)`.
+  is the ordinary idiom: `soft_clip 0.5 (x *. 3.0)`.
 - **`gated ~attack ~decay ~sustain ~release ~hold ~input`** — the
-  voice-window idiom written once: `input * adsr ...`, cut to the
-  envelope's own end `[0s, max hold (attack + decay) + release)`. This
+  voice-window idiom written once: `input *. adsr ...`, cut to the
+  envelope's own end `[0s, max hold (attack +. decay) +. release)`. This
   fixes the window convention (see Idioms): `hold` is the sounding
   length, the window is the envelope's end.
 - **`echoes ~by ~gain ~n ~input`** — the feedforward echo stack
@@ -375,7 +375,7 @@ in grid arithmetic, so it composes with `Tempo.grid`, `swing`,
   simple meters, the usual convention for compound ones (6/8 felt in
   two is `{ beats = 6; unit = 8 }`, the dotted-quarter pulse is
   `value ~v:(Dotted Quarter)`). Everything derives from
-  `beat = to_min (1 / bpm)`; `bars ~n` is the sibling `beats ~n`
+  `beat = to_min (1.0 /. bpm)`; `bars ~n` is the sibling `beats ~n`
   always had, fractional included.
 - **A whole note is `unit` beats, whatever the meter**, so `value` is
   the beat times `unit` times a dimensionless fraction. `Value` is a
@@ -397,7 +397,7 @@ in grid arithmetic, so it composes with `Tempo.grid`, `swing`,
   bind — Core cannot name `drop2`. (`List.scan` is the general tool;
   `marks` is its tempo-aware face.)
 - **`swing ~amount ~step ~steps`** displaces every odd-indexed entry
-  later by `step * amount` (`0.0` straight, `1/3` triplet, `0.5`
+  later by `step *. amount` (`0.0` straight, `1/3` triplet, `0.5`
   dotted); it takes `step` rather than reading consecutive gaps so the
   last entry is not a special case. **`swung_grid`** is `grid` and
   `swing` in one call so the step is named once — a disagreement
@@ -519,7 +519,7 @@ untouched):
   `open Core.Score`) they read as decibels:
   `mix [(db (-6.0), drums); ...]`. **`gain_db`** applies one.
 - **`vca ~gain ~input`** is mono-gain-over-any-bus — the operator
-  table's broadcast row (`bus * envelope`), named. Fading a Vector
+  table's broadcast row (`bus *. envelope`), named. Fading a Vector
   master with an envelope is `vca ~gain:env`.
 - **`duck ~ats ~depth ~dip ~recover ~input`** canonizes the grid
   sidechain: a `1 → 1−depth → 1` dip placed at every timestamp,
@@ -541,7 +541,7 @@ string library; anything more waits for a real need.
 
 - **The voice-window convention (pick one, this one):** `dur`/`hold`
   is the *sounding* length; the sample window is the envelope's end,
-  `max hold (attack + decay) + release`. `Fx.gated` writes it for you —
+  `max hold (attack +. decay) +. release`. `Fx.gated` writes it for you —
   a voice is
   `fun freq:Scalar dur:Timestamp vel:Scalar -> osc freq * vel |> gated
   ~attack:3ms ~decay:110ms ~sustain:0.5 ~release:60ms ~hold:dur`.
@@ -555,7 +555,7 @@ string library; anything more waits for a real need.
   `List.nth` over the result. Per-section renders via
   `Str` + `List.iter` complete the audition loop.
 - **Caution: Timestamps clamp at the epoch silently.** A placement
-  computed as `at - lead - length` near the origin *moves* to `0s`
+  computed as `at -. lead -. length` near the origin *moves* to `0s`
   rather than erroring (the same clamp `jitter` applies). If an early
   hit sounds doubled on the downbeat, look for a subtraction that went
   negative.

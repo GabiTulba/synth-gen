@@ -52,7 +52,7 @@ let drums : Scalar Signal =
   Mix.mix
     ~parts:[(1.0, part ~p:kick_bar ~from:(Timing.span 1) ~bars:7
                        ~voice:Drums.kick);
-            (0.9, part ~p:snare_bar ~from:(Timing.span 1 + 1.0) ~bars:7
+            (0.9, part ~p:snare_bar ~from:(Timing.span 1 +. 1.0) ~bars:7
                        ~voice:Drums.snare);
             (0.5, part ~p:hat_bar ~from:(Timing.span 2) ~bars:6
                        ~voice:Drums.hat)]
@@ -62,20 +62,20 @@ let drums : Scalar Signal =
    master. Keeping them as named buses is what makes stem export a
    one-liner. *)
 let pad_bus : Vector Signal =
-  channels [Pad.progression 0.9 * 0.5; Pad.progression 1.4 * 0.5] ;;
+  channels [Pad.progression 0.9 *. 0.5; Pad.progression 1.4 *. 0.5] ;;
 let drum_bus : Vector Signal =
-  channels [drums * 0.6; drums * 0.6] ;;
+  channels [drums *. 0.6; drums *. 0.6] ;;
 let keys_bus : Vector Signal =
-  channels [Keys.line * 0.6; Keys.line * 0.45] ;;
+  channels [Keys.line *. 0.6; Keys.line *. 0.45] ;;
 let strings_bus : Vector Signal =
-  channels [Strings.riff * 0.3; Strings.riff * 0.45] ;;
+  channels [Strings.riff *. 0.3; Strings.riff *. 0.45] ;;
 
 (* The eight bars of material plus a beat of tail, so the pad's release
    and the last piano note ring out instead of being cut. *)
 let ending : Timestamp = Timing.at ~bar:8 ~beat:1.0 ;;
 
 let master : Vector Signal =
-  pad_bus + drum_bus + keys_bus + strings_bus
+  pad_bus +. drum_bus +. keys_bus +. strings_bus
     |> soft_clip ~threshold:0.9
 ;;
 

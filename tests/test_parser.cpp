@@ -112,7 +112,7 @@ TEST(parser_function_typed_param) {
 
 TEST(parser_precedence) {
   DiagnosticBag diags;
-  auto defs = parseSrc("let x : Scalar = 1.0 + 2.0 * 3.0 ;;", diags);
+  auto defs = parseSrc("let x : Scalar = 1.0 +. 2.0 *. 3.0 ;;", diags);
   CHECK(!diags.hasErrors());
   const Expr& b = *defs[0].body;
   CHECK(b.kind == Expr::Kind::BinOp);
@@ -122,11 +122,53 @@ TEST(parser_precedence) {
 
 TEST(parser_application_binds_tighter_than_ops) {
   DiagnosticBag diags;
-  auto defs = parseSrc("let x : Scalar Signal = sine 440.0 * 0.5 ;;", diags);
+  auto defs = parseSrc("let x : Scalar Signal = sine 440.0 *. 0.5 ;;", diags);
   CHECK(!diags.hasErrors());
   const Expr& b = *defs[0].body;
   CHECK(b.kind == Expr::Kind::BinOp);
   CHECK(b.items[0]->kind == Expr::Kind::App);
+}
+
+TEST(parser_dot_operators_keep_their_bare_precedence) {
+  // A '.'-suffixed operator parses to the same node as its bare form,
+  // flagged `dotted`, at the same precedence - so mixing the two
+  // spellings never reparenthesizes an expression.
+  DiagnosticBag diags;
+  auto defs = parseSrc("let x : Scalar = 1.0 +. 2.0 *. 3.0 ;;\n"
+                       "let y : Int = 1 + 2 * 3 ;;",
+                       diags);
+  CHECK(!diags.hasErrors());
+  const Expr& d = *defs[0].body;
+  CHECK(d.kind == Expr::Kind::BinOp);
+  CHECK(d.op == BinOpKind::Add);
+  CHECK(d.dotted);
+  CHECK(d.items[1]->op == BinOpKind::Mul);
+  CHECK(d.items[1]->dotted);
+  const Expr& i = *defs[1].body;
+  CHECK(i.op == BinOpKind::Add);
+  CHECK(!i.dotted);
+  CHECK(i.items[1]->op == BinOpKind::Mul);
+  CHECK(!i.items[1]->dotted);
+}
+
+TEST(parser_dot_comparisons_sit_below_additive) {
+  DiagnosticBag diags;
+  auto defs = parseSrc("let x : Bool = 1.0 +. 2.0 <. 4.0 ;;", diags);
+  CHECK(!diags.hasErrors());
+  const Expr& b = *defs[0].body;
+  CHECK(b.op == BinOpKind::Lt);
+  CHECK(b.dotted);
+  CHECK(b.items[0]->op == BinOpKind::Add);
+}
+
+TEST(parser_dotted_unary_minus_is_neg_node) {
+  // Negation is not split: '-.' builds the same Neg node as '-'.
+  DiagnosticBag diags;
+  auto defs = parseSrc("let x : Scalar = -.0.5 ;;", diags);
+  CHECK(!diags.hasErrors());
+  const Expr& b = *defs[0].body;
+  CHECK(b.kind == Expr::Kind::Neg);
+  CHECK(b.items[0]->kind == Expr::Kind::NumLit);
 }
 
 TEST(parser_error_recovery) {
@@ -250,8 +292,8 @@ TEST(parser_qualified_two_segment_ident) {
 TEST(parser_lambda) {
   DiagnosticBag diags;
   auto defs = parseSrc(
-      "let f : Scalar -> Scalar = fun x:Scalar -> x + 1.0 ;;\n"
-      "let g : Scalar -> Scalar -> Scalar = fun a:Scalar ~b:Scalar -> a + b ;;",
+      "let f : Scalar -> Scalar = fun x:Scalar -> x +. 1.0 ;;\n"
+      "let g : Scalar -> Scalar -> Scalar = fun a:Scalar ~b:Scalar -> a +. b ;;",
       diags);
   CHECK(!diags.hasErrors());
   const Expr& lam = *defs[0].body;
@@ -270,7 +312,7 @@ TEST(parser_lambda) {
 TEST(parser_lambda_as_argument) {
   DiagnosticBag diags;
   auto defs = parseSrc(
-      "let xs : Scalar list = map (fun x:Scalar -> x * 2.0) [1.0; 2.0] ;;",
+      "let xs : Scalar list = map (fun x:Scalar -> x *. 2.0) [1.0; 2.0] ;;",
       diags);
   CHECK(!diags.hasErrors());
   const Expr& app = *defs[0].body;
@@ -282,7 +324,7 @@ TEST(parser_lambda_as_argument) {
 TEST(parser_lambda_in_pipe) {
   DiagnosticBag diags;
   auto defs = parseSrc(
-      "let x : Scalar = 1.0 |> (fun y:Scalar -> y + 1.0) ;;", diags);
+      "let x : Scalar = 1.0 |> (fun y:Scalar -> y +. 1.0) ;;", diags);
   CHECK(!diags.hasErrors());
   // Desugars to App(lambda, [1.0]): piped value = final positional arg.
   const Expr& app = *defs[0].body;

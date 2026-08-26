@@ -28,9 +28,9 @@ open Core.Score
 let tone ~detune:Scalar freq:Scalar dur:Timestamp vel:Scalar
     : Scalar Sample =
   (P.detuned ~freq:freq ~detune:detune |> lowpass ~cutoff:1100.0)
-    * vel * 0.25
+    *. vel *. 0.25
     |> gated ~attack:250ms ~decay:500ms ~sustain:0.8 ~release:700ms
-             ~hold:(dur - 700ms)
+             ~hold:(dur -. 700ms)
 ;;
 
 (* Am -> F -> C -> G, two bars each: four chord phrases end to end.

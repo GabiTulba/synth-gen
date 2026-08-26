@@ -43,6 +43,9 @@ enum class Tok {
   Tilde,      // ~ (labeled parameter/argument marker)
   PipeGt,     // |>
   Bar,        // | (variant declarations and match arms)
+  // Discrete (Int) operators. The continuous kinds - Scalar, Timestamp,
+  // Vector, Signal - use the '.'-suffixed forms below, so no operator is
+  // overloaded across the discrete/continuous divide (cf. OCaml's `+.`).
   Plus,
   Minus,
   Star,
@@ -53,6 +56,17 @@ enum class Tok {
   Ge,         // >=
   EqEq,       // ==
   BangEq,     // !=
+  // Continuous operators.
+  PlusDot,    // +.
+  MinusDot,   // -.
+  StarDot,    // *.
+  SlashDot,   // /.
+  LtDot,      // <.
+  LeDot,      // <=.
+  GtDot,      // >.
+  GeDot,      // >=.
+  EqEqDot,    // ==.
+  BangEqDot,  // !=.
   AndAnd,     // &&
   OrOr,       // ||
   Eof,

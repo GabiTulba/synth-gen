@@ -17,7 +17,7 @@ import Voices
 let kick : Scalar Signal =
   (Voices.Drums.kick ~carrier:50.0 ~drop_rate:25.0 ~drop_depth:120.0
                      ~body_decay:7.0 ~click_freq:4000.0 ~click_decay:90.0
-                     ~click_amp:0.3) * 0.7
+                     ~click_amp:0.3) *. 0.7
 ;;
 
 let _ =

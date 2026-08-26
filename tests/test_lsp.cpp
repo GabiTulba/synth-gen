@@ -210,7 +210,7 @@ const char* kSource =
     "let base_freq : Scalar = 220.0 ;;\n"
     "\n"
     "let voice ~gain:Scalar : Scalar Signal =\n"
-    "  (sine base_freq) * gain\n"
+    "  (sine base_freq) *. gain\n"
     ";;\n"
     "\n"
     "let doubled : Scalar Signal =\n"
@@ -492,7 +492,7 @@ TEST(lsp_references_across_files) {
   std::string text =
       "import Keys\n"
       "let x : Scalar = Keys.strike ;;\n"
-      "let y : Scalar = Keys.strike * 2.0 ;;\n";
+      "let y : Scalar = Keys.strike *. 2.0 ;;\n";
   LspServer server;
   server.onMessage(didOpen(songUri, text));
 
@@ -634,10 +634,10 @@ TEST(lsp_formatting_normalizes_whitespace) {
   fs::path p = tmp.write("song.synth", "");
   std::string uri = uriFor(p);
   std::string text =
-      "let x : Scalar =  1.0+2.0 ;;   \n"
+      "let x : Scalar =  1.0+.2.0 ;;   \n"
       "\n"
       "\n"
-      "\tlet y:Scalar = x*3.0 ;;\n"
+      "\tlet y:Scalar = x*.3.0 ;;\n"
       "let z : Scalar = -1.5 ;;  (* keep   me *)\n";
   LspServer server;
   server.onMessage(didOpen(uri, text));
@@ -647,9 +647,9 @@ TEST(lsp_formatting_normalizes_whitespace) {
   CHECK(edits.array.size() == 1);
   std::string formatted = edits.array[0].getString("newText");
   CHECK(formatted ==
-        "let x : Scalar = 1.0 + 2.0 ;;\n"  // operators spaced, no trailing
+        "let x : Scalar = 1.0 +. 2.0 ;;\n"  // operators spaced, no trailing
         "\n"                               // blank run collapsed
-        "  let y:Scalar = x * 3.0 ;;\n"    // tab -> spaces, tight `:` kept
+        "  let y:Scalar = x *. 3.0 ;;\n"    // tab -> spaces, tight `:` kept
         "let z : Scalar = -1.5 ;;  (* keep   me *)\n");
 
   // Formatting is idempotent: a clean document needs no edits.

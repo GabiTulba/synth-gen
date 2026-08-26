@@ -71,6 +71,16 @@ const char* tokenName(Tok t) {
     case Tok::Ge: return "'>='";
     case Tok::EqEq: return "'=='";
     case Tok::BangEq: return "'!='";
+    case Tok::PlusDot: return "'+.'";
+    case Tok::MinusDot: return "'-.'";
+    case Tok::StarDot: return "'*.'";
+    case Tok::SlashDot: return "'/.'";
+    case Tok::LtDot: return "'<.'";
+    case Tok::LeDot: return "'<=.'";
+    case Tok::GtDot: return "'>.'";
+    case Tok::GeDot: return "'>=.'";
+    case Tok::EqEqDot: return "'==.'";
+    case Tok::BangEqDot: return "'!=.'";
     case Tok::AndAnd: return "'&&'";
     case Tok::OrOr: return "'||'";
     case Tok::Eof: return "end of file";
@@ -256,6 +266,33 @@ std::vector<Token> lex(const std::string& src, const std::string& file,
     if (c == '&' && i + 1 < n && src[i + 1] == '&') {
       i += 2;
       push(Tok::AndAnd, lo, i);
+      continue;
+    }
+    // The '.'-suffixed (continuous) forms are longest-match, so `>=.` is
+    // tried before `>=` and `>.` before `>`. None of these character
+    // pairs had a meaning before: a `.` only ever followed a name or a
+    // digit, never an operator.
+    if (i + 2 < n && src[i + 2] == '.' && src[i + 1] == '=' &&
+        (c == '<' || c == '>' || c == '=' || c == '!')) {
+      i += 3;
+      push(c == '<'   ? Tok::LeDot
+           : c == '>' ? Tok::GeDot
+           : c == '=' ? Tok::EqEqDot
+                      : Tok::BangEqDot,
+           lo, i);
+      continue;
+    }
+    if (i + 1 < n && src[i + 1] == '.' &&
+        (c == '+' || c == '-' || c == '*' || c == '/' || c == '<' ||
+         c == '>')) {
+      i += 2;
+      push(c == '+'   ? Tok::PlusDot
+           : c == '-' ? Tok::MinusDot
+           : c == '*' ? Tok::StarDot
+           : c == '/' ? Tok::SlashDot
+           : c == '<' ? Tok::LtDot
+                      : Tok::GtDot,
+           lo, i);
       continue;
     }
     if (c == '<' && i + 1 < n && src[i + 1] == '=') {

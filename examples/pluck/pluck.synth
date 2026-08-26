@@ -13,7 +13,7 @@ open Core.Sig
 open Core.Math
 
 let song : Scalar Signal =
-  let pluck : Scalar Signal = sine 440.0 * exp_decay 6.0 in
+  let pluck : Scalar Signal = sine 440.0 *. exp_decay 6.0 in
   let hit : Scalar Sample = pluck |> sample ~from:0s ~to:800ms in
   place_multi hit (time_steps ~start:0s ~step:500ms ~count:4)
 ;;

@@ -14,13 +14,13 @@ open Core.Sig
 open Core.Math
 
 let partial ~freq:Scalar ~amp:Scalar ~decay:Scalar : Scalar Signal =
-  sine freq * exp_decay decay * amp
+  sine freq *. exp_decay decay *. amp
 ;;
 
 let strike root:Scalar : Scalar Signal =
   mix_all [partial ~freq:root ~amp:1.0 ~decay:1.1;
-           partial ~freq:(root * 2.001) ~amp:0.50 ~decay:1.6;
-           partial ~freq:(root * 3.004) ~amp:0.26 ~decay:2.2;
-           partial ~freq:(root * 4.009) ~amp:0.14 ~decay:2.9;
-           partial ~freq:(root * 5.016) ~amp:0.07 ~decay:3.7]
+           partial ~freq:(root *. 2.001) ~amp:0.50 ~decay:1.6;
+           partial ~freq:(root *. 3.004) ~amp:0.26 ~decay:2.2;
+           partial ~freq:(root *. 4.009) ~amp:0.14 ~decay:2.9;
+           partial ~freq:(root *. 5.016) ~amp:0.07 ~decay:3.7]
 ;;

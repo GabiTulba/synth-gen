@@ -20,7 +20,7 @@ open Core.Score
    follows the written length and the 350 ms release rings on past it -
    the thing a pre-baked fixed-length note cannot express. *)
 let piano freq:Scalar dur:Timestamp vel:Scalar : Scalar Sample =
-  K.strike freq * vel
+  K.strike freq *. vel
     |> gated ~attack:4ms ~decay:600ms ~sustain:0.25 ~release:350ms
              ~hold:dur
 ;;
@@ -42,7 +42,7 @@ let phrase : Phrase =
   melody ~notes:(List.map ~f:(fun d:Int -> degree ~s:s ~n:d) ~xs:tune)
          ~len:2.0
     |> move ~beats:(Timing.span 2)
-    |> velocity ~f:(fun v:Scalar -> v * amp ~l:Ff)
+    |> velocity ~f:(fun v:Scalar -> v *. amp ~l:Ff)
 ;;
 
 let line : Scalar Signal =

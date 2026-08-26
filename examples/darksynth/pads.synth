@@ -27,9 +27,9 @@ open Core.Score
 let tone ~detune:Scalar freq:Scalar dur:Timestamp vel:Scalar
     : Scalar Sample =
   (P.detuned ~freq:freq ~detune:detune |> lowpass ~cutoff:850.0)
-    * vel * 0.27
+    *. vel *. 0.27
     |> gated ~attack:600ms ~decay:400ms ~sustain:0.8 ~release:900ms
-             ~hold:(dur - 900ms)
+             ~hold:(dur -. 900ms)
 ;;
 
 (* The floor the chords fold up to, which is what holds the cycle in
@@ -64,5 +64,5 @@ let cycle detune:Scalar : Scalar Signal =
     p |> realize ~tempo:Timing.tempo ~tuning:Harmony.tuning
       |> play ~voice:(tone ~detune:detune) in
   voiced ~p:triads ~detune:detune
-  + voiced ~p:octaves ~detune:(detune * 2.0) * 0.4
+  +. voiced ~p:octaves ~detune:(detune *. 2.0) *. 0.4
 ;;

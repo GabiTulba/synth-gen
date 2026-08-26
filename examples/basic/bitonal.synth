@@ -13,13 +13,13 @@ open Core.Sig
 open Core.Math
 
 let modded : Scalar Signal =
-  let bitone : Scalar Signal = (saw 220.0 + saw 224.0) * 0.5 in
+  let bitone : Scalar Signal = (saw 220.0 +. saw 224.0) *. 0.5 in
   bitone |> am ~modulator:(sine 2.0) ~depth:0.5
 ;;
 
 let _ =
-  modded * 0.5 |> sample ~from:0s ~to:10s
+  modded *. 0.5 |> sample ~from:0s ~to:10s
                |> render ~name:"bitonal-saw" ~rate:48000.0 ;;
 let _ =
-  modded * 0.5 |> sample ~from:0s ~to:10s
+  modded *. 0.5 |> sample ~from:0s ~to:10s
                |> render_vis ~name:"bitonal-saw-wave" ~rate:48000.0 ;;

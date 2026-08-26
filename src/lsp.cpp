@@ -925,7 +925,8 @@ std::string formatTokens(const std::string& src,
       out.append(n, ' ');
     }
     out.append(src, t.span.lo, t.span.hi - t.span.lo);
-    prevUnaryMinus = t.kind == Tok::Minus && (first || !endsValue(prev));
+    prevUnaryMinus = (t.kind == Tok::Minus || t.kind == Tok::MinusDot) &&
+                     (first || !endsValue(prev));
     prev = t.kind;
     prevEnd = t.span.hi;
     first = false;

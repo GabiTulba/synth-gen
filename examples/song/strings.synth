@@ -16,10 +16,10 @@ open Core.Score
    held, so the written length only sets where the window ends. *)
 let pluck freq:Scalar dur:Timestamp vel:Scalar : Scalar Sample =
   let body : Scalar Signal =
-    (sine freq * 0.7 + saw freq * 0.3) * exp_decay 6.0 in
-  let pick : Scalar Signal = noise 3000.0 * exp_decay 80.0 * 0.1 in
-  (body + pick) * 0.8 * vel
-    |> sample ~from:0s ~to:(dur + 350ms)
+    (sine freq *. 0.7 +. saw freq *. 0.3) *. exp_decay 6.0 in
+  let pick : Scalar Signal = noise 3000.0 *. exp_decay 80.0 *. 0.1 in
+  (body +. pick) *. 0.8 *. vel
+    |> sample ~from:0s ~to:(dur +. 350ms)
 ;;
 
 (* Root . fifth . octave . fifth, as intervals above whichever root the

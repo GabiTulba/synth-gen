@@ -77,7 +77,7 @@ TEST(metadata_loads_real_build_output) {
   TempDir tp;
   tp.write("song.synth", R"(
 open Core.Osc open Core.Arrange open Core.Render
-let _ = render "beep" 8000.0 (sample ((sine 440.0) * 0.5) 0s 250ms) ;;
+let _ = render "beep" 8000.0 (sample ((sine 440.0) *. 0.5) 0s 250ms) ;;
 )");
   tp.write("build.json", projectManifest("devapp-demo", {"song.synth"}));
   BuildResult r = buildProject(tp.dir.string());

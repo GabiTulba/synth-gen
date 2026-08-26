@@ -49,9 +49,12 @@ struct TypeExpr {
   explicit TypeExpr(Kind k, Span s) : kind(k), span(s) {}
 };
 
+// What the operator *does*. Which types it accepts is a separate axis:
+// see Expr::dotted. Evaluation only needs this kind - by the time a
+// BinOp runs, the checker has already settled the operand types.
 enum class BinOpKind {
   Add, Sub, Mul, Div,        // arithmetic (§3, pointwise lifting)
-  Lt, Le, Gt, Ge, Eq, Ne,    // comparisons: Scalar/Timestamp pairs -> Bool
+  Lt, Le, Gt, Ge, Eq, Ne,    // comparisons -> Bool
   And, Or,                   // Bool -> Bool -> Bool, short-circuit
 };
 
@@ -142,6 +145,11 @@ struct Expr {
   std::vector<Pattern> patterns;
   // Let only: declared with `let rec`.
   bool isRec = false;
+  // BinOp only: written in the '.'-suffixed form (`+.`, `>.`, ...), which
+  // takes the continuous kinds - Scalar, Timestamp, Vector, Signal. The
+  // bare form is Int-only. Nothing downstream of the checker looks at
+  // this: it selects a typing rule, not a runtime behaviour.
+  bool dotted = false;
 
   // Filled in by the type checker.
   TypePtr type;

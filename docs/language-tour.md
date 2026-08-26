@@ -21,7 +21,7 @@ open Core            (* submodule names: Osc, Fx, Arrange, List, ... *)
 open Core.Osc open Core.Fx open Core.Arrange open Core.Render
 
 let pluck freq:Scalar : Scalar Signal =
-  (sine freq) * (exp_decay 6.0)
+  (sine freq) *. (exp_decay 6.0)
 ;;
 
 let pluck_sample freq:Scalar : Scalar Sample =
@@ -66,23 +66,27 @@ makes ambient (and you can declare your own — see "Records" and
 without one it is an `Int` (`8`) — the whole-number kind that counts
 and indexes. A literal with a unit suffix (`100ns`, `800ms`, `1.5s`,
 `1m`) is a `Timestamp`. A *computed* Scalar enters the time domain
-through `to_sec`/`to_ms`/`to_min` (`to_min (1.0 / bpm)` is one beat) —
+through `to_sec`/`to_ms`/`to_min` (`to_min (1.0 /. bpm)` is one beat) —
 and there is deliberately no conversion back, because a Timestamp that
 decays into a bare number is how unit confusion gets in. Once in the
 time domain you stay there and keep computing: Timestamps add and
-subtract, and scale by a Scalar, so `beat * 4.0` is the bar,
-`beat + beat / 2.0` the dotted note, and `bar - beat` the upbeat before
-it (results clamp at `0s`). What is left out is left out on purpose —
-`1s * 2s` is not a duration and `1s / 500ms` would be the Scalar
+subtract, and scale by a Scalar, so `beat *. 4.0` is the bar,
+`beat +. beat /. 2.0` the dotted note, and `bar -. beat` the upbeat
+before it (results clamp at `0s`). What is left out is left out on
+purpose — `1s *. 2s` is not a duration and `1s /. 500ms` would be the Scalar
 conversion that does not exist. Ints convert
 only explicitly: `to_scalar` exactly, and `round`/`floor`/`ceil` back
 from the continuous side.
 
-Arithmetic (`+ - * /`) lifts pointwise and broadcasts Scalars:
-`Signal * Signal` is pointwise, `Signal * Scalar` scales, `Vector`
+Every operator comes in two spellings: bare (`+ - * /`) for `Int`s, and
+`.`-suffixed (`+. -. *. /.`) for the continuous kinds. The continuous
+half lifts pointwise and broadcasts Scalars: `Signal *. Signal` is
+pointwise, `Signal *. Scalar` scales, `Vector`
 arithmetic is element-wise with channel counts checked when the graph is
 built. `Int` arithmetic stays whole (`/` divides towards zero) and
-never mixes with the continuous kinds implicitly. See spec §3 for the
+never mixes with the continuous kinds implicitly — nothing is
+overloaded across the two halves, so `7 / 2` is `3` and `7.0 /. 2.0` is
+`3.5`, and neither can be mistaken for the other. See spec §3 for the
 full operator table.
 
 ## Labeled arguments, currying, pipes, lambdas
@@ -91,7 +95,7 @@ full operator table.
 open Core
 open Core.Osc open Core.Fx open Core.Arrange open Core.Render open Core.Time
 
-let voice ~amp:Scalar ~freq:Scalar : Scalar Signal = (sine freq) * amp ;;
+let voice ~amp:Scalar ~freq:Scalar : Scalar Signal = (sine freq) *. amp ;;
 let quiet : Scalar -> Scalar Signal = voice ~amp:0.25 ;;   (* curried *)
 
 let warm : Scalar Signal =
@@ -107,7 +111,7 @@ let echoes : Scalar Signal =
   mix_all (List.map (fun t:Timestamp -> place hit t) [0s; 250ms; 500ms]) ;;
 
 let chord : Scalar Signal =
-  let tone freq:Scalar : Scalar Signal = sine freq * 0.3 in  (* local function *)
+  let tone freq:Scalar : Scalar Signal = sine freq *. 0.3 in  (* local function *)
   mix_all [tone 220.0; tone 275.0; tone 330.0] ;;
 
 let _ = sample pattern ~from:0s ~to:2s |> render ~name:"warm" ~rate:48000.0 ;;
@@ -169,7 +173,7 @@ let lead : Patch = { freq = 440.0; gain = 0.5; bite = 0.8 } ;;
 let soft : Patch = { lead with gain = 0.2 } ;;        (* functional update *)
 
 let voice p:Patch : Scalar Signal =
-  soft_clip ~threshold:p.bite (saw p.freq) * p.gain ;;
+  soft_clip ~threshold:p.bite (saw p.freq) *. p.gain ;;
 ```
 
 Projection (`p.freq`) binds tighter than application, updates keep the
@@ -195,7 +199,7 @@ let osc w:Wave ~freq:Scalar : Scalar Signal =
   match w with
   | Sine -> sine ~freq:freq
   | Saw -> saw ~freq:freq
-  | Pulse duty -> square ~freq:freq * duty ;;
+  | Pulse duty -> square ~freq:freq *. duty ;;
 ```
 
 Patterns nest (`| Full (Pulse d) -> ...`), destructure tuples and
@@ -220,7 +224,7 @@ ambient, and writes the whole `List` module (`map`, `fold`, `init`,
 let rec swell xs:Scalar Signal list ~gain:Scalar : Scalar Signal =
   match xs with
   | Nil -> constant 0.0
-  | Cons (x, rest) -> x * gain + swell rest ~gain:(gain / 2.0) ;;
+  | Cons (x, rest) -> x *. gain +. swell rest ~gain:(gain /. 2.0) ;;
 
 let stack : Scalar Signal = swell [sine 110.0; sine 220.0; sine 440.0] ~gain:0.5 ;;
 ```
@@ -271,14 +275,15 @@ and incremental caching as everything else.
 ## Booleans and `if`/`else`
 
 Configuration is part of the language. `Bool` is a *build-time* value —
-comparisons (`< <= > >= == !=`, on two Scalars or two Timestamps),
+comparisons (`<. <=. >. >=. ==. !=.`, on two Scalars or two Timestamps;
+the bare `< <= > >= == !=` compare two Ints),
 `&&`/`||` (short-circuit), and `not` decide it while the graph is
 assembled, and `if` picks a value, a signal chain, or even which target
 renders. Only the taken branch evaluates; signals themselves are never
 compared or branched per sample.
 
 ```ocaml
-let fast : Bool = tempo >= 120.0 && not (tempo > 200.0) ;;
+let fast : Bool = tempo >=. 120.0 && not (tempo >. 200.0) ;;
 
 let voice ~freq:Scalar ~crisp:Bool : Scalar Signal =
   if crisp then highpass ~cutoff:900.0 (saw freq)
@@ -322,7 +327,7 @@ context. This is also how Core itself is built — see
 ## Building signals directly
 
 `constant 0.5` holds a level forever, `time` is the ramp whose sample at
-t seconds is t, and `signal ~f:(fun t:Scalar -> exp (0.0 - 3.0 * t))`
+t seconds is t, and `signal ~f:(fun t:Scalar -> exp (0.0 -. 3.0 *. t))`
 samples a function of time (`constant_multi` / `signal_multi` are the
 per-channel forms). The math primitives `exp`, `sqrt`, `log`, and
 `pow ~x ~y` work on plain Scalars and elementwise on Signals —
@@ -373,9 +378,9 @@ handing each voice `(freq, duration, velocity)` — so an envelope's
 ```ocaml
 let piano freq:Scalar dur:Timestamp vel:Scalar : Scalar Sample =
   K.strike freq
-    * adsr ~attack:4ms ~decay:600ms ~sustain:0.25 ~release:350ms ~hold:dur
-    * vel
-  |> sample ~from:0s ~to:(dur + 350ms) ;;
+    *. adsr ~attack:4ms ~decay:600ms ~sustain:0.25 ~release:350ms ~hold:dur
+    *. vel
+  |> sample ~from:0s ~to:(dur +. 350ms) ;;
 
 melody ~notes:(List.map ~f:(Scale.degree ~s:key) [0; 2; 4; 2; 0])
        ~len:1.0

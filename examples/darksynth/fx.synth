@@ -2,14 +2,7 @@
    and the drop impact (reverberated sub boom). *)
 
 open Core
-open Core.Osc
-open Core.Fx
-open Core.Arrange
-open Core.Render
-open Core.Io
-open Core.Time
-open Core.Sig
-open Core.Math
+open Core.Dsp
 
 import Effects
 module Dop = Effects.Doppler
@@ -59,8 +52,7 @@ let chain_link : Scalar Sample =
   let clink : Scalar Signal =
     noise 6200.0 * 0.5 + sine 3170.0 * 0.2 + sine 4733.0 * 0.14 in
   (clink |> highpass ~cutoff:2200.0) * exp_decay 26.0
-    * (adsr ~attack:1ms ~decay:1ms ~sustain:1.0 ~release:40ms ~hold:110ms)
-    |> sample ~from:0s ~to:150ms
+    |> gated ~attack:1ms ~decay:1ms ~sustain:1.0 ~release:40ms ~hold:110ms
 ;;
 
 let chain_shake : Scalar Sample =
@@ -76,9 +68,9 @@ let chain_shake : Scalar Sample =
    places it on a strong/weak 500 ms blink grid with a touch of delay. *)
 let alarm_hit : Scalar Sample =
   let tone : Scalar Signal = square 880.0 * 0.6 + sine 1760.0 * 0.25 in
-  (tone |> highpass ~cutoff:500.0 |> soft_clip ~threshold:0.6)
-    * (adsr ~attack:2ms ~decay:90ms ~sustain:0.25 ~release:60ms ~hold:120ms)
-    |> sample ~from:0s ~to:180ms
+  tone |> highpass ~cutoff:500.0 |> soft_clip ~threshold:0.6
+       |> gated ~attack:2ms ~decay:90ms ~sustain:0.25 ~release:60ms
+                ~hold:120ms
 ;;
 
 (* An engine-like stereo Doppler pass (the shared Effects.Doppler

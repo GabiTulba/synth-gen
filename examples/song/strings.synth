@@ -4,14 +4,7 @@
    and each chord supplies its own notes. *)
 
 open Core
-open Core.Osc
-open Core.Fx
-open Core.Arrange
-open Core.Render
-open Core.Io
-open Core.Time
-open Core.Sig
-open Core.Math
+open Core.Dsp
 
 import Timing
 import Harmony

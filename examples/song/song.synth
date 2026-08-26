@@ -11,14 +11,8 @@
    glue. *)
 
 open Core
-open Core.Osc
-open Core.Fx
-open Core.Arrange
+open Core.Dsp
 open Core.Render
-open Core.Io
-open Core.Time
-open Core.Sig
-open Core.Math
 
 import Timing
 import Harmony
@@ -27,45 +21,41 @@ import Pad
 import Keys
 import Strings
 
-open Core.Pitch
 open Core.Score
 
 (* The groove is written as one bar and looped, the way it is counted:
    kick on every beat, snare on the backbeat, eighth hats with the
-   downbeat accented. `Score.strike` reads a phrase's rhythm and its
-   velocities and ignores the note - percussion has no pitch - so one
-   throwaway note stands in for every hit. *)
-let hit : Note = Harmony.key.tonic ;;
+   downbeat accented. `rhythm`/`hits` build unpitched phrases -
+   percussion has no pitch, and `Score.strike` never reads a note - so
+   no dummy note stands in for the hits. *)
+let kick_bar : Phrase = hits ~n:4 ~len:1.0 ;;
 
-let kick_bar : Phrase = melody ~notes:(List.repeat ~n:4 ~x:hit) ~len:1.0 ;;
+(* The backbeat is two half-note hits; the extra beat of `move` at the
+   call site below is what lands them on the two-and-four. *)
+let snare_bar : Phrase = hits ~n:2 ~len:2.0 ;;
 
-(* A `Rest` advances the cursor without sounding, so the backbeat reads
-   as the two-and-four it is rather than as an offset grid. *)
-let snare_bar : Phrase =
-  line ~items:[Rest 1.0; Play (hit, 1.0); Rest 1.0; Play (hit, 1.0)] ;;
-
-(* Two quarter-note lines, the second displaced half a beat and two
-   dynamic levels - 8 dB - softer: `layer` keeps each at its own
-   positions, and the accent is what an even eighth grid could not
-   say. *)
+(* Eight eighths with the downbeats accented: one phrase with per-step
+   velocities - `vels` cycles its levels, 8 dB apart - where this used
+   to take two quarter-note lines layered half a beat apart. *)
 let hat_bar : Phrase =
-  let four ~l:Level : Phrase =
-    line ~items:(List.repeat ~n:4 ~x:(Play (hit, 1.0)))
-      |> staccato ~ratio:0.5
-      |> velocity ~f:(fun v:Scalar -> v * amp ~l:l) in
-  layer ~ps:[four ~l:Fff; four ~l:Forte |> move ~beats:0.5] ;;
+  hits ~n:8 ~len:0.5 |> vels ~vs:[amp ~l:Fff; amp ~l:Forte] ;;
 
-(* Kick and snare run from bar 1, the hats join a bar later. *)
+(* Kick and snare run from bar 1, the hats join a bar later; the mix
+   weights sit next to their parts. *)
 let drums : Scalar Signal =
-  let part ~p:Phrase ~from:Int ~bars:Int
+  let part ~p:Phrase ~from:Scalar ~bars:Int
            ~voice:(Scalar -> Scalar Sample) : Scalar Signal =
     loop ~p:p ~n:bars
-      |> move ~beats:(Timing.span from)
+      |> move ~beats:from
       |> realize ~tempo:Timing.tempo ~tuning:Harmony.tuning
       |> strike ~voice:voice in
-  part ~p:kick_bar ~from:1 ~bars:7 ~voice:Drums.kick
-  + part ~p:snare_bar ~from:1 ~bars:7 ~voice:Drums.snare * 0.9
-  + part ~p:hat_bar ~from:2 ~bars:6 ~voice:Drums.hat * 0.5
+  Mix.mix
+    ~parts:[(1.0, part ~p:kick_bar ~from:(Timing.span 1) ~bars:7
+                       ~voice:Drums.kick);
+            (0.9, part ~p:snare_bar ~from:(Timing.span 1 + 1.0) ~bars:7
+                       ~voice:Drums.snare);
+            (0.5, part ~p:hat_bar ~from:(Timing.span 2) ~bars:6
+                       ~voice:Drums.hat)]
 ;;
 
 (* Per-instrument stereo buses, mixed exactly as they appear in the

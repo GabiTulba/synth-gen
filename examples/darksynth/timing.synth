@@ -1,8 +1,8 @@
 (* The song's clock *and* its map, in one place: 120 BPM in 4/4, so a
-   beat is 500ms and a bar 2s. Every groove takes its step from `dur`,
-   every position from `seg` or `beats`, and every hit count from the
-   per-bar counts below - so the whole arrangement follows the tempo
-   rather than a set of precomputed seconds.
+   beat is 500ms and a bar 2s. Every groove takes its step from `dur` or
+   `grid`, every position from `seg` or `beats`, and every hit count
+   from the per-bar counts below - so the whole arrangement follows the
+   tempo rather than a set of precomputed seconds.
 
    The section landmarks live here too, and they are the reason none of
    the arrangement is written in seconds any more. Each section begins
@@ -11,14 +11,6 @@
    chords, and re-tempoing the track is still the one-line edit below. *)
 
 open Core
-open Core.Osc
-open Core.Fx
-open Core.Arrange
-open Core.Render
-open Core.Io
-open Core.Time
-open Core.Sig
-open Core.Math
 open Core.Tempo
 
 let tempo : Tempo = common ~bpm:120.0 ;;
@@ -31,29 +23,39 @@ let dur v:Value : Timestamp = value ~t:tempo ~v:v ;;
 let beats n:Scalar : Timestamp = Tempo.beats ~t:tempo ~n:n ;;
 (* `n` chord segments in. A segment is two bars: one chord of the cycle,
    and the unit the whole arrangement is cut into. *)
-let seg n:Int : Timestamp = bar ~t:tempo * (2.0 * Math.to_scalar n) ;;
+let seg n:Int : Timestamp = bars ~t:tempo ~n:(2.0 * Math.to_scalar n) ;;
 (* `n` bars measured in *beats*, which is the unit a Score phrase
    positions itself in: `Score.chord ~len:(span 2)` is one segment. *)
-let span n:Int : Scalar = Math.to_scalar (n * tempo.meter.beats) ;;
+let span n:Int : Scalar = bar_beats ~t:tempo ~n:n ;;
+(* The tempo-aware grid the grooves place their hits on. *)
+let grid ~from:Timestamp ~step:Value ~count:Int : Timestamp list =
+  Tempo.grid ~t:tempo ~from:from ~step:step ~count:count ;;
 
-(* Hits per bar, which is where the grids' `count` arguments come from.
-   In 4/4 a bar is `meter.beats` quarter notes and the finer values
-   double from there; a compound meter would count differently. *)
-let quarters : Int = tempo.meter.beats ;;
-let halves : Int = quarters / 2 ;;
-let eighths : Int = quarters * 2 ;;
-let sixteenths : Int = quarters * 4 ;;
+(* Hits per bar, which is where the grids' `count` arguments come from -
+   `per_bar` divides the bar by the value, so a compound meter would
+   count correctly too. *)
+let quarters : Int = per_bar ~t:tempo ~v:Quarter ;;
+let halves : Int = per_bar ~t:tempo ~v:Half ;;
+let eighths : Int = per_bar ~t:tempo ~v:Eighth ;;
+let sixteenths : Int = per_bar ~t:tempo ~v:Sixteenth ;;
 
 (* --- the arrangement's landmarks ------------------------------------ *)
-(* Segment numbers, not seconds: BUILD is four chords in, DROP 1 eight,
-   and the track ends after thirty. *)
+(* Section lengths in bars, summed by `marks` into section starts: n+1
+   Timestamps, the ending last. Re-lengthening one section mid-writing
+   is one edit to this list; the names below just index it. BUILD is
+   four chords (eight bars) in, DROP 1 eight, and the track ends after
+   thirty chords. *)
 
-let intro : Timestamp = seg 0 ;;
-let build : Timestamp = seg 4 ;;
-let drop1 : Timestamp = seg 8 ;;
-let breakdown : Timestamp = seg 12 ;;
-let drop2 : Timestamp = seg 16 ;;
-let tolling : Timestamp = seg 22 ;;
-let drop3 : Timestamp = seg 24 ;;
-let outro : Timestamp = seg 28 ;;
-let ending : Timestamp = seg 30 ;;
+let landmarks : Timestamp list =
+  marks ~t:tempo ~bars:[8; 8; 8; 8; 12; 4; 8; 4] ;;
+let mark i:Int : Timestamp = List.nth ~xs:landmarks ~i:i ~default:0s ;;
+
+let intro : Timestamp = mark 0 ;;
+let build : Timestamp = mark 1 ;;
+let drop1 : Timestamp = mark 2 ;;
+let breakdown : Timestamp = mark 3 ;;
+let drop2 : Timestamp = mark 4 ;;
+let tolling : Timestamp = mark 5 ;;
+let drop3 : Timestamp = mark 6 ;;
+let outro : Timestamp = mark 7 ;;
+let ending : Timestamp = mark 8 ;;

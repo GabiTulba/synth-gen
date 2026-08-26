@@ -8,14 +8,7 @@
    nothing here names one. *)
 
 open Core
-open Core.Osc
-open Core.Fx
-open Core.Arrange
-open Core.Render
-open Core.Io
-open Core.Time
-open Core.Sig
-open Core.Math
+open Core.Dsp
 
 import Timing
 import Harmony
@@ -26,18 +19,17 @@ open Core.Pitch
 open Core.Score
 
 (* One chord tone, and a voice in the sense `play` means: it is handed
-   the note's own written length, so the envelope's plateau and the
-   sample window follow the score rather than a hardcoded 3100 ms.
-   `~detune` is filled first, which leaves exactly the
-   (freq, duration, velocity) function `play` wants. *)
+   the note's own written length. `gated` applies the envelope and cuts
+   the window where it ends, so the plateau and the window follow the
+   score rather than a hardcoded 3100 ms. `~detune` is filled first,
+   which leaves exactly the (freq, duration, velocity) function `play`
+   wants. *)
 let tone ~detune:Scalar freq:Scalar dur:Timestamp vel:Scalar
     : Scalar Sample =
-  let env : Scalar Signal =
-    adsr ~attack:600ms ~decay:400ms ~sustain:0.8 ~release:900ms
-         ~hold:(dur - 900ms) in
   (P.detuned ~freq:freq ~detune:detune |> lowpass ~cutoff:850.0)
-    * env * vel * 0.27
-    |> sample ~from:0s ~to:dur
+    * vel * 0.27
+    |> gated ~attack:600ms ~decay:400ms ~sustain:0.8 ~release:900ms
+             ~hold:(dur - 900ms)
 ;;
 
 (* The floor the chords fold up to, which is what holds the cycle in

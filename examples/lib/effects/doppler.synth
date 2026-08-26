@@ -10,21 +10,18 @@
      harder;
    - loudness: `proximity` = 1 - shape^2 = sin^2 (scaled), swelling to
      a peak at the pass;
-   - stereo: `pan` gains (shape+1)/2 left and (1-shape)/2 right move
-     the image across the field. *)
+   - stereo: `pan` hands the (negated) shape to Mix.pan_sig as an
+     automated pan position, so the image crosses the field left to
+     right under the equal-power law. *)
 
 open Core
 open Core.Osc
-open Core.Fx
 open Core.Arrange
-open Core.Render
-open Core.Io
-open Core.Time
 open Core.Sig
 open Core.Math
 
 let shape rate:Scalar : Scalar Signal =
-  pm ~carrier:rate ~modulator:(constant 1.5707963) ;;
+  pm ~carrier:rate ~modulator:(constant (pi / 2.0)) ;;
 
 (* A saw as a stack of six Doppler-swept FM partials: harmonic n at
    base*n with amplitude 1/n, each deviating by `depth` of its own
@@ -48,7 +45,8 @@ let proximity rate:Scalar : Scalar Signal =
   (constant 1.0 - shape rate * shape rate) * 0.85 + 0.15
 ;;
 
+(* shape runs +1 -> -1 over the pass and pan positions run -1 (left) to
+   +1 (right), so the position is the shape negated. *)
 let pan src:Scalar Signal rate:Scalar : Vector Signal =
-  channels [src * ((shape rate + 1.0) * 0.5);
-            src * ((1.0 - shape rate) * 0.5)]
+  Mix.pan_sig ~pos:(shape rate * (-1.0)) ~input:src
 ;;

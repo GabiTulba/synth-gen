@@ -6,14 +6,6 @@
    the tempo appears exactly once in the project, on the line below. *)
 
 open Core
-open Core.Osc
-open Core.Fx
-open Core.Arrange
-open Core.Render
-open Core.Io
-open Core.Time
-open Core.Sig
-open Core.Math
 open Core.Tempo
 
 let tempo : Tempo = common ~bpm:120.0 ;;
@@ -29,4 +21,4 @@ let grid ~from:Timestamp ~step:Value ~count:Int : Timestamp list =
 (* `n` bars measured in *beats*, which is the unit a Score phrase
    positions itself in - `Score.move ~beats:(Timing.span 2)` is "two
    bars in" for a phrase, as `at ~bar:2` is for a Timestamp. *)
-let span n:Int : Scalar = Math.to_scalar (n * tempo.meter.beats) ;;
+let span n:Int : Scalar = bar_beats ~t:tempo ~n:n ;;

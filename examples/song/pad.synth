@@ -9,14 +9,7 @@
    `realize` turns beats into time. *)
 
 open Core
-open Core.Osc
-open Core.Fx
-open Core.Arrange
-open Core.Render
-open Core.Io
-open Core.Time
-open Core.Sig
-open Core.Math
+open Core.Dsp
 
 import Timing
 import Harmony
@@ -27,18 +20,17 @@ open Core.Pitch
 open Core.Score
 
 (* One chord tone, and a voice in the sense `play` means: it is handed
-   the note's own written length, so the envelope's plateau and the
-   sample window follow the score instead of a hardcoded 3300 ms.
-   `~detune` is filled first, which leaves exactly the
-   (freq, duration, velocity) function `play` wants. *)
+   the note's own written length. `gated` applies the envelope and cuts
+   the window where it ends, so the plateau and the window both follow
+   the score instead of a hardcoded 3300 ms. `~detune` is filled first,
+   which leaves exactly the (freq, duration, velocity) function `play`
+   wants. *)
 let tone ~detune:Scalar freq:Scalar dur:Timestamp vel:Scalar
     : Scalar Sample =
-  let env : Scalar Signal =
-    adsr ~attack:250ms ~decay:500ms ~sustain:0.8 ~release:700ms
-         ~hold:(dur - 700ms) in
   (P.detuned ~freq:freq ~detune:detune |> lowpass ~cutoff:1100.0)
-    * env * vel * 0.25
-    |> sample ~from:0s ~to:dur
+    * vel * 0.25
+    |> gated ~attack:250ms ~decay:500ms ~sustain:0.8 ~release:700ms
+             ~hold:(dur - 700ms)
 ;;
 
 (* Am -> F -> C -> G, two bars each: four chord phrases end to end.

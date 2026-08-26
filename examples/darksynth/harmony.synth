@@ -4,28 +4,21 @@
    says so once instead of leaving a G# to be spotted in a chord.
 
    Am -> F -> Dm -> E is i - VI - iv - V, four triads the key already
-   contains. Every pitched part below - pad, bass, guitar, bells - takes
-   its notes from here, so transposing the track is editing `tonic` and
-   re-tuning it is editing `tuning`. *)
+   contains, written as one `Prog`. Every pitched part below - pad,
+   bass, guitar, bells - takes its notes from here, so transposing the
+   track is editing `tonic` and re-tuning it is editing `tuning`. *)
 
 open Core
-open Core.Osc
-open Core.Fx
-open Core.Arrange
-open Core.Render
-open Core.Io
-open Core.Time
-open Core.Sig
-open Core.Math
 open Core.Pitch
 open Core.Scale
 
 let key : Scale = { tonic = { pc = A; oct = 2 }; quality = HarmMinor } ;;
 let tuning : Tuning = et12 ~ref_hz:440.0 ;;
 
-(* Two bars per chord, four chords to the 16 s cycle. *)
-let cycle : Int list = [0; 5; 3; 4] ;;
-let chord_degree ~i:Int : Int = List.nth ~xs:cycle ~i:i ~default:0 ;;
+(* Two bars per chord, four chords to the 16 s cycle. `prog_*` wraps,
+   so a part can read chord `n` straight off its segment index - the
+   cycle repeats every four segments and nobody re-derives `n mod 4`. *)
+let prog : Prog = { key = key; degrees = [0; 5; 3; 4] } ;;
 
 (* The same key in another register: a lead line is written in degrees
    around its own tonic, not around the pad's. *)
@@ -37,15 +30,11 @@ let octave ~oct:Int : Scale =
    chord's own octave is what keeps the cycle inside a fifth instead of
    climbing away as the degrees rise. *)
 let parts ~i:Int ~low:Note ~count:Int : Note list =
-  Scale.voicing ~notes:(Scale.triad ~s:key ~degree:(chord_degree ~i:i))
-                ~low:low ~count:count ;;
+  Scale.voicing ~notes:(prog_chord ~p:prog ~i:i) ~low:low ~count:count ;;
 
 (* The chord's root alone, folded into the same register - the bass, the
    guitar and the bells each ask for it at their own `low`. *)
 let root ~i:Int ~low:Note : Note =
-  List.nth ~xs:(Scale.voicing
-                  ~notes:[Scale.degree ~s:key ~n:(chord_degree ~i:i)]
-                  ~low:low ~count:1)
-           ~i:0 ~default:key.tonic ;;
+  wrap_to ~note:(prog_root ~p:prog ~i:i) ~low:low ;;
 let root_hz ~i:Int ~low:Note : Scalar =
   hz ~t:tuning ~note:(root ~i:i ~low:low) ;;

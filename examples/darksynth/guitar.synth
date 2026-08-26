@@ -1,16 +1,10 @@
 (* Distorted guitar: detuned saws plus a sub square driven hard into a
    hard clipper. `chug` is the palm-muted eighth; `stab` the open,
-   brighter accent note. *)
+   brighter accent note - both `gated`, so the envelope and the window
+   agree by construction. *)
 
 open Core
-open Core.Osc
-open Core.Fx
-open Core.Arrange
-open Core.Render
-open Core.Io
-open Core.Time
-open Core.Sig
-open Core.Math
+open Core.Dsp
 open Core.Pitch
 
 (* The detune widths are cents, like the bass's: 20.7 cents is the
@@ -25,20 +19,17 @@ let dist freq:Scalar : Scalar Signal =
 
 let chug freq:Scalar : Scalar Sample =
   dist freq
-    * (adsr ~attack:2ms ~decay:70ms ~sustain:0.3 ~release:40ms ~hold:140ms)
-    |> sample ~from:0s ~to:180ms
+    |> gated ~attack:2ms ~decay:70ms ~sustain:0.3 ~release:40ms
+             ~hold:140ms
 ;;
 
 (* No clean octave partial here - a pure upper harmonic rings piano-like.
    Three detuned saws clipped hard snarl instead. *)
 let stab freq:Scalar : Scalar Sample =
-  let tone : Scalar Signal =
-    saw freq + saw (detune ~freq:freq ~cents:34.283)
-      + saw (detune ~freq:freq ~cents:(-6.939))
-      |> lowpass ~cutoff:1400.0
-      |> hard_clip ~threshold:0.35 in
-  tone
-    * (adsr ~attack:2ms ~decay:120ms ~sustain:0.4 ~release:120ms
-            ~hold:260ms)
-    |> sample ~from:0s ~to:420ms
+  saw freq + saw (detune ~freq:freq ~cents:34.283)
+    + saw (detune ~freq:freq ~cents:(-6.939))
+    |> lowpass ~cutoff:1400.0
+    |> hard_clip ~threshold:0.35
+    |> gated ~attack:2ms ~decay:120ms ~sustain:0.4 ~release:120ms
+             ~hold:260ms
 ;;

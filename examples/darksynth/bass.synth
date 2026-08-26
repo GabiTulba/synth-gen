@@ -1,16 +1,10 @@
 (* Electric bass: a detuned saw pair through a dark lowpass and a soft
    clipper. `pulse` is the driving eighth-note; `held` the long note for
-   intro/breakdown. *)
+   intro/breakdown. Every note is `gated`: the envelope and its own
+   window in one call, so no hit carries hand-summed window arithmetic. *)
 
 open Core
-open Core.Osc
-open Core.Fx
-open Core.Arrange
-open Core.Render
-open Core.Io
-open Core.Time
-open Core.Sig
-open Core.Math
+open Core.Dsp
 open Core.Pitch
 
 (* The detune widths are cents, not ratios: 10.4 cents is a slow beat
@@ -24,26 +18,23 @@ let voice freq:Scalar : Scalar Signal =
 
 let pulse freq:Scalar : Scalar Sample =
   voice freq
-    * (adsr ~attack:3ms ~decay:110ms ~sustain:0.5 ~release:60ms ~hold:170ms)
-    |> sample ~from:0s ~to:230ms
+    |> gated ~attack:3ms ~decay:110ms ~sustain:0.5 ~release:60ms
+             ~hold:170ms
 ;;
 
 let held freq:Scalar : Scalar Sample =
   voice freq
-    * (adsr ~attack:8ms ~decay:400ms ~sustain:0.6 ~release:350ms
-            ~hold:1550ms)
-    |> sample ~from:0s ~to:1900ms
+    |> gated ~attack:8ms ~decay:400ms ~sustain:0.6 ~release:350ms
+             ~hold:1550ms
 ;;
 
 (* Drop bass: the same voice driven much harder - a square doubling the
    fundamental, a much brighter filter, and a hard clipper instead of
    the soft one, so the clipping harmonics actually reach the ear. *)
 let grind freq:Scalar : Scalar Sample =
-  let tone : Scalar Signal =
-    saw freq + saw (detune ~freq:freq ~cents:15.5) + square freq * 0.5
-      |> lowpass ~cutoff:950.0
-      |> hard_clip ~threshold:0.5 in
-  tone
-    * (adsr ~attack:2ms ~decay:100ms ~sustain:0.55 ~release:50ms ~hold:180ms)
-    |> sample ~from:0s ~to:230ms
+  saw freq + saw (detune ~freq:freq ~cents:15.5) + square freq * 0.5
+    |> lowpass ~cutoff:950.0
+    |> hard_clip ~threshold:0.5
+    |> gated ~attack:2ms ~decay:100ms ~sustain:0.55 ~release:50ms
+             ~hold:180ms
 ;;

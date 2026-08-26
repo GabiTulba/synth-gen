@@ -66,10 +66,12 @@ makes ambient (and you can declare your own — see "Records" and
 without one it is an `Int` (`8`) — the whole-number kind that counts
 and indexes. A literal with a unit suffix (`100ns`, `800ms`, `1.5s`,
 `1m`) is a `Timestamp`. A *computed* Scalar enters the time domain
-through `to_sec`/`to_ms`/`to_min` (`to_min (1.0 /. bpm)` is one beat) —
-and there is deliberately no conversion back, because a Timestamp that
-decays into a bare number is how unit confusion gets in. Once in the
-time domain you stay there and keep computing: Timestamps add and
+through `to_sec`/`to_ms`/`to_min` (`to_min (1.0 /. bpm)` is one beat),
+and back out through `of_sec`/`of_ms`/`of_min` (`of_ms 250ms` is
+`250.0`). The way out is deliberately a named conversion: what causes
+unit confusion is a Timestamp decaying into a bare number with nobody
+saying which unit it is in, so arithmetic never drops the unit on its
+own. Once in the time domain you can stay there and keep computing: Timestamps add and
 subtract, and scale by a Scalar, so `beat *. 4.0` is the bar,
 `beat +. beat /. 2.0` the dotted note, and `bar -. beat` the upbeat
 before it (results clamp at `0s`). What is left out is left out on

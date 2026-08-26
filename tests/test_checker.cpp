@@ -1664,8 +1664,8 @@ let steps : Timestamp list = time_steps ~start:lead ~step:beat ~count:4 ;;
 }
 
 TEST(checker_timestamp_conversion_type_errors) {
-  // The argument is a Scalar - a Timestamp does not round-trip back
-  // through the conversions, and the result is not a Scalar either.
+  // Each direction takes what it takes: to_* consumes a Scalar and
+  // yields a Timestamp, so neither accepts its own output back.
   for (const char* body :
        {"open Core open Core.Osc open Core.Fx open Core.Arrange open Core.Render open Core.Io open Core.Time open Core.Sig open Core.Math\nlet x : Timestamp = to_sec 500ms ;;",
         "open Core open Core.Osc open Core.Fx open Core.Arrange open Core.Render open Core.Io open Core.Time open Core.Sig open Core.Math\nlet x : Scalar = to_ms 250.0 ;;"}) {
@@ -1675,6 +1675,63 @@ TEST(checker_timestamp_conversion_type_errors) {
     checkProject({f}, diags);
     CHECK(diags.hasErrors());
   }
+}
+
+TEST(checker_timestamp_of_unit_conversions) {
+  // of_sec/of_ms/of_min are the way out: Timestamp in, Scalar out, so
+  // a duration can drive ordinary Scalar arithmetic once the unit has
+  // been named.
+  TempProject tp;
+  std::string f = tp.write("t.synth", R"(
+open Core open Core.Osc open Core.Fx open Core.Arrange open Core.Render open Core.Io open Core.Time open Core.Sig open Core.Math
+let beat : Timestamp = to_min (1.0 /. 120.0) ;;
+let secs : Scalar = of_sec beat ;;
+let millis : Scalar = Time.of_ms ~x:250ms ;;
+let mins : Scalar = of_min ~x:90s ;;
+let ratio : Scalar = of_sec 1s /. of_sec 500ms ;;
+let back : Timestamp = to_sec (of_sec beat) ;;
+let rate : Scalar = 1.0 /. of_sec beat ;;
+)");
+  DiagnosticBag diags;
+  Program prog = checkProject({f}, diags);
+  for (auto& d : diags.items)
+    std::cerr << renderDiagnostic(d, prog.modules.empty() ? std::string{}
+                                       : userMod(prog).parsed.source);
+  CHECK(!diags.hasErrors());
+  const auto& types = userMod(prog).defTypes;
+  for (const char* n : {"secs", "millis", "mins", "ratio", "rate"})
+    CHECK(typeEquals(types.at(n), tScalar()));
+  CHECK(typeEquals(types.at("back"), tTimestamp()));
+}
+
+TEST(checker_timestamp_of_unit_type_errors) {
+  // of_* takes a Timestamp and hands back a Scalar; it is not a Scalar
+  // identity, and it does not stay in the time domain.
+  for (const char* body :
+       {"open Core open Core.Osc open Core.Fx open Core.Arrange open Core.Render open Core.Io open Core.Time open Core.Sig open Core.Math\nlet x : Scalar = of_sec 1.0 ;;",
+        "open Core open Core.Osc open Core.Fx open Core.Arrange open Core.Render open Core.Io open Core.Time open Core.Sig open Core.Math\nlet x : Timestamp = of_ms 250ms ;;",
+        "open Core open Core.Osc open Core.Fx open Core.Arrange open Core.Render open Core.Io open Core.Time open Core.Sig open Core.Math\nlet x : Scalar = of_min 4 ;;"}) {
+    TempProject tp;
+    std::string f = tp.write("bad.synth", body);
+    DiagnosticBag diags;
+    checkProject({f}, diags);
+    CHECK(diags.hasErrors());
+  }
+}
+
+TEST(checker_timestamp_division_still_needs_an_explicit_unit) {
+  // Adding a way out does not relax the dimensional rule: the ratio of
+  // two Timestamps is still an error, and the message points at it.
+  TempProject tp;
+  std::string f = tp.write("bad.synth",
+                           "open Core open Core.Osc open Core.Fx open Core.Arrange open Core.Render open Core.Io open Core.Time open Core.Sig open Core.Math\nlet x : Scalar = 1s /. 500ms ;;");
+  DiagnosticBag diags;
+  checkProject({f}, diags);
+  CHECK(diags.hasErrors());
+  bool mentions = false;
+  for (auto& d : diags.items)
+    if (d.message.find("of_sec") != std::string::npos) mentions = true;
+  CHECK(mentions);
 }
 
 TEST(checker_timestamp_arithmetic) {

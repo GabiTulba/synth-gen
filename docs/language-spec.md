@@ -36,8 +36,8 @@ accepts and how it is typed and evaluated. The design document
   `m` (60 s). All denote the same quantity (time since the epoch or a
   duration); e.g. `100ns`, `800ms`, `1.5s`, `1m`. An unknown suffix is a
   lexical error. A suffix only attaches to a *literal*; to carry a
-  computed Scalar into the time domain use `to_sec`/`to_ms`/`to_min`
-  (§5.4).
+  computed Scalar into the time domain use `to_sec`/`to_ms`/`to_min`,
+  and to read one back out `of_sec`/`of_ms`/`of_min` (§5.4).
 - **Boolean literals**: `true`, `false` — always `Bool`.
 - **String literals**: `"..."` with escapes `\n`, `\t`, `\\`, `\"`.
 - **Punctuation**: `;;` `;` `:` `=` `(` `)` `[` `]` `{` `}` `,` `.`
@@ -566,9 +566,10 @@ Scalar, so musical time can be written as musical time —
 `beat *. 1.5` is a dotted note, `bar -. beat` is the upbeat before it,
 `to_ms 250.0 +. 100ms` composes a window. The combinations left out are
 left out on purpose. `1s *. 2s` is not a duration; `1s /. 500ms` would
-hand back the bare Scalar that `to_sec`/`to_ms`/`to_min` deliberately
-have no inverse for (§6); `1s +. 2.0` mixes a duration with a number —
-convert the Scalar first.
+hand back a bare Scalar without anyone naming a unit — ask for a count
+with `div`, or leave the time domain deliberately with
+`of_sec 1s /. of_sec 500ms` (§6); `1s +. 2.0` mixes a duration with a
+number — convert one side first.
 
 Every Timestamp result **clamps at the epoch**. The timeline starts at
 `0s` and a negative instant has no meaning, so `100ms -. 900ms` is `0s`
@@ -1163,6 +1164,9 @@ val List.iter    : f:('a -> unit) -> xs:'a list -> unit
 val Time.to_sec: x:Scalar -> Timestamp
 val Time.to_ms: x:Scalar -> Timestamp
 val Time.to_min: x:Scalar -> Timestamp
+val Time.of_sec: x:Timestamp -> Scalar
+val Time.of_ms: x:Timestamp -> Scalar
+val Time.of_min: x:Timestamp -> Scalar
 val Math.not: b:Bool -> Bool
 val Time.time_steps: start:Timestamp -> step:Timestamp -> count:Int -> Timestamp list
 val Time.jitter: seed:Scalar -> spread:Timestamp -> steps:(Timestamp list) -> Timestamp list
@@ -1204,7 +1208,8 @@ val Str.of_int : n:Int -> String
 `Core.Dsp` is a *view*: the sound-design working set (oscillators,
 envelopes, filters, clips, `mix_all`/`channels`/`channel`/`sample`/
 `place`/`place_multi`, the `Sig` constructors, `render`/`render_vis`,
-`to_sec`/`to_ms`/`to_min`, and the Math family) re-exported under bare
+`to_sec`/`to_ms`/`to_min`, `of_sec`/`of_ms`/`of_min`, and the Math
+family) re-exported under bare
 names, so a working file's preamble is `open Core open Core.Dsp`. The
 submodules above stay the canonical homes; `Io`, the stems renders and
 `Pitch`/`Tempo`/`Scale`/`Score` are deliberately not in it.
@@ -1236,9 +1241,19 @@ part. See [`core-library.md`](core-library.md) for the details.
 `to_sec`/`to_ms`/`to_min` are the computed counterpart of the literal
 suffixes — `to_ms 250.0` is `250ms` — and are what a duration derived
 from a tempo, a loop index, or a parameter has to go through:
-`to_min (1.0 /. bpm)` is one beat. There is deliberately no conversion
-back: a Timestamp that can decay into a bare number is how unit
-confusion gets in.
+`to_min (1.0 /. bpm)` is one beat. `of_sec`/`of_ms`/`of_min` are their
+inverses and the only way back out: `of_ms 250ms` is `250.0`. The pair
+is exact in both directions.
+
+The way out is a *named* conversion rather than an implicit one, and
+that is the whole of the unit discipline. What the rules prevent is a
+Timestamp decaying into a bare number without anyone saying which unit
+the number is in — so arithmetic never drops the unit on its own
+(`1s /. 500ms` is still an error), and reading one out means writing
+the unit down. `of_sec beat` is a Scalar because you asked for seconds.
+Prefer `div`/`rem` when what you want is a count of durations: they
+stay inside the time domain and land on the Int that `~count`
+parameters take.
 
 `jitter` humanizes a rhythm: each timestamp moves by a delta in
 `[-spread, +spread]` (clamped at `0s`) derived by hashing

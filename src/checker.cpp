@@ -1987,9 +1987,9 @@ class ModuleChecker {
     // (either order for `*`, left operand only for `/`). The table is
     // deliberately partial - it adds a dimensional rule rather than
     // relaxing one. Timestamp*Timestamp is not a duration, and
-    // Timestamp/Timestamp would hand back the bare Scalar the unit
-    // discipline exists to prevent: there is no way back from a
-    // Timestamp on purpose (§6, `to_sec`/`to_ms`/`to_min`).
+    // Timestamp/Timestamp would hand back a bare Scalar without anyone
+    // naming a unit. Leaving the time domain is spelled out instead,
+    // with `of_sec`/`of_ms`/`of_min` (§6).
     if (is(l, K::Timestamp) || is(r, K::Timestamp)) {
       bool both = is(l, K::Timestamp) && is(r, K::Timestamp);
       bool add = e.op == BinOpKind::Add || e.op == BinOpKind::Sub;
@@ -2003,9 +2003,9 @@ class ModuleChecker {
       if (both && e.op == BinOpKind::Div)
         fail(e.span,
              "two Timestamps do not divide: the ratio would be a bare "
-             "Scalar, and a Timestamp deliberately has no way back to one "
-             "(there is no inverse of to_sec/to_ms/to_min). Carry the "
-             "Scalar you divided by instead, or keep the result a "
+             "Scalar, and arithmetic never drops the unit on its own. Ask "
+             "for a count with 'div ~num: ~den:', leave the time domain "
+             "explicitly ('of_sec a /. of_sec b'), or keep the result a "
              "Timestamp with 'beat /. 2.0'");
       if (both)
         fail(e.span, "two Timestamps do not multiply (the result would not "
@@ -2015,7 +2015,8 @@ class ModuleChecker {
         fail(e.span, here + " is not defined for " + typeName(l) + " and " +
                          typeName(r) +
                          " (a Timestamp only adds to another Timestamp; "
-                         "convert with to_sec/to_ms/to_min first)");
+                         "convert the Scalar with to_sec/to_ms/to_min first, or "
+                         "the Timestamp with of_sec/of_ms/of_min)");
       fail(e.span, here + " is not defined for " + typeName(l) + " and " +
                        typeName(r) +
                        " (scale a Timestamp by a Scalar: 'beat *. 1.5' or "

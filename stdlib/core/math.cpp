@@ -1,7 +1,7 @@
 #include "util.hpp"
 
 // Math over the numeric kinds ('a in the signatures is checked here:
-// anything non-numeric is a build-time error), Scalar -> Timestamp
+// anything non-numeric is a build-time error), the Scalar <-> Timestamp
 // conversions, and Boolean negation.
 
 using synth::ext::Value;
@@ -153,6 +153,22 @@ SYNTH_EXTERNAL(to_ms) {
 }
 SYNTH_EXTERNAL(to_min) {
   *result = Value::time(args[0].asScalar() * 60.0);
+  return true;
+}
+
+// The way back out. Reading a Timestamp is not a decay into a bare
+// number: the unit is named at the call site, so `of_ms t` is "how many
+// milliseconds is t" and the answer is dimensionless by construction.
+SYNTH_EXTERNAL(of_sec) {
+  *result = Value::scalar(args[0].asTime());
+  return true;
+}
+SYNTH_EXTERNAL(of_ms) {
+  *result = Value::scalar(args[0].asTime() * 1e3);
+  return true;
+}
+SYNTH_EXTERNAL(of_min) {
+  *result = Value::scalar(args[0].asTime() / 60.0);
   return true;
 }
 

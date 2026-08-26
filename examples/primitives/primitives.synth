@@ -145,6 +145,19 @@ let _ =
     |> sample ~from:0s ~to:(to_sec (8.0 *. 60.0 /. bpm))
     |> render ~name:"to_sec" ~rate:48000.0 ;;
 
+(* of_sec/of_ms/of_min: the way back out, when a duration has to drive
+   ordinary Scalar arithmetic. `exp_decay` takes a *rate*, not a time,
+   so tying the tail to the beat means reading the beat out in seconds:
+   ln(1000) / beat is the rate that falls 60 dB in exactly one beat. *)
+let _ =
+  let beat : Timestamp = to_min (1.0 /. bpm) in
+  let tick : Scalar Sample =
+    sine 660.0 *. exp_decay (6.907755 /. of_sec beat)
+    |> sample ~from:0s ~to:beat in
+  place_multi tick (time_steps ~start:0s ~step:beat ~count:8)
+    |> sample ~from:0s ~to:(beat *. 8.0)
+    |> render ~name:"of_sec" ~rate:48000.0 ;;
+
 (* Signal constructors: `constant` holds a level forever (here a gain on
    a tone - a bare constant is inaudible DC); `time` is the ramp whose
    sample at t seconds is t; `signal` samples a Scalar -> Scalar

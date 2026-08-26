@@ -3718,6 +3718,51 @@ open Core open Core.Time
   && rem ~num:1s ~den:250ms ==. 0s)");
 }
 
+TEST(build_time_of_unit_values) {
+  // of_sec/of_ms/of_min read a Timestamp back out in a named unit, and
+  // are exact inverses of to_sec/to_ms/to_min.
+  checkClaims(R"(
+open Core open Core.Time
+)",
+              R"(of_sec ~x:1s ==. 1.0
+  && of_sec ~x:1500ms ==. 1.5
+  && of_ms ~x:250ms ==. 250.0
+  && of_ms ~x:1s ==. 1000.0
+  && of_min ~x:90s ==. 1.5
+  && of_min ~x:1m ==. 1.0
+  && of_sec ~x:0s ==. 0.0
+  && of_ms ~x:0s ==. 0.0)");
+}
+
+TEST(build_time_of_unit_round_trips_to_unit) {
+  // Both directions: to_X then of_X is the identity on the number, and
+  // of_X then to_X is the identity on the duration.
+  checkClaims(R"(
+open Core open Core.Time
+)",
+              R"(of_sec ~x:(to_sec 0.75) ==. 0.75
+  && of_ms ~x:(to_ms 250.0) ==. 250.0
+  && of_min ~x:(to_min 2.5) ==. 2.5
+  && to_ms (of_ms ~x:1500ms) ==. 1500ms
+  && to_min (of_min ~x:90s) ==. 90s
+  && of_min ~x:(to_sec 90.0) ==. 1.5)");
+}
+
+TEST(build_time_of_unit_reaches_the_scalar_domain) {
+  // The point of leaving the time domain: a duration can now drive the
+  // ordinary Scalar arithmetic that Timestamps deliberately refuse,
+  // including the ratio `1s /. 500ms` is not allowed to be.
+  checkClaims(R"(
+open Core open Core.Time
+let beat : Timestamp = to_min (1.0 /. 120.0) ;;
+)",
+              R"(of_sec ~x:1s /. of_sec ~x:500ms ==. 2.0
+  && of_sec ~x:beat ==. 0.5
+  && of_sec ~x:beat *. of_sec ~x:beat ==. 0.25
+  && Math.sqrt ~x:(of_sec ~x:(to_sec 4.0)) ==. 2.0
+  && of_sec ~x:beat >. 0.4 && of_sec ~x:beat <. 0.6)");
+}
+
 TEST(build_time_div_by_zero_is_a_diagnostic) {
   TempDir tp;
   tp.write("t.synth", R"(

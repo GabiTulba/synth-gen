@@ -33,7 +33,7 @@ idioms that tie them together.
 | `Core.Math` | `exp` `sqrt` `log` `pow`, trig (`sin` `cos` `tan` `atan`), `abs`, `pi`, `min`/`max`/`clamp`/`lerp`, the pure hash (`hash`), Int conversions (`to_scalar`, `round`/`floor`/`ceil`), `not` | `stdlib/core/math.cpp` + SynthGraph sugar |
 | `Core.List` | List combinators & builders: `map`, `mapi`, `fold`, `scan`, `init`, `repeat`, `length`, `append`, `nth`, `rev`, `filter`, `concat`, `flat_map`, `zip`, `take`, `drop`, `range`, `sum`, `maximum`, `iter` | written in SynthGraph (`lib.synth`); `iter` in `lists.cpp` |
 | `Core.Osc` | Oscillators (`sine`, `saw`, `square`, their bandlimited `saw_bl`/`square_bl` variants, `noise`) and modulation (`fm`, `pm`, `am`) | `stdlib/core/oscillators.cpp` |
-| `Core.Time` | Timestamp construction & sequences: `to_sec`/`to_ms`/`to_min`, the duration quotient (`div`/`rem`), `time_steps`, `jitter` | `stdlib/core/math.cpp`, `lists.cpp` |
+| `Core.Time` | Timestamp construction & sequences: `to_sec`/`to_ms`/`to_min` and their inverses `of_sec`/`of_ms`/`of_min`, the duration quotient (`div`/`rem`), `time_steps`, `jitter` | `stdlib/core/math.cpp`, `lists.cpp` |
 | `Core.Arrange` | Combination and arrangement: `mix_all`, `channels`, `channel`, `sample`, `place`, `place_multi` | `stdlib/core/sampling.cpp` |
 | `Core.Fx` | Envelopes (`exp_decay`, `adsr`), filters (`lowpass`, `highpass`, the modulated `lowpass_mod`/`highpass_mod`, the resonant `resonant`), control (`follow`), distortion (`hard_clip`, `soft_clip`), time effects (`delay`, `feedback`, `resample`, `reverb`), and the voice sugar (`gated`, `echoes`) | `stdlib/core/effects.cpp` + SynthGraph sugar |
 | `Core.Render` | The effects: `render`, `render_vis`, `render_stems`, `render_vis_stems` | `stdlib/core/render.cpp` |
@@ -170,11 +170,18 @@ computed render names (see `Str`).
 ### `Core.Time`
 
 - **`to_sec` / `to_ms` / `to_min`** — the computed counterpart of the
-  literal unit suffixes. There is no conversion back to Scalar on
-  purpose — a Timestamp that decays into a bare number is how unit
-  confusion gets in. Once you have a Timestamp the operators carry it:
-  durations add, subtract and scale, and results clamp at `0s` (see
-  the caution box under Idioms).
+  literal unit suffixes. Once you have a Timestamp the operators carry
+  it: durations add, subtract and scale, and results clamp at `0s`
+  (see the caution box under Idioms).
+- **`of_sec` / `of_ms` / `of_min`** — the way back out, exact inverses
+  of the three above (`of_ms 250ms` is `250.0`). The conversion is
+  deliberately *named*: what causes unit confusion is a Timestamp
+  decaying into a bare number with nobody saying which unit it is in,
+  so arithmetic still never drops the unit on its own — `1s /. 500ms`
+  remains an error, and `of_sec 1s /. of_sec 500ms` is how you mean
+  it. Reach for `div`/`rem` first when you want a count of durations;
+  reach for these when the duration has to drive ordinary Scalar
+  arithmetic (a rate, a curve exponent, a display value).
 - **`div ~num ~den` / `rem ~num ~den`** — the missing quotient. The
   ratio of two durations is not a decayed number; it is a
   dimensionless **count**, so `div` answers "how many of these fit"

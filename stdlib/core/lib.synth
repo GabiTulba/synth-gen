@@ -226,11 +226,17 @@ end ;;
    (math.cpp for conversions, lists.cpp for the sequence builders). ----- *)
 
 module Time = struct
-  (* The computed counterpart of the literal suffixes; there is
-     deliberately no conversion back from Timestamp. *)
+  (* The computed counterpart of the literal suffixes. *)
   let to_sec ~x:Scalar : Timestamp = external "math.cpp" ;;
   let to_ms ~x:Scalar : Timestamp = external "math.cpp" ;;
   let to_min ~x:Scalar : Timestamp = external "math.cpp" ;;
+  (* And back out. The unit is named at the call site, so the result is
+     a plain count of that unit - `of_ms 250ms` is 250.0 - rather than a
+     Timestamp quietly decaying into a number. There is no unnamed way
+     back: arithmetic never drops the unit on its own. *)
+  let of_sec ~x:Timestamp : Scalar = external "math.cpp" ;;
+  let of_ms ~x:Timestamp : Scalar = external "math.cpp" ;;
+  let of_min ~x:Timestamp : Scalar = external "math.cpp" ;;
   (* The quotient of two durations is a dimensionless *count*, not a
      decayed number: div answers "how many of these fit" (an Int - it
      lands exactly where ~count parameters want it) and rem "what is
@@ -1273,6 +1279,9 @@ module Dsp = struct
   let to_sec ~x:Scalar : Timestamp = Time.to_sec ~x:x ;;
   let to_ms ~x:Scalar : Timestamp = Time.to_ms ~x:x ;;
   let to_min ~x:Scalar : Timestamp = Time.to_min ~x:x ;;
+  let of_sec ~x:Timestamp : Scalar = Time.of_sec ~x:x ;;
+  let of_ms ~x:Timestamp : Scalar = Time.of_ms ~x:x ;;
+  let of_min ~x:Timestamp : Scalar = Time.of_min ~x:x ;;
   (* the Math family *)
   let exp ~x:'a : 'a = Math.exp ~x:x ;;
   let sqrt ~x:'a : 'a = Math.sqrt ~x:x ;;

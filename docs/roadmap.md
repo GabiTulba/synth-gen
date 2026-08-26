@@ -106,9 +106,9 @@ Still open, deliberately:
 - ~~**The examples still hold raw frequencies and raw Timestamps.**~~
   **Done.** Both showcase projects now name their pitches and their note
   values. Each grew a `timing.synth` holding the one `Tempo`
-  everything derives from, `Voices.Pads.place4` takes a `~t` instead of
-  assuming 120 BPM, and `examples/darksynth/bass.synth`'s `1.006`/`1.009`
-  are `detune ~cents:10.4`/`15.5`. The timing half was verified by
+  everything derives from, and `examples/darksynth/bass.synth`'s
+  `1.006`/`1.009` are `detune ~cents:10.4`/`15.5` (`guitar.synth`'s
+  three followed in the phase-4 pass). The timing half was verified by
   rendering: it is bit-identical to the pre-migration artifacts. The
   pitch half moved five committed renders under `outputs/`, and only by
   the rounding — replacing each 2-decimal literal with exact 12-TET
@@ -183,13 +183,25 @@ wrap at the ladder's own length rather than at seven: degree 5 is the
 octave of a pentatonic scale. Negative degrees descend, which is why
 `Scale` carries a floor division and remainder of its own.
 
-Still open, deliberately:
+Since shipping:
 
-- **The examples do not use it yet.** `examples/song/pad.synth`'s
-  `Am → F → C → G` is a hand-written four-note voicing per chord, not a
-  triad, so moving it onto `Scale.voicing` changes which notes sound and
-  therefore the committed renders. That is a musical edit, not a
-  mechanical one, and it belongs with the `Score` rewrite in phase 4.
+- ~~**The examples do not use it yet.**~~ **Done**, with the `Score`
+  rewrite in phase 4. Each showcase project grew a `harmony.synth` — the
+  tonal counterpart of its `timing.synth` — holding the one `Scale`
+  everything derives from, the chord cycle as a list of degrees, and two
+  register-folding helpers (`parts`, `root`) over `Scale.voicing`. Both
+  progressions came out of the key rather than out of chord names:
+  `examples/song/`'s `Am → F → C → G` is `[0; 5; 2; 6]` of A minor, and
+  `examples/darksynth/`'s `Am → F → Dm → E` is `[0; 5; 3; 4]` of A
+  *harmonic* minor — so the E major that makes the track dark is the
+  mode's own degree 4 rather than a hand-spelled G♯.
+
+  The darksynth voicings came back bit-identical: folding each triad up
+  from a fixed `low` reproduces the hand-written register exactly, as do
+  the bass, guitar and bell roots at their own floors. The song's pad
+  did not, and that is the musical edit this item was filed for —
+  `Scale.voicing ~count:4` spells the triad plus its octave where the
+  original had a hand-voiced spread — so `outputs/song/` moved.
 
 ### `Core.Score` — **shipped**, with dynamics folded in
 
@@ -252,14 +264,41 @@ Departures from what this section originally proposed:
   decision `Scale` made: it cycles through whatever `Scale.tones` or
   `Scale.stack` produced.
 
-Still open, deliberately:
+Since shipping:
 
-- **The examples do not use it yet.** Rewriting `examples/song/` and
-  `examples/darksynth/` against the full stack is the payoff — a diff
-  that should shrink both substantially and read like music — but it
-  changes which notes sound (`pad.synth`'s chords are hand-voiced, not
-  triads) and therefore the committed renders. That is a musical edit,
-  and it wants its own pass.
+- ~~**The examples do not use it yet.**~~ **Done.** Both showcase
+  projects are written against the full stack, and the pass turned out
+  to shrink them without moving the audio much:
+
+  - `examples/song/pad.synth` and `examples/darksynth/pads.synth` are
+    `Score.chord` phrases laid end to end by `seq` and sounded by
+    `play`, so a pad voice is `(freq, dur, vel) -> Sample` and its
+    envelope plateau and sample window follow the written length instead
+    of a hardcoded 3300 ms. The dark pad's shimmer octave became a
+    second phrase rather than a fourth chord tone, because it runs a
+    wider detune — one phrase means one voice.
+  - `examples/song/keys.synth` is a `Score.melody` of eleven scale
+    degrees (negative ones descend) at a `Level`, and
+    `examples/song/strings.synth` is a `Score.arpeggio` over
+    root · fifth · octave · fifth. The arpeggio reproduces the three
+    hand-placed layers it replaced *exactly*, at a third of the length.
+  - `examples/song/song.synth`'s kit is one bar of `Score.line` per
+    part — `Rest` for the backbeat's gaps, `layer` for the accented
+    eighth hats — `loop`ed over the song and sounded by `Score.strike`.
+    That is the one place the note in a `Play` goes unread, which is
+    what `strike` is for.
+  - `examples/darksynth/song.synth` keeps its humanized grids (`Score`
+    has no jitter, deliberately) but takes every pitch from the key: the
+    bass, guitar and bell roots are cycle positions at three different
+    floors, and the ten guitar lead runs are scale degrees rather than
+    thirty frequencies that had to agree with the chords.
+
+  `examples/lib/voices/pads.synth` lost `place4` with this: laying four
+  chords end to end is `Score.seq`, not a library helper. The darksynth
+  render is bit-identical apart from `guitar.synth`'s three detunes
+  moving from ratios to cents (0.17 % of samples, ~89 dB down); the song
+  render moved with the pad voicing, as the `Scale` section above
+  records.
 
 ### Cross-cutting design constraints
 
@@ -305,9 +344,10 @@ turns out to be wrong.
    Euclidean generators was proposed here and has been dropped from the
    plan — it was the only piece that would have needed C++, and it is
    not wanted.)
-4. ~~**`Score`, dynamics included.**~~ **Done.** What remains is the
-   example rewrite: `examples/song/` and `examples/darksynth/` against
-   the full stack, as its own pass because it changes the renders.
+4. ~~**`Score`, dynamics included.**~~ **Done**, example rewrite
+   included: `examples/song/` and `examples/darksynth/` are written
+   against the full stack, each with a `harmony.synth` beside its
+   `timing.synth`.
 
 Each phase carries the same obligations as any Core work: the submodule
 table in [`core-library.md`](core-library.md), the roster in the

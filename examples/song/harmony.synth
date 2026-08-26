@@ -1,0 +1,48 @@
+(* The song's key, in one place - the tonal half of what timing.synth
+   is to the clock. A minor at A = 440, and the four chords written as
+   degrees of that key rather than as four unrelated names.
+
+   Am -> F -> C -> G is i - VI - III - VII: every chord is a triad the
+   key already contains, so nothing below names a note or a frequency.
+   Transposing the whole song is editing `tonic`; re-tuning it is
+   editing `tuning`; re-voicing it is editing one `low`. *)
+
+open Core
+open Core.Osc
+open Core.Fx
+open Core.Arrange
+open Core.Render
+open Core.Io
+open Core.Time
+open Core.Sig
+open Core.Math
+open Core.Pitch
+open Core.Scale
+
+let key : Scale = { tonic = { pc = A; oct = 2 }; quality = Minor } ;;
+let tuning : Tuning = et12 ~ref_hz:440.0 ;;
+
+(* Two bars per chord, four chords to the cycle. *)
+let cycle : Int list = [0; 5; 2; 6] ;;
+let chord_degree ~i:Int : Int = List.nth ~xs:cycle ~i:i ~default:0 ;;
+
+(* The same key in another register. A melody is written in degrees
+   around its own tonic, not around the pad's, so it asks for the key an
+   octave or two up rather than counting to degree 14. *)
+let octave ~oct:Int : Scale =
+  { tonic = { pc = key.tonic.pc; oct = oct }; quality = key.quality } ;;
+
+(* `count` parts of chord `i`, spread upwards from the lowest octave at
+   or above `low`. Voicing from a fixed floor rather than from each
+   chord's own octave is what keeps the four roots inside a tenth
+   instead of climbing away as the degrees rise. *)
+let parts ~i:Int ~low:Note ~count:Int : Note list =
+  Scale.voicing ~notes:(Scale.triad ~s:key ~degree:(chord_degree ~i:i))
+                ~low:low ~count:count ;;
+
+(* The chord's root alone, folded into the same register. *)
+let root ~i:Int ~low:Note : Note =
+  List.nth ~xs:(Scale.voicing
+                  ~notes:[Scale.degree ~s:key ~n:(chord_degree ~i:i)]
+                  ~low:low ~count:1)
+           ~i:0 ~default:key.tonic ;;

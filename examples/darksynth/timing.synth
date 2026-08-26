@@ -22,6 +22,7 @@ open Core.Tempo
 let tempo : Tempo = common ~bpm:120.0 ;;
 
 let dur v:Value : Timestamp = value ~t:tempo ~v:v ;;
-(* Two bars: the length of one chord segment, and the unit the whole
-   arrangement is cut into. *)
-let segment : Timestamp = bar ~t:tempo * 2.0 ;;
+(* Bars in *beats*, which is the unit a Score phrase positions itself
+   in: `bars 2` is one chord segment of the pad cycle, and the segment
+   is the unit the whole arrangement is cut into. *)
+let bars n:Int : Scalar = Math.to_scalar (n * tempo.meter.beats) ;;

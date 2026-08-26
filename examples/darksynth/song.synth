@@ -40,15 +40,36 @@ import Guitar
 import Fx
 
 import Timing
+import Harmony
 import Voices
 module Seq = Voices.Seq
 
 open Core.Tempo
 open Core.Pitch
+open Core.Scale
 
-(* `note A 1` is the bass A, in 12-TET at A=440: the pitches below name
-   themselves instead of hiding in a frequency. *)
-let note pc:PitchClass oct:Int : Scalar = a440 ~note:{ pc = pc; oct = oct } ;;
+(* Every pitch in the arrangement is a position in `Harmony.cycle` -
+   0 = i (Am), 1 = VI (F), 2 = iv (Dm), 3 = V (E) - read at the register
+   its part lives in. No frequency is written out below, and the four
+   parts cannot drift out of agreement with each other or with the
+   pad.
+
+   Each `low` is the floor the root folds up to, and it is what shapes
+   the line: from E1 the roots descend A1 - F1 - D2 - E1 rather than
+   climbing as the degrees rise. *)
+let bass_note i:Int : Scalar =
+  Harmony.root_hz ~i:i ~low:{ pc = E; oct = 1 } ;;
+let chug_note i:Int : Scalar =
+  Harmony.root_hz ~i:i ~low:{ pc = D; oct = 2 } ;;
+let bell_note i:Int : Scalar =
+  Harmony.root_hz ~i:i ~low:{ pc = D; oct = 3 } ;;
+
+(* The lead runs are melodic rather than harmonic, so they are written
+   as degrees of the key around A3: 0 is the tonic, and negative degrees
+   descend. Degree 6 is the raised seventh - the G# - for free. *)
+let lead_note d:Int : Scalar =
+  hz ~t:Harmony.tuning
+     ~note:(degree ~s:(Harmony.octave ~oct:3) ~n:d) ;;
 
 (* ---------- drums ---------- *)
 (* Each line binds a local function for its groove: the hit, grid and
@@ -140,43 +161,43 @@ let bass_line : Scalar Signal =
         ~start:(start + Timing.dur Eighth) ~step:(Timing.dur Quarter)
         ~count:8 ~seed:(seed + 0.5) ~spread:5ms in
   let intro : Scalar Signal =
-    mix_all [place_multi (Bass.held (note A 1)) [0s; 2s];
-             place_multi (Bass.held (note F 1)) [4s; 6s];
-             place_multi (Bass.held (note D 2)) [8s; 10s];
-             place_multi (Bass.held (note E 1)) [12s; 14s]] in
+    mix_all [place_multi (Bass.held (bass_note 0)) [0s; 2s];
+             place_multi (Bass.held (bass_note 1)) [4s; 6s];
+             place_multi (Bass.held (bass_note 2)) [8s; 10s];
+             place_multi (Bass.held (bass_note 3)) [12s; 14s]] in
   let build : Scalar Signal =
-    mix_all [eighths ~freq:(note A 1) ~start:16s ~count:16 ~seed:1.0;
-             eighths ~freq:(note F 1) ~start:20s ~count:16 ~seed:2.0;
-             eighths ~freq:(note D 2) ~start:24s ~count:16 ~seed:3.0;
-             eighths ~freq:(note E 1) ~start:28s ~count:14 ~seed:4.0] in
+    mix_all [eighths ~freq:(bass_note 0) ~start:16s ~count:16 ~seed:1.0;
+             eighths ~freq:(bass_note 1) ~start:20s ~count:16 ~seed:2.0;
+             eighths ~freq:(bass_note 2) ~start:24s ~count:16 ~seed:3.0;
+             eighths ~freq:(bass_note 3) ~start:28s ~count:14 ~seed:4.0] in
   let drop1 : Scalar Signal =
-    mix_all [pump ~freq:(note A 1) ~start:32s ~seed:5.0;
-             pump ~freq:(note F 1) ~start:36s ~seed:6.0;
-             pump ~freq:(note D 2) ~start:40s ~seed:7.0;
-             pump ~freq:(note E 1) ~start:44s ~seed:8.0] in
+    mix_all [pump ~freq:(bass_note 0) ~start:32s ~seed:5.0;
+             pump ~freq:(bass_note 1) ~start:36s ~seed:6.0;
+             pump ~freq:(bass_note 2) ~start:40s ~seed:7.0;
+             pump ~freq:(bass_note 3) ~start:44s ~seed:8.0] in
   let breakdown : Scalar Signal =
-    mix_all [place_multi (Bass.held (note A 1)) [48s; 50s];
-             place_multi (Bass.held (note F 1)) [52s; 54s];
-             place_multi (Bass.held (note D 2)) [56s; 58s];
-             place_multi (Bass.held (note E 1)) [60s; 62s]] in
+    mix_all [place_multi (Bass.held (bass_note 0)) [48s; 50s];
+             place_multi (Bass.held (bass_note 1)) [52s; 54s];
+             place_multi (Bass.held (bass_note 2)) [56s; 58s];
+             place_multi (Bass.held (bass_note 3)) [60s; 62s]] in
   let drop2 : Scalar Signal =
-    mix_all [sixteenths ~freq:(note A 1) ~start:64s ~seed:9.0;
-             pump ~freq:(note F 1) ~start:68s ~seed:10.0;
-             pump ~freq:(note D 2) ~start:72s ~seed:11.0;
-             pump ~freq:(note E 1) ~start:76s ~seed:12.0;
-             pump ~freq:(note A 1) ~start:80s ~seed:13.0;
-             sixteenths ~freq:(note F 1) ~start:84s ~seed:14.0] in
+    mix_all [sixteenths ~freq:(bass_note 0) ~start:64s ~seed:9.0;
+             pump ~freq:(bass_note 1) ~start:68s ~seed:10.0;
+             pump ~freq:(bass_note 2) ~start:72s ~seed:11.0;
+             pump ~freq:(bass_note 3) ~start:76s ~seed:12.0;
+             pump ~freq:(bass_note 0) ~start:80s ~seed:13.0;
+             sixteenths ~freq:(bass_note 1) ~start:84s ~seed:14.0] in
   let tolling : Scalar Signal =
-    mix_all [place_multi (Bass.held (note A 1)) [88s; 90s];
-             Bass.held (note F 1) |> place ~at:92s;
-             Bass.held (note E 1) |> place ~at:94s] in
+    mix_all [place_multi (Bass.held (bass_note 0)) [88s; 90s];
+             Bass.held (bass_note 1) |> place ~at:92s;
+             Bass.held (bass_note 3) |> place ~at:94s] in
   let drop3 : Scalar Signal =
-    mix_all [sixteenths ~freq:(note A 1) ~start:96s ~seed:15.0;
-             pump ~freq:(note F 1) ~start:100s ~seed:16.0;
-             pump ~freq:(note D 2) ~start:104s ~seed:17.0;
-             sixteenths ~freq:(note E 1) ~start:108s ~seed:18.0] in
+    mix_all [sixteenths ~freq:(bass_note 0) ~start:96s ~seed:15.0;
+             pump ~freq:(bass_note 1) ~start:100s ~seed:16.0;
+             pump ~freq:(bass_note 2) ~start:104s ~seed:17.0;
+             sixteenths ~freq:(bass_note 3) ~start:108s ~seed:18.0] in
   let outro : Scalar Signal =
-    place_multi (Bass.held (note A 1)) [112s; 114s; 116s] in
+    place_multi (Bass.held (bass_note 0)) [112s; 114s; 116s] in
   intro * 0.8 + build + drop1 + breakdown * 0.8 + drop2
     + tolling * 0.8 + drop3 + outro * 0.55
 ;;
@@ -197,55 +218,48 @@ let chug_part : Scalar Signal =
   let chugs ~freq:Scalar ~start:Timestamp ~seed:Scalar : Scalar Signal =
     Seq.humanized (Guitar.chug freq) ~start:start ~step:(Timing.dur Eighth)
       ~count:12 ~seed:seed ~spread:7ms in
-  mix_all [chugs ~freq:(note A 2) ~start:64s ~seed:61.0;
-           chugs ~freq:(note F 2) ~start:68s ~seed:62.0;
-           chugs ~freq:(note D 2) ~start:72s ~seed:63.0;
-           chugs ~freq:(note E 2) ~start:76s ~seed:64.0;
-           chugs ~freq:(note A 2) ~start:80s ~seed:65.0;
-           chugs ~freq:(note F 2) ~start:84s ~seed:66.0;
-           chugs ~freq:(note A 2) ~start:96s ~seed:67.0;
-           chugs ~freq:(note F 2) ~start:100s ~seed:68.0;
-           chugs ~freq:(note D 2) ~start:104s ~seed:69.0;
-           chugs ~freq:(note E 2) ~start:108s ~seed:70.0]
+  mix_all [chugs ~freq:(chug_note 0) ~start:64s ~seed:61.0;
+           chugs ~freq:(chug_note 1) ~start:68s ~seed:62.0;
+           chugs ~freq:(chug_note 2) ~start:72s ~seed:63.0;
+           chugs ~freq:(chug_note 3) ~start:76s ~seed:64.0;
+           chugs ~freq:(chug_note 0) ~start:80s ~seed:65.0;
+           chugs ~freq:(chug_note 1) ~start:84s ~seed:66.0;
+           chugs ~freq:(chug_note 0) ~start:96s ~seed:67.0;
+           chugs ~freq:(chug_note 1) ~start:100s ~seed:68.0;
+           chugs ~freq:(chug_note 2) ~start:104s ~seed:69.0;
+           chugs ~freq:(chug_note 3) ~start:108s ~seed:70.0]
 ;;
 
 (* Lead runs: four syncopated notes at the tail of each chord segment
-   (n1 . n2 . n3 . n2), answering the bass instead of two static hits.
+   (d1 . d2 . d3 . d2), answering the bass instead of two static hits.
    Drop 1 runs rise; drop 2 flips the contour downward for variation.
-   `run` is a local function of the only part that plays them. *)
+   `run` is a local function of the only part that plays them, and it
+   takes scale degrees - so a run is a shape in the key rather than
+   three frequencies that have to be checked against the chord. *)
 let stab_part : Scalar Signal =
   (* Every run sits at the tail of its two-bar segment, on the same
-     beats: n1 on 5, n2 on 6 and 7, n3 on the offbeat between them. So
+     beats: d1 on 5, d2 on 6 and 7, d3 on the offbeat between them. So
      the run takes the segment it belongs to and works out its own
      timing, instead of four literals per line that have to agree. *)
-  let run ~n1:Scalar ~n2:Scalar ~n3:Scalar ~from:Timestamp ~seed:Scalar
+  let run ~d1:Int ~d2:Int ~d3:Int ~from:Timestamp ~seed:Scalar
       : Scalar Signal =
     let on n:Scalar : Timestamp = from + Timing.dur Quarter * n in
-    place_multi (Guitar.stab n1) ([on 5.0] |> jitter ~seed:seed ~spread:6ms)
-    + place_multi (Guitar.stab n2)
+    let stab d:Int : Scalar Sample = Guitar.stab (lead_note d) in
+    place_multi (stab d1) ([on 5.0] |> jitter ~seed:seed ~spread:6ms)
+    + place_multi (stab d2)
         ([on 6.0; on 7.0] |> jitter ~seed:(seed + 0.3) ~spread:6ms)
-    + place_multi (Guitar.stab n3)
+    + place_multi (stab d3)
         ([on 6.5] |> jitter ~seed:(seed + 0.7) ~spread:6ms) in
-  mix_all [run ~n1:(note E 4) ~n2:(note C 4) ~n3:(note A 3)
-               ~from:64s ~seed:71.0;
-           run ~n1:(note F 4) ~n2:(note C 4) ~n3:(note A 3)
-               ~from:68s ~seed:72.0;
-           run ~n1:(note D 4) ~n2:(note A 3) ~n3:(note F 3)
-               ~from:72s ~seed:73.0;
-           run ~n1:(note B 3) ~n2:(note Gs 3) ~n3:(note E 3)
-               ~from:76s ~seed:74.0;
-           run ~n1:(note A 3) ~n2:(note C 4) ~n3:(note E 4)
-               ~from:80s ~seed:75.0;
-           run ~n1:(note F 4) ~n2:(note C 4) ~n3:(note A 3)
-               ~from:84s ~seed:76.0;
-           run ~n1:(note E 4) ~n2:(note C 4) ~n3:(note A 3)
-               ~from:96s ~seed:77.0;
-           run ~n1:(note F 4) ~n2:(note C 4) ~n3:(note A 3)
-               ~from:100s ~seed:78.0;
-           run ~n1:(note D 4) ~n2:(note A 3) ~n3:(note F 3)
-               ~from:104s ~seed:79.0;
-           run ~n1:(note B 3) ~n2:(note E 4) ~n3:(note A 4)
-               ~from:108s ~seed:80.0]
+  mix_all [run ~d1:4 ~d2:2 ~d3:0 ~from:64s ~seed:71.0;
+           run ~d1:5 ~d2:2 ~d3:0 ~from:68s ~seed:72.0;
+           run ~d1:3 ~d2:0 ~d3:(-2) ~from:72s ~seed:73.0;
+           run ~d1:1 ~d2:(-1) ~d3:(-3) ~from:76s ~seed:74.0;
+           run ~d1:0 ~d2:2 ~d3:4 ~from:80s ~seed:75.0;
+           run ~d1:5 ~d2:2 ~d3:0 ~from:84s ~seed:76.0;
+           run ~d1:4 ~d2:2 ~d3:0 ~from:96s ~seed:77.0;
+           run ~d1:5 ~d2:2 ~d3:0 ~from:100s ~seed:78.0;
+           run ~d1:3 ~d2:0 ~d3:(-2) ~from:104s ~seed:79.0;
+           run ~d1:1 ~d2:4 ~d3:7 ~from:108s ~seed:80.0]
 ;;
 
 (* ---------- bells: far-off tolls that close in ---------- *)
@@ -256,17 +270,18 @@ let bell_part : Scalar Signal =
   let toll freq:Scalar ~at:Timestamp : Scalar Signal =
     Fx.bell_hit freq |> place ~at:at in
   let foreshadow : Scalar Signal =
-    toll (note A 3) ~at:48s + toll (note E 3) ~at:56s in
+    toll (bell_note 0) ~at:48s + toll (bell_note 3) ~at:56s in
   let tolling : Scalar Signal =
-    mix_all [toll (note A 3) ~at:88s; toll (note F 3) ~at:90s;
-             toll (note D 3) ~at:92s; toll (note E 3) ~at:94s] in
+    mix_all [toll (bell_note 0) ~at:88s; toll (bell_note 1) ~at:90s;
+             toll (bell_note 2) ~at:92s; toll (bell_note 3) ~at:94s] in
   let drop3 : Scalar Signal =
-    mix_all [toll (note A 3) ~at:96s; toll (note F 3) ~at:100s;
-             toll (note D 3) ~at:104s; toll (note E 3) ~at:108s] in
+    mix_all [toll (bell_note 0) ~at:96s; toll (bell_note 1) ~at:100s;
+             toll (bell_note 2) ~at:104s; toll (bell_note 3) ~at:108s] in
   let outro : Scalar Signal =
-    toll (note A 3) ~at:112s
-    + toll (note A 3) ~at:116s * 0.6
-    + toll (note A 2) ~at:118s * 0.45 in
+    (* the last toll drops an octave, to the register the chugs sat in *)
+    toll (bell_note 0) ~at:112s
+    + toll (bell_note 0) ~at:116s * 0.6
+    + toll (chug_note 0) ~at:118s * 0.45 in
   foreshadow * 0.5 + tolling * 0.75 + drop3 * 0.55 + outro * 0.7
 ;;
 

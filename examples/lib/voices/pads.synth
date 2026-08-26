@@ -1,7 +1,10 @@
-(* Pad building blocks: the two-saw detuned tone every example pad is
-   built from (detune is a parameter so stereo sides can run different
-   widths), and the shared four-chord progression placement, which takes
-   its grid from the caller's tempo. *)
+(* Pad building block: the two-saw detuned tone every example pad is
+   built from. Detune is a parameter so stereo sides can run different
+   widths - that difference is what makes a pad feel wide.
+
+   Placement used to live here too, as a four-chord `place4`. It does
+   not any more: a progression is a `Core.Score` phrase, and `seq` lays
+   four chords end to end without a library helper. *)
 
 open Core
 open Core.Osc
@@ -15,15 +18,4 @@ open Core.Math
 
 let detuned ~freq:Scalar ~detune:Scalar : Scalar Signal =
   (saw (freq - detune) + saw (freq + detune)) * 0.5
-;;
-
-(* Four chord samples, two bars each, on the four-chord cycle grid. The
-   tempo is the caller's - the library no longer assumes 120 BPM.
-   Polymorphic in the channel layout: placing is placing, whether the
-   chords are mono or a stereo Vector. *)
-let place4 ~t:Tempo.Tempo a:'a Sample b:'a Sample c:'a Sample d:'a Sample
-    : 'a Signal =
-  let two_bars : Timestamp = Tempo.bar ~t:t * 2.0 in
-  mix_all [a |> place ~at:0s; b |> place ~at:two_bars;
-           c |> place ~at:(two_bars * 2.0); d |> place ~at:(two_bars * 3.0)]
 ;;

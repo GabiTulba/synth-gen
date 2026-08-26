@@ -1,6 +1,11 @@
 (* Dark pad: wide detuned saws per chord tone (the shared Voices.Pads
-   tone) plus a quiet upper octave, lowpassed under a slow envelope.
-   Detune is a parameter so each stereo side runs a different width. *)
+   tone), lowpassed under a slow envelope, with a quiet octave above
+   each root - the shimmer that keeps a dark pad from turning to mud.
+   Detune is a parameter so each stereo side runs a different width.
+
+   The cycle is a pair of Score phrases: four chords of the key, two
+   bars each, laid end to end by `seq`. `Harmony` says which notes;
+   nothing here names one. *)
 
 open Core
 open Core.Osc
@@ -13,42 +18,59 @@ open Core.Sig
 open Core.Math
 
 import Timing
+import Harmony
 import Voices
 module P = Voices.Pads
 
 open Core.Pitch
+open Core.Score
 
-let note pc:PitchClass oct:Int : Scalar = a440 ~note:{ pc = pc; oct = oct } ;;
-
-let dark_chord ~root:Scalar ~third:Scalar ~fifth:Scalar ~detune:Scalar
-    : Scalar Signal =
+(* One chord tone, and a voice in the sense `play` means: it is handed
+   the note's own written length, so the envelope's plateau and the
+   sample window follow the score rather than a hardcoded 3100 ms.
+   `~detune` is filled first, which leaves exactly the
+   (freq, duration, velocity) function `play` wants. *)
+let tone ~detune:Scalar freq:Scalar dur:Timestamp vel:Scalar
+    : Scalar Sample =
   let env : Scalar Signal =
     adsr ~attack:600ms ~decay:400ms ~sustain:0.8 ~release:900ms
-         ~hold:3100ms in
-  let stack : Scalar Signal =
-    (P.detuned ~freq:root ~detune:detune
-     + P.detuned ~freq:third ~detune:detune
-     + P.detuned ~freq:fifth ~detune:detune
-     + P.detuned ~freq:(root * 2.0) ~detune:(detune * 2.0) * 0.4) * 0.27 in
-  (stack |> lowpass ~cutoff:850.0) * env
+         ~hold:(dur - 900ms) in
+  (P.detuned ~freq:freq ~detune:detune |> lowpass ~cutoff:850.0)
+    * env * vel * 0.27
+    |> sample ~from:0s ~to:dur
 ;;
 
-(* Am -> F -> Dm -> E: two bars per chord, four chords to the cycle. The
-   E major (G#) is the harmonic-minor turn that makes it dark.
-   `segment` is a local function that captures the enclosing detune and
-   cuts each chord to the grid Timing defines, so only the chord tones
-   vary per call. *)
+(* The floor the chords fold up to, which is what holds the cycle in
+   one register instead of letting it climb as the degrees rise. *)
+let low : Note = { pc = D; oct = 2 } ;;
+
+(* Am -> F -> Dm -> E, two bars each, from whichever parts the caller
+   picks out of the chord. The E major is the harmonic-minor turn that
+   makes the cycle dark, and it needs no special case here: it is the
+   triad on degree 4 of the mode Harmony already names. *)
+let build ~parts:(Int -> Note list) : Phrase =
+  seq ~ps:(List.init ~n:4
+             ~f:(fun i:Int ->
+                   chord ~notes:(parts i) ~at:0.0
+                         ~len:(Timing.bars 2)))
+;;
+
+let triads : Phrase =
+  build ~parts:(fun i:Int -> Harmony.parts ~i:i ~low:low ~count:3)
+;;
+
+(* The root's octave rides above the triad on a phrase of its own,
+   because it is a different voice and not a fourth chord tone: a wider
+   detune and a quarter of the level make it a colour. *)
+let octaves : Phrase =
+  build ~parts:(fun i:Int ->
+                  [shift ~note:(Harmony.root ~i:i ~low:low) ~by:12])
+;;
+
 let cycle detune:Scalar : Scalar Signal =
-  let segment ~root:Scalar ~third:Scalar ~fifth:Scalar : Scalar Sample =
-    dark_chord ~root:root ~third:third ~fifth:fifth ~detune:detune
-      |> sample ~from:0s ~to:Timing.segment in
-  let am : Scalar Sample =
-    segment ~root:(note A 2) ~third:(note C 3) ~fifth:(note E 3) in
-  let f : Scalar Sample =
-    segment ~root:(note F 2) ~third:(note A 2) ~fifth:(note C 3) in
-  let dm : Scalar Sample =
-    segment ~root:(note D 2) ~third:(note F 2) ~fifth:(note A 2) in
-  let e : Scalar Sample =
-    segment ~root:(note E 2) ~third:(note Gs 2) ~fifth:(note B 2) in
-  P.place4 ~t:Timing.tempo am f dm e
+  let voiced ~p:Phrase ~detune:Scalar : Scalar Signal =
+    p |> realize ~tempo:Timing.tempo ~tuning:Harmony.tuning
+      |> play ~voice:(tone ~detune:detune) in
+  voiced ~p:triads ~detune:detune
+  + voiced ~p:octaves ~detune:(detune * 2.0) * 0.4
 ;;

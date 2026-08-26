@@ -40,6 +40,7 @@ semantics of the less obvious primitives.
 | `Core.Pitch` | Notes, temperaments and cents: `step`/`of_step`, `shift`, `flat`, `et`/`et12`/`just`/`pyth`, `hz`/`step_hz`/`a440`, `cents`/`detune`/`to_cents`/`ratio` | written in SynthGraph (`lib.synth`) |
 | `Core.Tempo` | Meters, note values and the beat grid: `beat`/`bar`/`beats`, `value`, `at`, `grid`, `swing`, `common` | written in SynthGraph (`lib.synth`) |
 | `Core.Scale` | Keys, degrees and chords: `offsets`, `degree`, `notes`, `snap`, `shape`, `tones`, `stack`/`triad`/`seventh`, `invert`, `voicing`, `freqs` | written in SynthGraph (`lib.synth`) |
+| `Core.Score` | Phrases in beats, events in time, and the bridge between: `line`/`melody`/`chord`/`arpeggio`, `span`, `seq`/`layer`/`loop`/`move`, `transpose`/`in_key`/`staccato`/`legato`/`velocity`, `realize`, `play`/`strike`, plus dynamics (`amp`, `ramp`, `db`) | written in SynthGraph (`lib.synth`) |
 | `Core.Math` | `exp`, `sqrt`, `log`, `pow` — polymorphic over Scalars and (elementwise) Signals — plus the Int conversions `to_scalar`, `round`, `floor`, `ceil`, and `not` | `stdlib/core/math.cpp` |
 
 ## Primitive semantics
@@ -244,6 +245,45 @@ the whole story:
   above `low` — three chord tones become the four-part pad stack.
   `freqs ~t` is the one exit to Scalars and names its temperament, as
   `Pitch.hz` does.
+- **`Score`: a `Phrase` is symbolic, an `Event` is not.** A phrase
+  holds beats and `Pitch.Note`s, so the same phrase plays at any tempo
+  in any temperament and every transform is a pure edit — `move`,
+  `transpose`, `in_key`, `staccato`, `legato`, `velocity` all return a
+  new phrase and leave the original alone. `realize ~tempo ~tuning` is
+  the single bridge: it turns beats into Timestamps and notes into
+  frequencies, which is why an `Event` carries a `freq` and a voice
+  never has to know about temperament.
+- **`Score`: `play` hands a voice the note's duration.** A voice is
+  `(freq, duration, velocity) -> Sample`, so the envelope's `~hold` and
+  the sample window can both follow the written length — the thing
+  pre-baked fixed-length samples cannot express, and the reason
+  Timestamp arithmetic exists. `strike` is the percussion form, taking
+  velocity alone, because a drum has no meaningful pitch or duration.
+  Like `place_multi`, both **sum without normalization**: headroom is
+  yours to manage.
+- **`Score`: `seq` and `layer` are the two ways to combine.** `seq`
+  starts each phrase where the last one ended (using `span`, the
+  phrase's length in beats); `layer` leaves every phrase at its own
+  positions. `loop ~n` is `seq` of `n` copies. `line` lays `Item`s end
+  to end and a `Rest` advances the cursor without emitting a step —
+  `Rest` needs its own constructor because there are no literal
+  patterns, so a rest cannot be a sentinel `match` picks out.
+  `legato` stretches each note to the next attack and leaves the last as
+  written; `staccato ~ratio` scales every written length.
+- **`Score`: four names dodge their neighbours.** `span` not `length`
+  (`List.length`), `layer` not `stack` (`Scale.stack`), `loop` not
+  `repeat` (`List.repeat`), `move` not `shift` (`Pitch.shift`).
+  Shadowing is legal, so these would only ever have been footguns — but
+  `open Core.Score` beside `open Core.Pitch` is the normal case, and a
+  library should not quietly capture a name its neighbour owns.
+- **`Score`: dynamics live here, and are a decibel ladder.** `Level` is
+  4 dB per step anchored at `Fff = 1.0`, so `Piano` is exactly a tenth
+  of `Fff` and nothing reaches past unity. `Forte` and `Piano` are
+  spelled out where the others are abbreviated (`Pp`, `Mf`, `Ff`)
+  because a bare `F` would be `Pitch`'s F. `ramp ~from ~to ~n`
+  interpolates *in decibels*, which is the shape a crescendo actually
+  has — the midpoint of `Piano → Fff` is 0.32, not 0.55. `db` converts
+  decibels to linear gain and is worth having on its own.
 - **`List` edge cases** — the combinators are total, so a score
   builder that legitimately produces nothing needs no special case at
   the call site. `nth` answers with its `default` when the index is out

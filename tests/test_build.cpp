@@ -1480,6 +1480,192 @@ TEST(build_scale_freqs_names_its_temperament) {
       "                   ~i:0 ~default:0.0 * ratio ~num:3 ~den:2");
 }
 
+// Score is symbolic until `realize`, so most claims compare beat
+// positions rather than Timestamps. `near` gives the Scalar comparisons
+// a tolerance - the dynamics table is a `pow`, and libm is not
+// bit-reproducible across machines.
+namespace {
+void checkScoreClaims(const char* claims) {
+  TempDir derived, expected;
+  std::string src = std::string(R"(
+open Core open Core.Osc open Core.Fx open Core.Arrange open Core.Render open Core.Io open Core.Time open Core.Sig open Core.Math
+open Core.Pitch
+open Core.Tempo
+open Core.Scale
+open Core.Score
+let t : Tempo = common ~bpm:120.0 ;;
+let tn : Tuning = et12 ~ref_hz:440.0 ;;
+let cmaj : Scale = { tonic = { pc = C; oct = 4 }; quality = Major } ;;
+let a4 : Note = { pc = A; oct = 4 } ;;
+let c5 : Note = { pc = C; oct = 5 } ;;
+let ats p:Phrase : Scalar list =
+  List.map ~f:(fun s:Step -> s.at) ~xs:p.steps ;;
+let lens p:Phrase : Scalar list =
+  List.map ~f:(fun s:Step -> s.len) ~xs:p.steps ;;
+let vels p:Phrase : Scalar list =
+  List.map ~f:(fun s:Step -> s.vel) ~xs:p.steps ;;
+let stps p:Phrase : Int list =
+  List.map ~f:(fun s:Step -> step ~note:s.note) ~xs:p.steps ;;
+let near a:Scalar b:Scalar : Bool =
+  let d : Scalar = a - b in (if d < 0.0 then 0.0 - d else d) < 0.00001 ;;
+let sameS xs:Scalar list ys:Scalar list : Bool =
+  List.length ~xs:xs == List.length ~xs:ys
+    && List.fold ~f:(fun acc:Bool i:Int ->
+                       acc && near (List.nth ~xs:xs ~i:i ~default:0.0)
+                                   (List.nth ~xs:ys ~i:i ~default:1.0))
+                 ~init:true
+                 ~xs:(List.range ~from:0 ~count:(List.length ~xs:xs)) ;;
+let sameI xs:Int list ys:Int list : Bool =
+  List.length ~xs:xs == List.length ~xs:ys
+    && List.fold ~f:(fun acc:Bool i:Int ->
+                       acc && List.nth ~xs:xs ~i:i ~default:0
+                                == List.nth ~xs:ys ~i:i ~default:1)
+                 ~init:true
+                 ~xs:(List.range ~from:0 ~count:(List.length ~xs:xs)) ;;
+let l1 : Phrase = line ~items:[Play (a4, 1.0); Rest 0.5; Play (c5, 1.0)] ;;
+let m1 : Phrase = melody ~notes:[a4; c5] ~len:0.5 ;;
+let ok : Bool =
+)") + claims + R"( ;;
+let _ = sine (if ok then 440.0 else 1.0)
+  |> sample ~from:0s ~to:100ms |> render ~name:"out" ~rate:8000.0 ;;
+)";
+  derived.write("p.synth", src);
+  derived.write("build.json", projectManifest("scv", {"p.synth"}));
+  expected.write("p.synth", R"(
+open Core open Core.Osc open Core.Fx open Core.Arrange open Core.Render open Core.Io open Core.Time open Core.Sig open Core.Math
+let _ = sine 440.0
+  |> sample ~from:0s ~to:100ms |> render ~name:"out" ~rate:8000.0 ;;
+)");
+  expected.write("build.json", projectManifest("scv", {"p.synth"}));
+  CHECK(buildProject(derived.dir.string()).ok);
+  CHECK(buildProject(expected.dir.string()).ok);
+  std::string a = slurp(derived.dir / "_build" / "artifacts" / "out.wav");
+  std::string b = slurp(expected.dir / "_build" / "artifacts" / "out.wav");
+  CHECK(!a.empty());
+  CHECK(a == b);
+}
+}  // namespace
+
+TEST(build_score_line_lays_items_end_to_end) {
+  // A Rest advances the cursor without emitting a step, so the second
+  // note starts at 1.5 and the phrase spans 2.5 beats.
+  checkScoreClaims(
+      "sameS (ats l1) [0.0; 1.5]\n"
+      "  && sameS (lens l1) [1.0; 1.0]\n"
+      "  && List.length ~xs:l1.steps == 2\n"
+      "  && near (span ~p:l1) 2.5\n"
+      "  && sameS (ats (line ~items:[])) []\n"
+      "  && near (span ~p:(line ~items:[Rest 4.0])) 0.0");
+}
+
+TEST(build_score_builders_place_their_notes) {
+  // melody is a line of equal notes; chord puts them all at one beat;
+  // arpeggio cycles through the notes it was given. A4 is step 57.
+  checkScoreClaims(
+      "sameS (ats m1) [0.0; 0.5] && near (span ~p:m1) 1.0\n"
+      "  && sameS (ats (chord ~notes:(triad ~s:cmaj ~degree:0)\n"
+      "                       ~at:2.0 ~len:1.0)) [2.0; 2.0; 2.0]\n"
+      "  && sameI (stps (chord ~notes:(triad ~s:cmaj ~degree:0)\n"
+      "                        ~at:2.0 ~len:1.0)) [48; 52; 55]\n"
+      "  && near (span ~p:(chord ~notes:(triad ~s:cmaj ~degree:0)\n"
+      "                          ~at:2.0 ~len:1.0)) 3.0\n"
+      "  && sameS (ats (arpeggio ~notes:[a4; c5] ~step:0.25 ~count:5))\n"
+      "           [0.0; 0.25; 0.5; 0.75; 1.0]\n"
+      "  && sameI (stps (arpeggio ~notes:[a4; c5] ~step:0.25 ~count:5))\n"
+      "           [57; 60; 57; 60; 57]\n"
+      "  && sameS (ats (arpeggio ~notes:[] ~step:0.25 ~count:4)) []");
+}
+
+TEST(build_score_seq_and_layer_are_different_compositions) {
+  // seq starts each phrase where the last ended; layer leaves their
+  // positions alone. That difference is the whole point of both.
+  checkScoreClaims(
+      "sameS (ats (seq ~ps:[m1; m1])) [0.0; 0.5; 1.0; 1.5]\n"
+      "  && sameS (ats (layer ~ps:[m1; m1])) [0.0; 0.5; 0.0; 0.5]\n"
+      "  && near (span ~p:(seq ~ps:[m1; m1])) 2.0\n"
+      "  && near (span ~p:(layer ~ps:[m1; m1])) 1.0\n"
+      "  && near (span ~p:(loop ~p:m1 ~n:3)) 3.0\n"
+      "  && sameS (ats (loop ~p:m1 ~n:0)) []\n"
+      "  && sameS (ats (seq ~ps:[])) []\n"
+      "  && sameS (ats (layer ~ps:[])) []");
+}
+
+TEST(build_score_edits_are_pure_and_compose) {
+  checkScoreClaims(
+      "sameS (ats (move ~p:m1 ~beats:2.0)) [2.0; 2.5]\n"
+      "  && sameI (stps (transpose ~p:m1 ~semitones:12)) [69; 72]\n"
+      "  && sameI (stps (transpose ~p:m1 ~semitones:0)) [57; 60]\n"
+      "  && sameI (stps (in_key ~p:(melody ~notes:[{ pc = Cs; oct = 4 }]\n"
+      "                                    ~len:1.0) ~s:cmaj)) [48]\n"
+      "  && sameS (lens (staccato ~p:m1 ~ratio:0.5)) [0.25; 0.25]\n"
+      "  && sameS (vels (velocity ~p:m1 ~f:(fun v:Scalar -> v * 0.25)))\n"
+      "           [0.25; 0.25]\n"
+      "  (* the original is untouched: every edit is a copy *)\n"
+      "  && sameS (ats m1) [0.0; 0.5] && sameS (lens m1) [0.5; 0.5]");
+}
+
+TEST(build_score_legato_stretches_to_the_next_attack) {
+  // l1 has a 0.5-beat gap after its first note; legato closes it and
+  // leaves the last note as written.
+  checkScoreClaims(
+      "sameS (lens (legato ~p:l1)) [1.5; 1.0]\n"
+      "  && sameS (ats (legato ~p:l1)) [0.0; 1.5]\n"
+      "  && sameS (lens (legato ~p:m1)) [0.5; 0.5]\n"
+      "  && sameS (lens (legato ~p:(staccato ~p:l1 ~ratio:0.1)))\n"
+      "           [1.5; 0.1]");
+}
+
+TEST(build_score_dynamics_are_a_decibel_ladder) {
+  // Fff is unity by construction, Piano exactly a tenth of it, and the
+  // eight levels are strictly increasing. The rest is a pow, so it gets
+  // a tolerance rather than bit-equality.
+  checkScoreClaims(
+      "amp ~l:Fff == 1.0 && db ~x:0.0 == 1.0\n"
+      "  && near (amp ~l:Piano) 0.1\n"
+      "  && near (amp ~l:Mf) 0.251188643\n"
+      "  && near (db ~x:20.0) 10.0\n"
+      "  && near (db ~x:(-6.0)) 0.501187233\n"
+      "  && amp ~l:Ppp < amp ~l:Pp && amp ~l:Pp < amp ~l:Piano\n"
+      "  && amp ~l:Piano < amp ~l:Mp && amp ~l:Mp < amp ~l:Mf\n"
+      "  && amp ~l:Mf < amp ~l:Forte && amp ~l:Forte < amp ~l:Ff\n"
+      "  && amp ~l:Ff < amp ~l:Fff");
+}
+
+TEST(build_score_ramp_interpolates_in_decibels) {
+  // A crescendo is even in dB, not in amplitude: the midpoint of
+  // Piano -> Fff is 0.316, not 0.55.
+  checkScoreClaims(
+      "sameS (ramp ~from:Piano ~to:Fff ~n:5)\n"
+      "     [0.1; 0.177827941; 0.316227766; 0.562341325; 1.0]\n"
+      "  && sameS (ramp ~from:Piano ~to:Fff ~n:1) [1.0]\n"
+      "  && sameS (ramp ~from:Piano ~to:Fff ~n:0) []\n"
+      "  && sameS (ramp ~from:Fff ~to:Fff ~n:3) [1.0; 1.0; 1.0]\n"
+      "  && near (List.nth ~xs:(ramp ~from:Fff ~to:Piano ~n:5) ~i:0\n"
+      "                    ~default:0.0) 1.0");
+}
+
+TEST(build_score_realize_resolves_tempo_and_tuning) {
+  // The one bridge: beats become Timestamps at the given tempo, notes
+  // become frequencies in the given temperament.
+  checkScoreClaims(
+      "List.nth ~xs:(List.map ~f:(fun e:Event -> e.at)\n"
+      "                       ~xs:(realize ~tempo:t ~tuning:tn ~p:l1))\n"
+      "         ~i:1 ~default:0s == 750ms\n"
+      "  && List.nth ~xs:(List.map ~f:(fun e:Event -> e.dur)\n"
+      "                            ~xs:(realize ~tempo:t ~tuning:tn ~p:l1))\n"
+      "              ~i:0 ~default:0s == 500ms\n"
+      "  && List.nth ~xs:(List.map ~f:(fun e:Event -> e.freq)\n"
+      "                            ~xs:(realize ~tempo:t ~tuning:tn ~p:l1))\n"
+      "              ~i:0 ~default:0.0 == 440.0\n"
+      "  && near (List.nth ~xs:(List.map ~f:(fun e:Event -> e.freq)\n"
+      "                     ~xs:(realize ~tempo:t ~tuning:(just ~root:0\n"
+      "                                                         ~ref_hz:440.0)\n"
+      "                                  ~p:(melody ~notes:[c5] ~len:1.0)))\n"
+      "                    ~i:0 ~default:0.0) 528.0\n"
+      "  && List.length ~xs:(realize ~tempo:t ~tuning:tn\n"
+      "                              ~p:(line ~items:[])) == 0");
+}
+
 TEST(build_resample_identity_matches_the_input) {
   // End-to-end: `|> resample ~f:(fun t -> 1.0)` reads one source frame per
   // output frame, so the artifact must be byte-identical to the un-warped

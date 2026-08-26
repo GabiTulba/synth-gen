@@ -1954,6 +1954,153 @@ let bright q:Quality : Bool =
   CHECK(mentioned);
 }
 
+TEST(checker_score_roster) {
+  TempProject tp;
+  std::string f = tp.write("p.synth", R"(
+open Core open Core.Osc open Core.Fx open Core.Arrange open Core.Render open Core.Io open Core.Time open Core.Sig open Core.Math
+open Core.Pitch
+open Core.Tempo
+open Core.Scale
+open Core.Score
+let t : Tempo = common ~bpm:120.0 ;;
+let tn : Tuning = et12 ~ref_hz:440.0 ;;
+let key : Scale = { tonic = { pc = A; oct = 3 }; quality = Minor } ;;
+let a4 : Note = { pc = A; oct = 4 } ;;
+let items : Item list = [Play (a4, 1.0); Rest 0.5; Play (a4, 2.0)] ;;
+let p1 : Phrase = line ~items:items ;;
+let p2 : Phrase = melody ~notes:(notes ~s:key ~from:0 ~count:4) ~len:0.5 ;;
+let p3 : Phrase = chord ~notes:(triad ~s:key ~degree:0) ~at:0.0 ~len:4.0 ;;
+let p4 : Phrase = arpeggio ~notes:(tones ~c:{ root = a4; quality = Min7 })
+                           ~step:0.25 ~count:8 ;;
+let len : Scalar = span ~p:p1 ;;
+let edited : Phrase =
+  p2 |> move ~beats:8.0 |> transpose ~semitones:(-12) |> in_key ~s:key
+     |> staccato ~ratio:0.9 |> legato
+     |> velocity ~f:(fun v:Scalar -> v * amp ~l:Mf) ;;
+let joined : Phrase = seq ~ps:[p1; p2] ;;
+let piled : Phrase = layer ~ps:[p3; p4] ;;
+let twice : Phrase = loop ~p:p2 ~n:2 ;;
+let gain : Scalar = amp ~l:Ff ;;
+let quiet : Scalar = db ~x:(-6.0) ;;
+let cresc : Scalar list = ramp ~from:Pp ~to:Forte ~n:8 ;;
+let evs : Event list = realize ~tempo:t ~tuning:tn ~p:edited ;;
+let voice freq:Scalar dur:Timestamp vel:Scalar : Scalar Sample =
+  sine freq * vel |> sample ~from:0s ~to:dur ;;
+let out : Scalar Signal = play ~voice:voice ~events:evs ;;
+(* polymorphic in the channel layout, like the primitives it wraps *)
+let wide voice_f:Scalar dur:Timestamp vel:Scalar : Vector Sample =
+  channels [sine voice_f * vel; sine (voice_f * 2.0) * vel]
+    |> sample ~from:0s ~to:dur ;;
+let stereo : Vector Signal = play ~voice:wide ~events:evs ;;
+let hit vel:Scalar : Scalar Sample =
+  noise 200.0 * vel |> sample ~from:0s ~to:100ms ;;
+let drums : Scalar Signal = strike ~voice:hit ~events:evs ;;
+(* reachable qualified, without opening Score *)
+let q : Scalar = Core.Score.amp ~l:Core.Score.Fff ;;
+)");
+  DiagnosticBag diags;
+  Program prog = checkProject({f}, diags);
+  for (auto& d : diags.items)
+    std::cerr << renderDiagnostic(d, prog.modules.empty() ? std::string{}
+                                       : userMod(prog).parsed.source);
+  CHECK(!diags.hasErrors());
+  const auto& types = userMod(prog).defTypes;
+  for (const char* n : {"p1", "p2", "p3", "p4", "edited", "joined", "piled",
+                        "twice"})
+    CHECK(typeName(types.at(n)) == "Score.Phrase");
+  CHECK(typeName(types.at("items")) == "Score.Item list");
+  CHECK(typeName(types.at("evs")) == "Score.Event list");
+  for (const char* n : {"len", "gain", "quiet", "q"})
+    CHECK(typeEquals(types.at(n), tScalar()));
+  CHECK(typeName(types.at("cresc")) == "Scalar list");
+  // The element type rides through play/strike untouched.
+  CHECK(typeName(types.at("out")) == "Scalar Signal");
+  CHECK(typeName(types.at("drums")) == "Scalar Signal");
+  CHECK(typeName(types.at("stereo")) == "Vector Signal");
+}
+
+TEST(checker_score_type_errors) {
+  // A Phrase is in beats and an Event is in real time; a voice takes
+  // three arguments and a percussion voice one; and realize needs both
+  // a tempo and a tuning.
+  for (const char* body :
+       {"open Core open Core.Osc open Core.Fx open Core.Arrange open Core.Render open Core.Io open Core.Time open Core.Sig open Core.Math"
+        "\nopen Core.Pitch\nopen Core.Tempo\nopen Core.Score"
+        "\nlet x : Phrase = melody ~notes:[{ pc = A; oct = 4 }] ~len:500ms ;;",
+        "open Core open Core.Osc open Core.Fx open Core.Arrange open Core.Render open Core.Io open Core.Time open Core.Sig open Core.Math"
+        "\nopen Core.Pitch\nopen Core.Tempo\nopen Core.Score"
+        "\nlet x : Phrase = move ~p:(melody ~notes:[{ pc = A; oct = 4 }] ~len:1.0) ~beats:500ms ;;",
+        "open Core open Core.Osc open Core.Fx open Core.Arrange open Core.Render open Core.Io open Core.Time open Core.Sig open Core.Math"
+        "\nopen Core.Pitch\nopen Core.Tempo\nopen Core.Score"
+        "\nlet x : Event list = realize ~tempo:(common ~bpm:120.0) ~p:(line ~items:[]) ;;",
+        "open Core open Core.Osc open Core.Fx open Core.Arrange open Core.Render open Core.Io open Core.Time open Core.Sig open Core.Math"
+        "\nopen Core.Pitch\nopen Core.Tempo\nopen Core.Score"
+        "\nlet v freq:Scalar : Scalar Sample = sine freq |> sample ~from:0s ~to:1s ;;"
+        "\nlet x : Scalar Signal = play ~voice:v ~events:[] ;;",
+        "open Core open Core.Osc open Core.Fx open Core.Arrange open Core.Render open Core.Io open Core.Time open Core.Sig open Core.Math"
+        "\nopen Core.Pitch\nopen Core.Tempo\nopen Core.Score"
+        "\nlet x : Scalar list = ramp ~from:Mf ~to:Fff ~n:4.0 ;;",
+        "open Core open Core.Osc open Core.Fx open Core.Arrange open Core.Render open Core.Io open Core.Time open Core.Sig open Core.Math"
+        "\nopen Core.Pitch\nopen Core.Tempo\nopen Core.Score"
+        "\nlet x : Scalar = amp ~l:Major ;;",
+        "open Core open Core.Osc open Core.Fx open Core.Arrange open Core.Render open Core.Io open Core.Time open Core.Sig open Core.Math"
+        "\nopen Core.Pitch\nopen Core.Tempo\nopen Core.Score"
+        "\nlet x : Phrase = line ~items:[Play ({ pc = A; oct = 4 })] ;;",
+        "open Core open Core.Osc open Core.Fx open Core.Arrange open Core.Render open Core.Io open Core.Time open Core.Sig open Core.Math"
+        "\nopen Core.Pitch\nopen Core.Tempo"
+        "\nlet x : Phrase = line ~items:[] ;;"}) {
+    TempProject tp;
+    std::string f = tp.write("bad.synth", body);
+    DiagnosticBag diags;
+    checkProject({f}, diags);
+    CHECK(diags.hasErrors());
+  }
+}
+
+TEST(checker_score_dynamics_do_not_collide_with_pitch_classes) {
+  // Score spells Forte and Piano out because a bare `F` would be
+  // Pitch's F. With both modules open, every level and every pitch
+  // class still resolves.
+  TempProject tp;
+  std::string f = tp.write("p.synth", R"(
+open Core open Core.Osc open Core.Fx open Core.Arrange open Core.Render open Core.Io open Core.Time open Core.Sig open Core.Math
+open Core.Pitch
+open Core.Score
+let f_note : Note = { pc = F; oct = 4 } ;;
+let f_loud : Scalar = amp ~l:Forte ;;
+let f_soft : Scalar = amp ~l:Piano ;;
+let sharp : Note = { pc = Fs; oct = 4 } ;;
+let loudest : Scalar = amp ~l:Fff ;;
+)");
+  DiagnosticBag diags;
+  Program prog = checkProject({f}, diags);
+  for (auto& d : diags.items)
+    std::cerr << renderDiagnostic(d, prog.modules.empty() ? std::string{}
+                                       : userMod(prog).parsed.source);
+  CHECK(!diags.hasErrors());
+  CHECK(typeName(userMod(prog).defTypes.at("f_note")) == "Pitch.Note");
+  CHECK(typeEquals(userMod(prog).defTypes.at("f_loud"), tScalar()));
+}
+
+TEST(checker_score_item_match_must_be_exhaustive) {
+  TempProject tp;
+  std::string f = tp.write("bad.synth", R"(
+open Core open Core.Osc open Core.Fx open Core.Arrange open Core.Render open Core.Io open Core.Time open Core.Sig open Core.Math
+open Core.Score
+let sounding i:Item : Bool =
+  match i with
+  | Play (n, len) -> true
+;;
+)");
+  DiagnosticBag diags;
+  checkProject({f}, diags);
+  CHECK(diags.hasErrors());
+  bool mentioned = false;
+  for (auto& d : diags.items)
+    if (d.message.find("Rest") != std::string::npos) mentioned = true;
+  CHECK(mentioned);
+}
+
 TEST(checker_resample_typing) {
   TempProject tp;
   std::string f = tp.write("ok.synth", R"(
@@ -2516,12 +2663,19 @@ TEST(checker_core_is_a_real_library_of_externals) {
   CHECK(core->typeDecls.count("Scale.Chord") == 1);
   CHECK(core->typeDecls.count("Scale.Quality") == 1);
   CHECK(core->typeDecls.count("Scale.ChordQuality") == 1);
+  CHECK(core->defTypes.count("Score.play") == 1);
+  CHECK(core->typeDecls.count("Score.Step") == 1);
+  CHECK(core->typeDecls.count("Score.Phrase") == 1);
+  CHECK(core->typeDecls.count("Score.Event") == 1);
+  CHECK(core->typeDecls.count("Score.Item") == 1);
+  CHECK(core->typeDecls.count("Score.Level") == 1);
   // ...nothing lives at the top level...
   for (auto& [name, type] : core->defTypes)
     CHECK(name.find('.') != std::string::npos);
   // ...and every definition outside the SynthGraph-implemented modules
-  // (List, Pitch, Tempo, Scale) is an external binding.
-  std::set<std::string> inSynthGraph = {"List", "Pitch", "Tempo", "Scale"};
+  // (List, Pitch, Tempo, Scale, Score) is an external binding.
+  std::set<std::string> inSynthGraph = {"List", "Pitch", "Tempo", "Scale",
+                                       "Score"};
   std::function<bool(const std::vector<TopDef>&)> allExternal =
       [&](const std::vector<TopDef>& ds) {
         for (auto& d : ds) {

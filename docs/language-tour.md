@@ -350,7 +350,36 @@ named; `tones ~c` does the same for a chord you *do* name
 (`{ root = ...; quality = Dom7 }`). Everything hands back a
 `Pitch.Note list`, which `invert`, `voicing ~low ~count` and
 `freqs ~t` all consume — `snap` pulls a stray note back into the key on
-the way. `List.init` / `List.repeat` build
+the way.
+
+`Core.Score` is where those two meet. A `Phrase` is a score in *beats* —
+`melody ~notes ~len`, `chord ~notes ~at ~len`, or `line ~items` with
+`Play` and `Rest` laid end to end — and the transforms on it are pure
+edits: `move`, `transpose`, `in_key`, `staccato`, `legato`, `velocity`,
+with `seq` joining phrases end to end and `layer` sounding them at once.
+Nothing has a time or a frequency yet. `realize ~tempo ~tuning` is the
+single bridge to `Event`s, and `play ~voice` places and mixes them,
+handing each voice `(freq, duration, velocity)` — so an envelope's
+`~hold` follows the *written* note length:
+
+```ocaml
+let piano freq:Scalar dur:Timestamp vel:Scalar : Scalar Sample =
+  K.strike freq
+    * adsr ~attack:4ms ~decay:600ms ~sustain:0.25 ~release:350ms ~hold:dur
+    * vel
+  |> sample ~from:0s ~to:(dur + 350ms) ;;
+
+melody ~notes:(List.map ~f:(Scale.degree ~s:key) [0; 2; 4; 2; 0])
+       ~len:1.0
+  |> move ~beats:8.0
+  |> realize ~tempo:tempo ~tuning:tuning
+  |> play ~voice:piano
+```
+
+Dynamics live in `Score` too: `amp ~l:Mf` is a velocity on a 4 dB ladder
+anchored at `Fff = 1.0`, and `ramp ~from ~to ~n` is a crescendo
+interpolated in decibels. Like `place_multi`, `play` sums without
+normalizing — the headroom is yours. `List.init` / `List.repeat` build
 generated lists; counts and indices are `Int`s, so wholeness is the
 type system's business (`List.init 6 (fun i:Int -> ...)`), and the
 index reaches Scalar arithmetic through `to_scalar`.

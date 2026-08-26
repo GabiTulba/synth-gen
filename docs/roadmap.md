@@ -65,26 +65,25 @@ offset from a tempo that appears nowhere in the source, and a chord is
 four unrelated floats. Re-tempoing or transposing means recomputing
 every literal in every file by hand.
 
-Six proposed submodules close that gap, in two layers. Most are
+Four submodules close that gap, in two layers, and all four are
 **written in SynthGraph**, following the `List` precedent: `Math.pow`
 already gives equal temperament, records and recursive variants give the
-data structures, and `let rec` gives the traversals. Only `Rhythm.parse`
-genuinely needs C++, because the language has no string operations.
+data structures, and `let rec` gives the traversals. No C++ was needed
+anywhere in the stack.
 
 | Module | Owns | Depends on | Written in |
 |---|---|---|---|
 | `Core.Pitch` | Notes, temperaments, cents | — | SynthGraph ✅ |
 | `Core.Tempo` | BPM, meters, note values, bar/beat → Timestamp | Time | SynthGraph ✅ |
 | `Core.Scale` | Keys, modes, scale degrees, chords, inversions | Pitch, List | SynthGraph ✅ |
-| `Core.Rhythm` | Step patterns, Euclidean rhythms, swing | Tempo, List | C++ + SynthGraph |
-| `Core.Score` | Phrases, events, articulation, `play` | all of the above | SynthGraph |
-| `Core.Dyn` | Dynamic levels, crescendo, decibel gain | — | SynthGraph |
+| `Core.Score` | Phrases, events, articulation, dynamics, `play` | all of the above | SynthGraph ✅ |
 
 **Landed so far:** Timestamp arithmetic (language spec
 [§3](language-spec.md#operators-pointwise-lifting--scalar-broadcasting)),
-the wider `List` module, `Core.Pitch`, `Core.Tempo` and `Core.Scale`
-([§6](language-spec.md#6-primitive-signatures-v1-roster)). The remaining
-three modules are future work.
+the wider `List` module, and `Core.Pitch`, `Core.Tempo`, `Core.Scale`
+and `Core.Score`
+([§6](language-spec.md#6-primitive-signatures-v1-roster)) — the whole
+stack, none of it C++.
 
 ### `Core.Pitch` — **shipped**
 
@@ -192,78 +191,25 @@ Still open, deliberately:
   therefore the committed renders. That is a musical edit, not a
   mechanical one, and it belongs with the `Score` rewrite in phase 4.
 
-### `Core.Rhythm`
+### `Core.Score` — **shipped**, with dynamics folded in
 
-```
-val Rhythm.parse   : pat:String -> (Scalar, Scalar) list   (* (step offset, velocity) *)
-val Rhythm.euclid  : pulses:Int -> steps:Int -> rotate:Int -> Bool list
-val Rhythm.offsets : hits:Bool list -> Scalar list
-val Rhythm.every   : n:Int -> steps:Int -> Bool list
-```
+Implemented in `stdlib/core/lib.synth`; the roster lives in the language
+spec [§6](language-spec.md#6-primitive-signatures-v1-roster) and the
+semantics in [`core-library.md`](core-library.md).
 
-`parse` reads TR-808 grid notation — `"X..x..X.x..x..X."`, where `X` is
-an accent, `x` a normal hit and `.` a rest — into step offsets with
-velocities. It is the one function here that must be C++, since the
-language has no string operations, and it is perhaps thirty lines. The
-payoff is that a kit's entire rhythmic identity becomes four readable
-string literals.
+The two representations survived the implementation unchanged, and they
+are the design. A `Phrase` is **symbolic** — positions and lengths in
+beats, notes as `Pitch.Note`s — so one phrase plays at any tempo in any
+temperament and every transform is a pure edit of the score. An `Event`
+is **realized**: a frequency, a Timestamp, a duration. `realize` is the
+one bridge, and it is the only place a tempo and a tuning are named.
+Keeping `Phrase` in beats is also what leaves room for tempo maps later
+without a breaking change.
 
-`euclid` (Bjorklund's algorithm) generates the Afro-Cuban and Balkan
-rhythm families from two integers. It is cheap to implement and is
-exactly the sort of thing a *programming* language for music should make
-easy in a way a DAW does not.
-
-### `Core.Score`
-
-The sheet-music structure, in two representations on purpose:
-
-```
-(* Symbolic: positions in beats, tempo-independent *)
-type Step   = { note : Note; at : Scalar; len : Scalar; vel : Scalar } ;;
-type Phrase = { steps : Step list } ;;
-
-(* Realized: positions in real time, ready to place *)
-type Event  = { note : Note; at : Timestamp; dur : Timestamp; vel : Scalar } ;;
-
-type Item = | Play of (Note, Scalar) | Rest of Scalar ;;
-```
-
-Keeping `Phrase` in beats rather than Timestamps means one phrase plays
-at any tempo, and leaves room for tempo maps later without a breaking
-change. `Rest` needs its own constructor because v1 has no literal
-patterns, so a rest cannot be a sentinel value matched on.
-
-```
-(* builders *)
-val Score.line      : items:Item list -> Phrase           (* laid end to end *)
-val Score.melody    : notes:Note list -> len:Scalar -> Phrase
-val Score.chord     : notes:Note list -> at:Scalar -> len:Scalar -> Phrase
-val Score.arpeggio  : c:Chord -> step:Scalar -> count:Int -> Phrase
-
-(* a phrase algebra *)
-val Score.length    : p:Phrase -> Scalar
-val Score.seq       : ps:Phrase list -> Phrase            (* one after another *)
-val Score.stack     : ps:Phrase list -> Phrase            (* simultaneous *)
-val Score.repeat    : p:Phrase -> n:Int -> Phrase
-val Score.shift     : p:Phrase -> beats:Scalar -> Phrase
-val Score.transpose : p:Phrase -> semitones:Int -> Phrase
-val Score.in_key    : p:Phrase -> s:Scale -> Phrase       (* snap every note *)
-val Score.staccato  : p:Phrase -> ratio:Scalar -> Phrase
-val Score.legato    : p:Phrase -> Phrase
-val Score.velocity  : p:Phrase -> f:(Scalar -> Scalar) -> Phrase
-
-(* the bridge to audio *)
-val Score.realize : t:Tempo -> p:Phrase -> Event list
-val Score.play    : voice:(Scalar -> Timestamp -> Scalar -> 'a Sample)
-                  -> events:Event list -> 'a Signal
-val Score.strike  : voice:(Scalar -> 'a Sample)           (* fixed-length: percussion *)
-                  -> events:Event list -> 'a Signal
-```
-
-`Score.play` is the single highest-value function in the proposal. A
-*voice* becomes a function of `(freq, duration, velocity) -> Sample`,
-and `play` places and mixes — which is what turns the hand-placed
-`mix_all [...]` block of `examples/song/keys.synth` into:
+`play` is what the whole stack was for. A voice becomes a function of
+`(freq, duration, velocity) -> Sample` — note the *duration*, which is
+what a note-length-aware library buys over pre-baked fixed-length
+samples, and the reason Timestamp arithmetic had to land first:
 
 ```ocaml
 let piano freq:Scalar dur:Timestamp vel:Scalar : Scalar Sample =
@@ -272,40 +218,48 @@ let piano freq:Scalar dur:Timestamp vel:Scalar : Scalar Sample =
     * vel
   |> sample ~from:0s ~to:(dur + 350ms) ;;
 
-let melody : Scalar Signal =
-  Score.melody ~notes:(List.map ~f:(Scale.degree key) [0; 2; 4; 2; 0; -1; 0])
-               ~len:1.0
-    |> Score.shift ~beats:8.0
-    |> Score.realize ~t:tempo
-    |> Score.play ~voice:piano ;;
+melody ~notes:(List.map ~f:(Scale.degree ~s:key) [0; 2; 4; 2; 0; -1; 0])
+       ~len:1.0
+  |> move ~beats:8.0
+  |> realize ~tempo:tempo ~tuning:tuning
+  |> play ~voice:piano
 ```
 
-Note the duration-parameterized voice — `~hold:dur` and a window of
-`dur + release`. That is what a note-length-aware library buys over
-pre-baked fixed-length samples, and it is the reason Timestamp
-arithmetic had to land first.
+Like `place_multi`, `play` sums without normalization; headroom stays
+the composer's.
 
-Like `place_multi`, `play` sums its placements **without
-normalization**; headroom stays the composer's to manage, and the docs
-should say so where they say it for `place_multi`.
+Departures from what this section originally proposed:
 
-`Score.strike` exists because percussion has no meaningful pitch or
-duration — forcing a drum voice through the three-argument shape would
-be ceremony.
+- **`Core.Dyn` is folded in**, as this section always allowed it might
+  be: a level is only ever a velocity, and `db` is three lines. `Level`
+  spells `Piano` and `Forte` out where the rest are abbreviated,
+  because a bare `F` would collide with `Pitch`'s pitch class of the
+  same name. The ladder is 4 dB per step anchored at `Fff = 1.0`, which
+  makes `Piano` exactly a tenth of it and keeps every level at or below
+  unity — the originally sketched "Mf → 0.5, ~6 dB per step" cannot do
+  both, since six 6 dB steps above 0.5 overflow.
+- **`Event` carries a frequency, not a `Note`.** `realize` resolves
+  pitch as well as time, so a voice never has to know about
+  temperament and `play` needs no `~tuning` of its own.
+- **Four names are spelled to stay out of the way** of modules usually
+  open beside this one: `span` (not `length`, which is `List.length`),
+  `layer` (not `stack`, which is `Scale.stack`), `loop` (not `repeat`,
+  `List.repeat`) and `move` (not `shift`, `Pitch.shift`). Shadowing is
+  legal, so these were avoidable footguns rather than errors — but a
+  library that quietly captures a name its neighbours already own is a
+  bad neighbour.
+- **`arpeggio` takes a `Note list`, not a `Chord`**, matching the
+  decision `Scale` made: it cycles through whatever `Scale.tones` or
+  `Scale.stack` produced.
 
-### `Core.Dyn`
+Still open, deliberately:
 
-```
-type Level = | Ppp | Pp | P | Mp | Mf | F | Ff | Fff ;;
-
-val Dyn.amp  : l:Level -> Scalar                  (* Mf -> 0.5, ~6 dB per step *)
-val Dyn.ramp : from:Level -> to:Level -> n:Int -> Scalar list
-val Dyn.db   : x:Scalar -> Scalar                 (* decibels -> linear gain *)
-```
-
-Small enough to fold into `Score` if the module count wants holding
-down. `Dyn.db` is worth having either way: gain expressed in decibels is
-missing from Core generally, not just from songwriting.
+- **The examples do not use it yet.** Rewriting `examples/song/` and
+  `examples/darksynth/` against the full stack is the payoff — a diff
+  that should shrink both substantially and read like music — but it
+  changes which notes sound (`pad.synth`'s chords are hand-voiced, not
+  triads) and therefore the committed renders. That is a musical edit,
+  and it wants its own pass.
 
 ### Cross-cutting design constraints
 
@@ -347,13 +301,13 @@ turns out to be wrong.
    nothing else compiles without them, and both are useful on their own.
 2. ~~**`Pitch` + `Tempo`.**~~ **Done**, examples included: both
    showcase projects are written against the pair.
-3. **`Scale`** ✅ **+ `Rhythm`.** `Scale` has shipped; `Rhythm` is next
-   (`euclid` is pure SynthGraph, `parse` is the one function in the plan
-   that needs C++). Rewriting `examples/song/pad.synth` and
-   `examples/song/drums.synth` follows.
-4. **`Score` + `Dyn`.** Rewrite `examples/song/` and
-   `examples/darksynth/` against the full stack — a diff that should
-   shrink both substantially and read like music.
+3. ~~**`Scale`.**~~ **Done.** (A `Rhythm` module of step patterns and
+   Euclidean generators was proposed here and has been dropped from the
+   plan — it was the only piece that would have needed C++, and it is
+   not wanted.)
+4. ~~**`Score`, dynamics included.**~~ **Done.** What remains is the
+   example rewrite: `examples/song/` and `examples/darksynth/` against
+   the full stack, as its own pass because it changes the renders.
 
 Each phase carries the same obligations as any Core work: the submodule
 table in [`core-library.md`](core-library.md), the roster in the

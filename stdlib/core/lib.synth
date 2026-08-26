@@ -578,3 +578,199 @@ module Scale = struct
   let freqs ~t:Pitch.Tuning ~notes:Pitch.Note list : Scalar list =
     List.map ~f:(fun n:Pitch.Note -> Pitch.hz ~t:t ~note:n) ~xs:notes ;;
 end ;;
+
+(* --- Score: phrases, events and playing them - written in SynthGraph --
+   The sheet-music layer, deliberately in two representations. A
+   `Phrase` is symbolic: positions and lengths in *beats*, notes as
+   `Pitch.Note`s, so one phrase plays at any tempo in any temperament
+   and every transform below is a pure edit of the score. An `Event` is
+   realized: a frequency, a Timestamp and a length, ready to place.
+   `realize` is the one bridge, and it is where a tempo and a tuning are
+   named.
+
+   Several names here are spelled to stay out of the way of modules that
+   are usually open beside this one: `span` rather than `length`
+   (List.length), `layer` rather than `stack` (Scale.stack), `loop`
+   rather than `repeat` (List.repeat), `move` rather than `shift`
+   (Pitch.shift). `Forte` and `Piano` are spelled out where the rest of
+   the dynamic levels are abbreviated, because a bare `F` would collide
+   with the pitch class of the same name.
+
+   Dynamics live here rather than in a module of their own: a level is
+   only ever a velocity, and `db` is small enough that a module for it
+   would be ceremony. *)
+
+module Score = struct
+  (* Symbolic: beats, not seconds. *)
+  type Step = { note : Pitch.Note; at : Scalar; len : Scalar;
+                vel : Scalar } ;;
+  type Phrase = { steps : Step list } ;;
+  (* Realized: real time, and a frequency the tuning has already
+     resolved - so a voice never has to know about temperament. *)
+  type Event = { freq : Scalar; at : Timestamp; dur : Timestamp;
+                 vel : Scalar } ;;
+  (* `Rest` needs its own constructor: there are no literal patterns, so
+     a rest cannot be a sentinel that `match` picks out. *)
+  type Item = | Play of (Pitch.Note, Scalar) | Rest of Scalar ;;
+
+  (* --- Dynamics -------------------------------------------------------
+     Decibels to linear gain, and the eight levels as a 4 dB ladder
+     anchored at Fff = 1.0 - so `Piano` is exactly a tenth of `Fff`, and
+     nothing in the table exceeds unity. Playing sums without
+     normalization, so the headroom above is the composer's. *)
+  type Level = | Ppp | Pp | Piano | Mp | Mf | Forte | Ff | Fff ;;
+
+  let db ~x:Scalar : Scalar = Math.pow ~x:10.0 ~y:(x / 20.0) ;;
+  let level_db ~l:Level : Scalar =
+    match l with
+    | Fff -> 0.0 | Ff -> (-4.0) | Forte -> (-8.0) | Mf -> (-12.0)
+    | Mp -> (-16.0) | Piano -> (-20.0) | Pp -> (-24.0) | Ppp -> (-28.0) ;;
+  let amp ~l:Level : Scalar = db ~x:(level_db ~l:l) ;;
+  (* `n` gains from one level to another, interpolated in decibels -
+     which is the shape a crescendo actually has. *)
+  let ramp ~from:Level ~to:Level ~n:Int : Scalar list =
+    let a : Scalar = level_db ~l:from in
+    let b : Scalar = level_db ~l:to in
+    List.init ~n:n
+      ~f:(fun i:Int ->
+            db ~x:(if n <= 1 then b
+                   else a
+                          + (b - a) * Math.to_scalar i
+                              / Math.to_scalar (n - 1))) ;;
+
+  (* --- Builders -------------------------------------------------------
+     `line` lays items end to end from beat 0; a `Rest` advances the
+     cursor without emitting a step. *)
+  let line ~items:Item list : Phrase =
+    let rec go ~items:Item list ~at:Scalar : Step list =
+      match items with
+      | Nil -> Nil
+      | Cons (it, rest) ->
+          match it with
+          | Play (n, len) ->
+              Cons ({ note = n; at = at; len = len; vel = 1.0 },
+                    go ~items:rest ~at:(at + len))
+          | Rest len -> go ~items:rest ~at:(at + len) in
+    { steps = go ~items:items ~at:0.0 } ;;
+  let melody ~notes:Pitch.Note list ~len:Scalar : Phrase =
+    line ~items:(List.map ~f:(fun n:Pitch.Note -> Play (n, len)) ~xs:notes) ;;
+  let chord ~notes:Pitch.Note list ~at:Scalar ~len:Scalar : Phrase =
+    { steps = List.map
+                ~f:(fun n:Pitch.Note ->
+                      { note = n; at = at; len = len; vel = 1.0 })
+                ~xs:notes } ;;
+  (* `count` notes cycling upward through `notes`, one every `step`
+     beats - the arpeggio of whatever Scale.tones or Scale.stack gave. *)
+  let arpeggio ~notes:Pitch.Note list ~step:Scalar ~count:Int : Phrase =
+    let k : Int = List.length ~xs:notes in
+    if k <= 0 then { steps = Nil }
+    else
+      { steps = List.init ~n:count
+                  ~f:(fun i:Int ->
+                        { note = List.nth ~xs:notes
+                                          ~i:(Scale.wrap_rem ~n:i ~k:k)
+                                          ~default:(Pitch.of_step ~step:0);
+                          at = Math.to_scalar i * step;
+                          len = step; vel = 1.0 }) } ;;
+
+  (* --- The phrase algebra ---------------------------------------------
+     Every one of these is a pure edit: a Phrase in, a Phrase out. *)
+  let span ~p:Phrase : Scalar =
+    List.fold ~f:(fun acc:Scalar s:Step ->
+                    if s.at + s.len > acc then s.at + s.len else acc)
+              ~init:0.0 ~xs:p.steps ;;
+  let move ~p:Phrase ~beats:Scalar : Phrase =
+    { steps = List.map
+                ~f:(fun s:Step ->
+                      { note = s.note; at = s.at + beats; len = s.len;
+                        vel = s.vel })
+                ~xs:p.steps } ;;
+  (* One after another: each phrase starts where the last one ended. *)
+  let rec seq ~ps:Phrase list : Phrase =
+    match ps with
+    | Nil -> { steps = Nil }
+    | Cons (p, rest) ->
+        { steps = List.append
+                    ~xs:p.steps
+                    ~ys:(move ~p:(seq ~ps:rest) ~beats:(span ~p:p)).steps } ;;
+  (* Simultaneous: the phrases keep their own positions. *)
+  let layer ~ps:Phrase list : Phrase =
+    { steps = List.concat
+                ~xss:(List.map ~f:(fun p:Phrase -> p.steps) ~xs:ps) } ;;
+  let loop ~p:Phrase ~n:Int : Phrase = seq ~ps:(List.repeat ~n:n ~x:p) ;;
+
+  let transpose ~p:Phrase ~semitones:Int : Phrase =
+    { steps = List.map
+                ~f:(fun s:Step ->
+                      { note = Pitch.shift ~note:s.note ~by:semitones;
+                        at = s.at; len = s.len; vel = s.vel })
+                ~xs:p.steps } ;;
+  let in_key ~p:Phrase ~s:Scale.Scale : Phrase =
+    { steps = List.map
+                ~f:(fun st:Step ->
+                      { note = Scale.snap ~s:s ~note:st.note;
+                        at = st.at; len = st.len; vel = st.vel })
+                ~xs:p.steps } ;;
+  let velocity ~p:Phrase ~f:(Scalar -> Scalar) : Phrase =
+    { steps = List.map
+                ~f:(fun s:Step ->
+                      { note = s.note; at = s.at; len = s.len;
+                        vel = f s.vel })
+                ~xs:p.steps } ;;
+  (* Articulation: `staccato` shortens every note by a ratio of its
+     written length; `legato` stretches each one to the next attack,
+     leaving the last as written. *)
+  let staccato ~p:Phrase ~ratio:Scalar : Phrase =
+    { steps = List.map
+                ~f:(fun s:Step ->
+                      { note = s.note; at = s.at; len = s.len * ratio;
+                        vel = s.vel })
+                ~xs:p.steps } ;;
+  let legato ~p:Phrase : Phrase =
+    { steps = List.map
+                ~f:(fun s:Step ->
+                      let nxt : Scalar =
+                        List.fold
+                          ~f:(fun acc:Scalar o:Step ->
+                                if o.at > s.at && (acc <= s.at || o.at < acc)
+                                then o.at else acc)
+                          ~init:s.at ~xs:p.steps in
+                      { note = s.note; at = s.at;
+                        len = if nxt > s.at then nxt - s.at else s.len;
+                        vel = s.vel })
+                ~xs:p.steps } ;;
+
+  (* --- The bridge to audio --------------------------------------------
+     `realize` is where beats become Timestamps and notes become
+     frequencies, so it names both a tempo and a temperament and
+     everything downstream is plain numbers. *)
+  let realize ~tempo:Tempo.Tempo ~tuning:Pitch.Tuning ~p:Phrase
+      : Event list =
+    List.map
+      ~f:(fun s:Step ->
+            { freq = Pitch.hz ~t:tuning ~note:s.note;
+              at = Tempo.beats ~t:tempo ~n:s.at;
+              dur = Tempo.beats ~t:tempo ~n:s.len;
+              vel = s.vel })
+      ~xs:p.steps ;;
+  (* A voice is a function of frequency, duration and velocity: it is
+     handed how long the note is meant to sound, which is what a
+     pre-baked fixed-length sample cannot express. Like place_multi,
+     `play` sums without normalization - headroom stays yours. *)
+  let play ~voice:(Scalar -> Timestamp -> Scalar -> 'a Sample)
+           ~events:Event list : 'a Signal =
+    Arrange.mix_all
+      ~signals:(List.map
+                  ~f:(fun e:Event ->
+                        Arrange.place ~sample:(voice e.freq e.dur e.vel)
+                                      ~at:e.at)
+                  ~xs:events) ;;
+  (* Percussion has no meaningful pitch or duration, so its voice takes
+     the velocity alone rather than three arguments of ceremony. *)
+  let strike ~voice:(Scalar -> 'a Sample) ~events:Event list : 'a Signal =
+    Arrange.mix_all
+      ~signals:(List.map
+                  ~f:(fun e:Event ->
+                        Arrange.place ~sample:(voice e.vel) ~at:e.at)
+                  ~xs:events) ;;
+end ;;

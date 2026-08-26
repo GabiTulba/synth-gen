@@ -263,8 +263,8 @@ Rules:
 - **The Core library.** All primitives live in `Core` — a *real
   library* bundled with the compiler (`stdlib/core/lib.synth`). Nearly
   every definition is an `external` binding to a C++ implementation
-  shipped beside it (§5); the `List`, `Pitch`, `Tempo` and `Scale` modules
-  are written in SynthGraph itself, and the interface opens with the `list`/`Signal`/`Sample`
+  shipped beside it (§5); the `List`, `Pitch`, `Tempo`, `Scale` and `Score`
+  modules are written in SynthGraph itself, and the interface opens with the `list`/`Signal`/`Sample`
   type declarations (§3, top). Core is organized into functional
   submodules:
   `Osc` (oscillators & modulation), `Fx` (effects, filters,
@@ -272,7 +272,8 @@ Rules:
   effects), `Io` (audio import), `List`, `Time` (conversions &
   Timestamp sequences), `Sig` (signal constructors), `Pitch` (notes, temperaments &
   cents), `Tempo` (meters, note values & the beat grid),
-  `Scale` (keys, degrees & chords), and `Math`
+  `Scale` (keys, degrees & chords),
+  `Score` (phrases, events, dynamics & `play`), and `Math`
   (see §6 for the roster). Core is **not ambient**: like any library
   it must be brought into scope — `import Core` for qualified access
   (`Core.Osc.sine`), `open Core` for module-qualified access
@@ -932,6 +933,56 @@ val Scale.freqs   : t:Pitch.Tuning -> notes:Pitch.Note list -> Scalar list
 (* floor division and its non-negative remainder; there is no `%` *)
 val Scale.wrap_div : n:Int -> k:Int -> Int
 val Scale.wrap_rem : n:Int -> k:Int -> Int
+
+(* Core.Score: phrases, events and playing them - written in
+   SynthGraph. A Phrase is symbolic (beats and Notes); an Event is
+   realized (Timestamps and a frequency); `realize` is the only bridge,
+   and the only place a tempo and a tuning are named. `span`/`layer`/
+   `loop`/`move` are spelled to avoid List.length, Scale.stack,
+   List.repeat and Pitch.shift, which are usually open beside this
+   module. Types are Score.Step / Score.Phrase / Score.Event /
+   Score.Item / Score.Level when qualified. *)
+type Step   = { note : Pitch.Note; at : Scalar; len : Scalar;
+                vel : Scalar }                        (* beats *)
+type Phrase = { steps : Step list }
+type Event  = { freq : Scalar; at : Timestamp; dur : Timestamp;
+                vel : Scalar }                        (* real time *)
+type Item   = | Play of (Pitch.Note, Scalar) | Rest of Scalar
+type Level  = | Ppp | Pp | Piano | Mp | Mf | Forte | Ff | Fff
+
+(* dynamics: a 4 dB ladder anchored at Fff = 1.0 *)
+val Score.db    : x:Scalar -> Scalar             (* decibels -> gain *)
+val Score.amp   : l:Level -> Scalar
+val Score.ramp  : from:Level -> to:Level -> n:Int -> Scalar list
+                                                 (* interpolated in dB *)
+
+(* builders *)
+val Score.line     : items:Item list -> Phrase   (* laid end to end *)
+val Score.melody   : notes:Pitch.Note list -> len:Scalar -> Phrase
+val Score.chord    : notes:Pitch.Note list -> at:Scalar -> len:Scalar
+                       -> Phrase
+val Score.arpeggio : notes:Pitch.Note list -> step:Scalar -> count:Int
+                       -> Phrase
+
+(* the phrase algebra - every one a pure edit *)
+val Score.span      : p:Phrase -> Scalar              (* in beats *)
+val Score.seq       : ps:Phrase list -> Phrase        (* one after another *)
+val Score.layer     : ps:Phrase list -> Phrase        (* simultaneous *)
+val Score.loop      : p:Phrase -> n:Int -> Phrase
+val Score.move      : p:Phrase -> beats:Scalar -> Phrase
+val Score.transpose : p:Phrase -> semitones:Int -> Phrase
+val Score.in_key    : p:Phrase -> s:Scale.Scale -> Phrase
+val Score.staccato  : p:Phrase -> ratio:Scalar -> Phrase
+val Score.legato    : p:Phrase -> Phrase       (* stretch to next attack *)
+val Score.velocity  : p:Phrase -> f:(Scalar -> Scalar) -> Phrase
+
+(* the bridge to audio; play and strike sum without normalization *)
+val Score.realize : tempo:Tempo.Tempo -> tuning:Pitch.Tuning -> p:Phrase
+                      -> Event list
+val Score.play    : voice:(Scalar -> Timestamp -> Scalar -> 'a Sample)
+                      -> events:Event list -> 'a Signal
+val Score.strike  : voice:(Scalar -> 'a Sample)   (* velocity only *)
+                      -> events:Event list -> 'a Signal
 
 (* Core.List: list combinators & builders - written in SynthGraph
    (recursive functions over the Cons/Nil variant), not C++ *)

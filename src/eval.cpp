@@ -140,12 +140,18 @@ class Interp {
         // Only the taken branch evaluates: the other branch's errors and
         // render effects never fire.
         Value cv = eval(*e.items[0], env, mod);
-        const BoolV* c = std::get_if<BoolV>(&cv.v);
-        if (!c)
-          throw EvalError(
-              "'if' condition is not a Bool at build time (a signal has "
-              "no single value to branch on)");
-        return eval(*e.items[c->v ? 1 : 2], env, mod);
+        if (const BoolV* c = std::get_if<BoolV>(&cv.v))
+          return eval(*e.items[c->v ? 1 : 2], env, mod);
+        // A condition signal (under `signal ~f`) has no single answer, so
+        // the choice moves into the graph. This is the one case where
+        // both branches evaluate - there is no per-sample control flow to
+        // skip one with.
+        if (auto* g = std::get_if<SigPtr>(&cv.v)) {
+          SigPtr a = branchSignal(eval(*e.items[1], env, mod));
+          SigPtr b = branchSignal(eval(*e.items[2], env, mod));
+          return Value{makeSelect(*g, 0.5, a, b)};
+        }
+        throw EvalError("'if' condition is not a Bool at build time");
       }
       case Expr::Kind::App: {
         // A constructor application builds its variant directly - the
@@ -173,17 +179,28 @@ class Interp {
       case Expr::Kind::BinOp: {
         // `&&` and `||` short-circuit: only the deciding operand runs.
         if (e.op == BinOpKind::And || e.op == BinOpKind::Or) {
+          bool isAnd = e.op == BinOpKind::And;
           Value lv = eval(*e.items[0], env, mod);
-          const BoolV* lb = std::get_if<BoolV>(&lv.v);
-          if (!lb)
-            throw EvalError("'&&'/'||' operand is not a Bool at build time");
-          if (e.op == BinOpKind::And && !lb->v) return Value{BoolV{false}};
-          if (e.op == BinOpKind::Or && lb->v) return Value{BoolV{true}};
-          Value rv = eval(*e.items[1], env, mod);
-          const BoolV* rb = std::get_if<BoolV>(&rv.v);
-          if (!rb)
-            throw EvalError("'&&'/'||' operand is not a Bool at build time");
-          return Value{BoolV{rb->v}};
+          if (const BoolV* lb = std::get_if<BoolV>(&lv.v)) {
+            if (isAnd && !lb->v) return Value{BoolV{false}};
+            if (!isAnd && lb->v) return Value{BoolV{true}};
+            // The left operand decided nothing, so the result is the
+            // right one - as a Bool, or as a condition signal when the
+            // right side is a sample-wise comparison.
+            Value rv = eval(*e.items[1], env, mod);
+            if (const BoolV* rb = std::get_if<BoolV>(&rv.v))
+              return Value{BoolV{rb->v}};
+            return Value{condSignal(rv)};
+          }
+          // A condition signal on the left: nothing can be decided up
+          // front, so both sides run and combine sample-wise. On 0/1
+          // signals `and` is a product and `or` is a + b - a*b.
+          SigPtr a = condSignal(lv);
+          SigPtr b = condSignal(eval(*e.items[1], env, mod));
+          if (isAnd) return Value{makeBinOp(SigBinOp::Mul, a, b)};
+          return Value{makeBinOp(SigBinOp::Sub,
+                                 makeBinOp(SigBinOp::Add, a, b),
+                                 makeBinOp(SigBinOp::Mul, a, b))};
         }
         Value l = eval(*e.items[0], env, mod);
         Value r = eval(*e.items[1], env, mod);
@@ -533,12 +550,16 @@ class Interp {
       }
       case Expr::Kind::If: {
         Value cv = eval(*e.items[0], env, mod);
-        const BoolV* c = std::get_if<BoolV>(&cv.v);
-        if (!c)
-          throw EvalError(
-              "'if' condition is not a Bool at build time (a signal has "
-              "no single value to branch on)");
-        return evalTail(*e.items[c->v ? 1 : 2], env, mod, next);
+        if (const BoolV* c = std::get_if<BoolV>(&cv.v))
+          return evalTail(*e.items[c->v ? 1 : 2], env, mod, next);
+        // Sample-wise choice (see the `if` case in eval): both branches
+        // become graph, so neither is in tail position any more.
+        if (auto* g = std::get_if<SigPtr>(&cv.v)) {
+          SigPtr a = branchSignal(eval(*e.items[1], env, mod));
+          SigPtr b = branchSignal(eval(*e.items[2], env, mod));
+          return Value{makeSelect(*g, 0.5, a, b)};
+        }
+        throw EvalError("'if' condition is not a Bool at build time");
       }
       case Expr::Kind::Match: {
         Value scr = eval(*e.items[0], env, mod);
@@ -670,6 +691,56 @@ class Interp {
     throw EvalError("internal error: operand is not a signal");
   }
 
+  // Under `signal ~f`'s symbolic substitution the argument is a Signal,
+  // so a comparison or an `if` inside `f` sees signals where the types
+  // promised Scalars. Both become sample-wise graph nodes rather than
+  // one build-time answer, and a condition is carried as a 0/1 signal:
+  // 1.0 wherever it holds. `select` tests `gate >= threshold`, so each
+  // ordering is a difference against zero, and the strict forms are the
+  // non-strict one with its branches swapped.
+  static SigPtr cmpSignal(BinOpKind op, SigPtr a, SigPtr b) {
+    auto ge = [](SigPtr x, SigPtr y) {  // x >= y
+      return makeSelect(makeBinOp(SigBinOp::Sub, std::move(x), std::move(y)),
+                        0.0, makeConst(1.0), makeConst(0.0));
+    };
+    auto lt = [](SigPtr x, SigPtr y) {  // x < y, i.e. !(x >= y)
+      return makeSelect(makeBinOp(SigBinOp::Sub, std::move(x), std::move(y)),
+                        0.0, makeConst(0.0), makeConst(1.0));
+    };
+    switch (op) {
+      case BinOpKind::Ge: return ge(a, b);
+      case BinOpKind::Le: return ge(b, a);
+      case BinOpKind::Lt: return lt(a, b);
+      case BinOpKind::Gt: return lt(b, a);
+      case BinOpKind::Eq: return makeBinOp(SigBinOp::Mul, ge(a, b), ge(b, a));
+      default:  // Ne
+        return makeBinOp(SigBinOp::Sub, makeConst(1.0),
+                         makeBinOp(SigBinOp::Mul, ge(a, b), ge(b, a)));
+    }
+  }
+
+  // A condition as a 0/1 signal: either it already is one, or it is a
+  // build-time Bool that is constant across the whole signal.
+  static SigPtr condSignal(const Value& v) {
+    if (auto* s = std::get_if<SigPtr>(&v.v)) return *s;
+    if (auto* b = std::get_if<BoolV>(&v.v)) return makeConst(b->v ? 1.0 : 0.0);
+    throw EvalError("'&&'/'||' operand is not a Bool at build time");
+  }
+
+  // A branch of a sample-wise `if`. Both branches are built (there is no
+  // per-sample control flow to skip one), so a branch that is not a
+  // number has nowhere to go.
+  static SigPtr branchSignal(const Value& v) {
+    if (std::holds_alternative<SigPtr>(v.v) ||
+        std::holds_alternative<ScalarV>(v.v))
+      return asSignal(v);
+    throw EvalError(
+        "a sample-wise 'if' (its condition is a signal) needs Scalar or "
+        "Signal branches: both branches become part of the graph and the "
+        "choice happens per sample, so a branch that is not a number has "
+        "no sample-wise meaning");
+  }
+
   // A Timestamp is a point on (or a span of) a timeline that starts at
   // the epoch: subtracting past zero clamps rather than going negative,
   // and a NaN (0s * inf, say) has no position at all.
@@ -765,9 +836,14 @@ class Interp {
       if (auto* a = std::get_if<TimeV>(&l.v))
         if (auto* b = std::get_if<TimeV>(&r.v))
           return Value{BoolV{cmp(op, a->seconds, b->seconds)}};
+      // Under `signal ~f` the operands are signals: the comparison has no
+      // single answer, so it becomes a 0/1 signal instead of one Bool.
+      if (std::holds_alternative<SigPtr>(l.v) ||
+          std::holds_alternative<SigPtr>(r.v))
+        return Value{cmpSignal(op, asSignal(l), asSignal(r))};
       throw EvalError(
           "comparison needs two Ints, two Scalars or two Timestamps at "
-          "build time (a signal cannot be compared sample-wise)");
+          "build time");
     }
     bool lSig = std::holds_alternative<SigPtr>(l.v);
     bool rSig = std::holds_alternative<SigPtr>(r.v);

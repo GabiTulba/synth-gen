@@ -592,11 +592,27 @@ while the graph is assembled, never a per-sample stream.
 - **Comparisons** split the same way as the arithmetic operators:
   `<` `<=` `>` `>=` `==` `!=` take two **Int**s, and `<.` `<=.` `>.`
   `>=.` `==.` `!=.` take two **Scalar**s or two **Timestamp**s. Both
-  produce a `Bool`. Signals are *not* comparable: a lazy
-  signal has no single value, and a sample-wise select would be a
-  different, signal-producing operation (deliberately absent in v1 —
-  see §7). Comparing under `signal ~f`'s symbolic substitution is
-  likewise a build-time error. Chained comparisons (`a <. b <. c`) parse
+  produce a `Bool`. A Signal is not comparable *as a type*: a lazy
+  signal has no single value, so `bus >. 0.5` is a type error and the
+  sample-wise choice is `Sig.select` (§6).
+
+  Inside `signal ~f`, though, comparisons and `if` do work, and mean the
+  sample-wise thing. `f` is typed `Scalar -> Scalar` and applied once to
+  a *symbolic* time signal to build the graph, so a comparison there has
+  no single answer: it evaluates to a **condition signal** — `1.0` where
+  it holds, `0.0` where it does not — and an `if` on one becomes a
+  `Sig.select`. `&&`, `||` and `not` combine condition signals the same
+  way. So `signal ~f:(fun t -> if t >. 1.0 then t /. 2.0 else t)` is
+  accepted and shapes per sample.
+
+  Two consequences follow from there being no per-sample control flow to
+  skip a branch with. A sample-wise `if` evaluates **both** branches —
+  the build-time guarantee that only the taken branch runs holds whenever
+  the condition is a `Bool`, which is every `if` outside this case — and
+  both branches must be Scalars or Signals, since each becomes part of
+  the graph. Anything else is a build-time error naming the reason.
+
+  Chained comparisons (`a <. b <. c`) parse
   left-associatively and are rejected by typing (Bool has no ordering).
 - **`&&` / `||`** combine Bools and short-circuit: only the deciding
   operand is evaluated. `not` is a Core primitive (`b:Bool -> Bool`).
@@ -890,8 +906,10 @@ val Sig.constant: value:Scalar -> Scalar Signal
 val Sig.constant_multi: levels:Scalar list -> Vector Signal  (* one level per channel *)
 val Sig.time: Scalar Signal          (* nullary: the ramp t, in seconds *)
 val Sig.signal: f:(Scalar -> Scalar) -> Scalar Signal
-  (* samples f over time; the body is limited to arithmetic and the math
-     primitives - nothing else maps a Scalar to a Scalar *)
+  (* samples f over time. f is applied once, to a symbolic time signal,
+     and what it builds becomes the graph: arithmetic, the math
+     primitives, and comparisons/if/&&/||/not, which take their
+     sample-wise meaning here (§3) - an `if` becomes a Sig.select *)
 val Sig.signal_multi: fs:(Scalar -> Scalar) list -> Vector Signal
 
 (* math: polymorphic over Scalars and (elementwise) Signals; anything

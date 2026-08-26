@@ -296,10 +296,16 @@ computed render names (see `Str`).
   whose sample at t seconds is t.
 - **`signal ~f` / `signal_multi ~fs`** — sample a `Scalar -> Scalar`
   function over time. The body is applied *symbolically* to the time
-  ramp, so it may use arithmetic and the Math primitives (the trig
-  family included) — nothing else maps a Scalar to a Scalar.
-- **`select ~gate ~threshold ~above ~below`** — the sample-wise choice
-  that build-time `if` deliberately is not: `gate(t) >= threshold`
+  ramp, so whatever it builds becomes the graph: arithmetic, the Math
+  primitives (the trig family included), and comparisons / `if` /
+  `&&` / `||` / `not`, which take their sample-wise meaning here — a
+  comparison is a 0/1 condition signal and an `if` on one is a
+  `select`. That makes ordinary SynthGraph functions written with `if`
+  (`Math.min`, `Math.max`, `Math.clamp`) usable inside the lambda.
+  Because nothing skips a branch per sample, such an `if` builds
+  *both* branches and both must be Scalars or Signals.
+- **`select ~gate ~threshold ~above ~below`** — the sample-wise choice,
+  written out: `gate(t) >= threshold`
   picks `above`, else `below`, per sample. The gate must be mono; all
   three children advance in lockstep whichever side is chosen. With
   `follow` this is signal-level control: gates, program-dependent

@@ -2201,6 +2201,114 @@ TEST(build_open_matches_qualified_output) {
   CHECK(a == b);
 }
 
+namespace {
+
+// Build one source and hand back the bytes of the artifact it renders.
+std::string renderSource(const std::string& body, bool* ok = nullptr) {
+  TempDir d;
+  d.write("s.synth",
+          "open Core\nopen Core.Dsp\n" + body +
+              "\nlet _ = Core.Arrange.sample ~signal:out ~from:0ms ~to:1500ms\n"
+              "        |> Core.Render.render ~name:\"o\" ~rate:8000.0 ;;\n");
+  d.write("build.json", projectManifest("sw", {"s.synth"}));
+  BuildResult r = buildProject(d.dir.string());
+  if (ok) *ok = r.ok;
+  if (!r.ok && !ok)
+    for (auto& x : r.diags.items) std::cerr << x.message << "\n";
+  return r.ok ? slurp(d.dir / "_build" / "artifacts" / "o.wav")
+              : std::string();
+}
+
+}  // namespace
+
+// `signal ~f` applies f once to a *symbolic* time signal, so a comparison
+// and an `if` inside f have no single answer: they become sample-wise
+// graph nodes. The lambda must render exactly the `select` it stands for.
+TEST(build_signal_lambda_comparison_and_if_equal_select) {
+  std::string lambda = renderSource(
+      "let out : Scalar Signal =\n"
+      "  signal ~f:(fun x:Scalar -> if x >=. 1.0 then x /. 2.0 else x) ;;");
+  std::string sel = renderSource(
+      "let out : Scalar Signal =\n"
+      "  select ~gate:time ~threshold:1.0 ~above:(time /. 2.0) ~below:time ;;");
+  CHECK(!lambda.empty());
+  CHECK(lambda == sel);
+}
+
+// `select` tests `gate >= threshold`, so the strict and non-strict forms
+// must part company at exactly the boundary sample (t == 1.0 is exact at
+// frame 8000 of an 8 kHz render).
+TEST(build_signal_lambda_respects_strict_comparisons) {
+  std::string ge = renderSource(
+      "let out : Scalar Signal =\n"
+      "  signal ~f:(fun x:Scalar -> if x >=. 1.0 then 0.5 else 0.0) ;;");
+  std::string gt = renderSource(
+      "let out : Scalar Signal =\n"
+      "  signal ~f:(fun x:Scalar -> if x >. 1.0 then 0.5 else 0.0) ;;");
+  CHECK(!ge.empty());
+  CHECK(ge != gt);
+  // ... and each strict form is the other's complement about the same
+  // boundary: (x >= 1) is exactly not (x < 1).
+  std::string lt = renderSource(
+      "let out : Scalar Signal =\n"
+      "  signal ~f:(fun x:Scalar -> if not (x <. 1.0) then 0.5 else 0.0) ;;");
+  CHECK(ge == lt);
+}
+
+// `&&` and `||` over sample-wise conditions must obey the same algebra
+// they do over Bools: `a && b` is `if a then (if b ...) else else-branch`.
+TEST(build_signal_lambda_boolean_operators_compose) {
+  std::string andForm = renderSource(
+      "let out : Scalar Signal =\n"
+      "  signal ~f:(fun x:Scalar ->\n"
+      "    if x >=. 0.5 && x <. 1.0 then 0.5 else 0.0) ;;");
+  std::string nested = renderSource(
+      "let out : Scalar Signal =\n"
+      "  signal ~f:(fun x:Scalar ->\n"
+      "    if x >=. 0.5 then (if x <. 1.0 then 0.5 else 0.0) else 0.0) ;;");
+  CHECK(!andForm.empty());
+  CHECK(andForm == nested);
+
+  std::string orForm = renderSource(
+      "let out : Scalar Signal =\n"
+      "  signal ~f:(fun x:Scalar ->\n"
+      "    if x <. 0.5 || x >=. 1.0 then 0.5 else 0.0) ;;");
+  std::string deMorgan = renderSource(
+      "let out : Scalar Signal =\n"
+      "  signal ~f:(fun x:Scalar ->\n"
+      "    if not (x >=. 0.5 && x <. 1.0) then 0.5 else 0.0) ;;");
+  CHECK(!orForm.empty());
+  CHECK(orForm == deMorgan);
+}
+
+// Core functions written with `if` (Math.min/max/clamp) now work inside
+// the lambda too - they are ordinary SynthGraph, not primitives.
+TEST(build_signal_lambda_reaches_core_functions_written_with_if) {
+  std::string viaMin = renderSource(
+      "let out : Scalar Signal =\n"
+      "  signal ~f:(fun x:Scalar -> Core.Math.min ~a:x ~b:0.5) ;;");
+  std::string byHand = renderSource(
+      "let out : Scalar Signal =\n"
+      "  signal ~f:(fun x:Scalar -> if x <. 0.5 then x else 0.5) ;;");
+  CHECK(!viaMin.empty());
+  CHECK(viaMin == byHand);
+}
+
+// A sample-wise `if` builds both branches, so a non-numeric branch has
+// nowhere to go and says so.
+TEST(build_signal_lambda_rejects_non_numeric_branches) {
+  TempDir d;
+  d.write("s.synth",
+          "open Core\nopen Core.Dsp\n"
+          "let pick x:Scalar : String = if x >. 1.0 then \"a\" else \"b\" ;;\n"
+          "let out : Scalar Signal =\n"
+          "  signal ~f:(fun x:Scalar ->\n"
+          "    if Core.Str.cat ~a:(pick x) ~b:\"\" ==. \"\" then 0.0 else 1.0) ;;\n");
+  d.write("build.json", projectManifest("sw", {"s.synth"}));
+  BuildResult r = buildProject(d.dir.string());
+  CHECK(!r.ok);
+}
+
 TEST(build_open_stale_cache_invalidation) {
   // Editing a def reached through `open` must invalidate the cache - the
   // opened reference is rewritten to a qualified one, so the dependency

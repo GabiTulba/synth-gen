@@ -157,6 +157,14 @@ SYNTH_EXTERNAL(to_min) {
 }
 
 SYNTH_EXTERNAL(not) {
+  // Under `signal ~f` a condition is carried as a 0/1 signal rather than
+  // one Bool (there is no single value to negate), so negation there is
+  // the complement 1 - b.
+  if (args[0].kind == Value::Kind::Signal) {
+    *result = Value::signal(
+        makeBinOp(SigBinOp::Sub, makeConst(1.0), args[0].asSignal()));
+    return true;
+  }
   *result = Value::boolean(!args[0].asBool());
   return true;
 }

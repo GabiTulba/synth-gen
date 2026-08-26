@@ -373,13 +373,19 @@ module Sig = struct
     external "signals.cpp" ;;
   (* The ramp whose sample at t seconds is t. *)
   let time : Scalar Signal = external "signals.cpp" ;;
+  (* Samples `f` over time. `f` runs once, on a symbolic time signal,
+     and whatever it builds becomes the graph: arithmetic, the math
+     primitives, and comparisons/`if`/`&&`/`||`/`not`, which take their
+     sample-wise meaning here - a comparison is a 0/1 condition signal
+     and an `if` on one is a `select`. Both branches of such an `if` are
+     built (nothing skips one per sample), so both must be numbers. *)
   let signal ~f:(Scalar -> Scalar) : Scalar Signal =
     external "signals.cpp" ;;
   let signal_multi ~fs:(Scalar -> Scalar) list : Vector Signal =
     external "signals.cpp" ;;
-  (* The sample-wise choice build-time `if` deliberately is not:
-     gate(t) >= threshold picks `above`, else `below`. The gate must be
-     mono. *)
+  (* The sample-wise choice, written out: gate(t) >= threshold picks
+     `above`, else `below`. The gate must be mono. This is what an `if`
+     on a condition signal inside `signal ~f` builds. *)
   let select ~gate:Scalar Signal ~threshold:Scalar ~above:'a Signal
       ~below:'a Signal : 'a Signal = external "signals.cpp" ;;
 end ;;

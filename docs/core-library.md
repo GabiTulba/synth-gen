@@ -43,6 +43,16 @@ semantics of the less obvious primitives.
 | `Core.Score` | Phrases in beats, events in time, and the bridge between: `line`/`melody`/`chord`/`arpeggio`, `span`, `seq`/`layer`/`loop`/`move`, `transpose`/`in_key`/`staccato`/`legato`/`velocity`, `realize`, `play`/`strike`, plus dynamics (`amp`, `ramp`, `db`) | written in SynthGraph (`lib.synth`) |
 | `Core.Math` | `exp`, `sqrt`, `log`, `pow` — polymorphic over Scalars and (elementwise) Signals — plus the Int conversions `to_scalar`, `round`, `floor`, `ceil`, and `not` | `stdlib/core/math.cpp` |
 
+Adding to Core means four edits, not one: the definition in
+`stdlib/core/lib.synth` (or the `.cpp` behind an external), the row
+above, the roster in the language spec
+[§6](language-spec.md#6-primitive-signatures-v1-roster), and coverage in
+`tests/test_checker.cpp` and `tests/test_build.cpp`. For a submodule
+written in SynthGraph the last one carries extra weight: types alone pin
+almost nothing, so only a render pins a definition's *values*, and the
+build tests compare against hand-written literal renders the way the
+`List` combinator tests do.
+
 ## Primitive semantics
 
 The precise behavior of the primitives whose signatures alone don't tell

@@ -51,7 +51,7 @@ let phrase : Phrase =
   let s : Scale = Harmony.octave ~oct:4 in
   melody ~notes:(List.map ~f:(fun d:Int -> degree ~s:s ~n:d) ~xs:tune)
          ~len:2.0
-    |> move ~beats:(Timing.bars 2)
+    |> move ~beats:(Timing.span 2)
     |> velocity ~f:(fun v:Scalar -> v * amp ~l:Ff)
 ;;
 

@@ -145,6 +145,18 @@ proposed, with three refinements:
   is the 4/4 preset, a function rather than a constant for the same
   reason `Pitch.et12` is.
 
+Still open, deliberately:
+
+- **No note-value *count*.** `value` answers how long a note value is,
+  as a `Timestamp`, and Timestamps do not divide — so there is no way to
+  ask how many eighths fill eight bars, which is exactly the number a
+  `grid`'s or a `Seq.humanized`'s `~count` wants.
+  `examples/darksynth/timing.synth` derives its own
+  `quarters`/`halves`/`eighths`/`sixteenths` off `meter.beats`, correct
+  for simple meters only. A `Tempo.per_bar ~t ~v:Value : Int` is three
+  lines over the same `frac` `value` already walks, and it is the one
+  gap the example rewrite turned up.
+
 `value` rests on one observation that is easy to get wrong: a whole note
 is `unit` beats, whatever the meter — four beats in 4/4, eight eighths
 in 6/8 — so the only recursive part is a dimensionless fraction of a
@@ -291,7 +303,20 @@ Since shipping:
     has no jitter, deliberately) but takes every pitch from the key: the
     bass, guitar and bell roots are cycle positions at three different
     floors, and the ten guitar lead runs are scale degrees rather than
-    thirty frequencies that had to agree with the chords.
+    thirty frequencies that had to agree with the chords. Its
+    *positions* went the same way in a second pass: `timing.synth` now
+    holds the eight section landmarks as segment counts
+    (`drop2 = seg 16`), and every start in the arrangement is a landmark
+    plus a segment, a bar or a beat — `on Timing.drop2 3`,
+    `Timing.tolling + Timing.beats 11.0`. Every `count` is a bar count
+    times the hits a bar holds, and every riser is placed by working
+    back from the arrival it announces and from its own length
+    (`Fx.riser.to - Fx.riser.from`, because a `Sample` is an ordinary
+    record). That took the file from 178 written-out durations to 39:
+    13 `0s` sample origins, 14 humanizing `~spread`s and one echo time
+    in milliseconds — microtiming, not musical position — and 11 in the
+    wall-clock listening guide in the header comment. Not one position
+    in the arrangement is a literal.
 
   `examples/lib/voices/pads.synth` lost `place4` with this: laying four
   chords end to end is `Score.seq`, not a library helper. The darksynth

@@ -46,7 +46,7 @@ let phrase : Phrase =
     arpeggio ~notes:(figure ~root:(Harmony.root ~i:i
                                      ~low:{ pc = G; oct = 3 }))
              ~step:0.5 ~count:16 in
-  seq ~ps:[segment 2; segment 3] |> move ~beats:(Timing.bars 4)
+  seq ~ps:[segment 2; segment 3] |> move ~beats:(Timing.span 4)
 ;;
 
 let riff : Scalar Signal =

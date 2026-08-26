@@ -60,7 +60,7 @@ let drums : Scalar Signal =
   let part ~p:Phrase ~from:Int ~bars:Int
            ~voice:(Scalar -> Scalar Sample) : Scalar Signal =
     loop ~p:p ~n:bars
-      |> move ~beats:(Timing.bars from)
+      |> move ~beats:(Timing.span from)
       |> realize ~tempo:Timing.tempo ~tuning:Harmony.tuning
       |> strike ~voice:voice in
   part ~p:kick_bar ~from:1 ~bars:7 ~voice:Drums.kick
@@ -80,16 +80,20 @@ let keys_bus : Vector Signal =
 let strings_bus : Vector Signal =
   channels [Strings.riff * 0.3; Strings.riff * 0.45] ;;
 
+(* The eight bars of material plus a beat of tail, so the pad's release
+   and the last piano note ring out instead of being cut. *)
+let ending : Timestamp = Timing.at ~bar:8 ~beat:1.0 ;;
+
 let master : Vector Signal =
   pad_bus + drum_bus + keys_bus + strings_bus
     |> soft_clip ~threshold:0.9
 ;;
 
 let _ =
-  master |> sample ~from:0s ~to:16500ms
+  master |> sample ~from:0s ~to:ending
          |> render ~name:"song" ~rate:48000.0 ;;
 let _ =
-  master |> sample ~from:0s ~to:16500ms
+  master |> sample ~from:0s ~to:ending
          |> render_vis ~name:"song-wave" ~rate:48000.0 ;;
 
 (* Stems: one artifact per instrument bus (song-drums, song-pad,
@@ -97,18 +101,18 @@ let _ =
    soft_clip master reproduces the mix. *)
 let _ =
   render_stems ~name:"song" ~rate:48000.0
-    ~stems:[("drums", drum_bus |> sample ~from:0s ~to:16500ms);
-            ("pad", pad_bus |> sample ~from:0s ~to:16500ms);
-            ("piano", keys_bus |> sample ~from:0s ~to:16500ms);
-            ("guitar", strings_bus |> sample ~from:0s ~to:16500ms)]
+    ~stems:[("drums", drum_bus |> sample ~from:0s ~to:ending);
+            ("pad", pad_bus |> sample ~from:0s ~to:ending);
+            ("piano", keys_bus |> sample ~from:0s ~to:ending);
+            ("guitar", strings_bus |> sample ~from:0s ~to:ending)]
 ;;
 
 (* One image: the master over every composing bus, on a shared time axis. *)
 let _ =
   render_vis_stems ~name:"song-stems-wave" ~rate:48000.0
-    ~stems:[("master", master |> sample ~from:0s ~to:16500ms);
-            ("drums", drum_bus |> sample ~from:0s ~to:16500ms);
-            ("pad", pad_bus |> sample ~from:0s ~to:16500ms);
-            ("piano", keys_bus |> sample ~from:0s ~to:16500ms);
-            ("guitar", strings_bus |> sample ~from:0s ~to:16500ms)]
+    ~stems:[("master", master |> sample ~from:0s ~to:ending);
+            ("drums", drum_bus |> sample ~from:0s ~to:ending);
+            ("pad", pad_bus |> sample ~from:0s ~to:ending);
+            ("piano", keys_bus |> sample ~from:0s ~to:ending);
+            ("guitar", strings_bus |> sample ~from:0s ~to:ending)]
 ;;

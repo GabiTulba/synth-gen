@@ -52,7 +52,7 @@ let build ~parts:(Int -> Note list) : Phrase =
   seq ~ps:(List.init ~n:4
              ~f:(fun i:Int ->
                    chord ~notes:(parts i) ~at:0.0
-                         ~len:(Timing.bars 2)))
+                         ~len:(Timing.span 2)))
 ;;
 
 let triads : Phrase =

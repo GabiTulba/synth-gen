@@ -27,6 +27,6 @@ let grid ~from:Timestamp ~step:Value ~count:Int : Timestamp list =
   Tempo.grid ~t:tempo ~from:from ~step:step ~count:count ;;
 
 (* `n` bars measured in *beats*, which is the unit a Score phrase
-   positions itself in - `Score.move ~beats:(Timing.bars 2)` is "two
+   positions itself in - `Score.move ~beats:(Timing.span 2)` is "two
    bars in" for a phrase, as `at ~bar:2` is for a Timestamp. *)
-let bars n:Int : Scalar = Math.to_scalar (n * tempo.meter.beats) ;;
+let span n:Int : Scalar = Math.to_scalar (n * tempo.meter.beats) ;;

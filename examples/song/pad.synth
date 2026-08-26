@@ -49,7 +49,7 @@ let phrase : Phrase =
              ~f:(fun i:Int ->
                    chord ~notes:(Harmony.parts ~i:i
                                    ~low:{ pc = F; oct = 2 } ~count:4)
-                         ~at:0.0 ~len:(Timing.bars 2)))
+                         ~at:0.0 ~len:(Timing.span 2)))
 ;;
 
 let progression detune:Scalar : Scalar Signal =

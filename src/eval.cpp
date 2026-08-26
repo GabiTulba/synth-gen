@@ -1,9 +1,11 @@
 #include "eval.hpp"
 
 #include <cstring>
+#include <pthread.h>
 
 #include <cmath>
 #include <filesystem>
+#include <functional>
 #include <map>
 #include <optional>
 #include <stdexcept>
@@ -388,6 +390,14 @@ class Interp {
     return applyValue(fn, std::move(labeled), mod);
   }
 
+  // A tail call in flight: evalTail found the frame's result is itself
+  // an application, and hands the callee and evaluated arguments back to
+  // applyValue's loop instead of recursing.
+  struct TailNext {
+    Value fn;
+    std::vector<std::pair<std::string, Value>> args;
+  };
+
   // Label-aware application over user functions, lambdas, and
   // external-bodied definitions. Positional values fill the leftmost
   // unbound parameters; labeled ones bind by name. Incomplete
@@ -397,79 +407,165 @@ class Interp {
   // resolves relative paths (and attributes render targets) against the
   // *calling* module - `load_mono "kick.wav"` means next to the file
   // that wrote the string, not next to Core's lib.synth.
-  Value applyValue(const Value& fn,
+  //
+  // Tail calls are eliminated: a body whose result IS another call (in
+  // tail position through let bodies, if branches and match arms) loops
+  // here in the same C++ frame instead of recursing, so `List.fold` and
+  // every accumulator-shaped combinator run at constant depth however
+  // long the list. The depth guard is entered once per *chain*, so only
+  // genuinely nested (non-tail) recursion counts against the limit.
+  Value applyValue(Value fn,
                    std::vector<std::pair<std::string, Value>> args,
                    const CheckedModule& mod) {
-    // Assemble the parameter-name list of whatever we're applying.
-    std::vector<std::string> paramNames;
-    const std::map<std::string, Value>* prevBound = nullptr;
-    const FunV* f = std::get_if<FunV>(&fn.v);
-    const LambdaV* l = std::get_if<LambdaV>(&fn.v);
-    if (f) {
-      for (auto& p : f->def->params) paramNames.push_back(p.name);
-      prevBound = f->bound.get();
-    } else if (l) {
-      for (auto& p : l->lam->params) paramNames.push_back(p.name);
-      prevBound = l->bound.get();
-    } else {
-      throw EvalError("internal error: applying a non-function value");
-    }
-
-    auto bound = std::make_shared<std::map<std::string, Value>>();
-    if (prevBound) *bound = *prevBound;
-    for (auto& [label, value] : args) {
-      std::string target;
-      if (!label.empty()) {
-        if (bound->count(label))
-          throw EvalError("argument '~" + label + "' provided twice");
-        target = label;
+    std::optional<ApplyDepthGuard> guard;
+    // The tail loop's own runaway brake: depth no longer grows with a
+    // tail chain, so a chain that never terminates needs its own
+    // diagnostic. The limit is far above any musical fold (one
+    // iteration per list element).
+    static constexpr int64_t kMaxTailCalls = 10'000'000;
+    int64_t tailCalls = 0;
+    for (;;) {
+      if (++tailCalls > kMaxTailCalls) {
+        const FunV* ff = std::get_if<FunV>(&fn.v);
+        const LambdaV* ll = std::get_if<LambdaV>(&fn.v);
+        std::string name = ff ? ff->def->name
+                          : ll && !ll->lam->name.empty() ? ll->lam->name
+                                                         : "<fun>";
+        throw EvalError("recursion limit (" + std::to_string(kMaxTailCalls) +
+                        " tail calls) exceeded while evaluating '" + name +
+                        "' - likely unbounded recursion (no base case "
+                        "reached)");
+      }
+      // Assemble the parameter-name list of whatever we're applying.
+      std::vector<std::string> paramNames;
+      const std::map<std::string, Value>* prevBound = nullptr;
+      const FunV* f = std::get_if<FunV>(&fn.v);
+      const LambdaV* l = std::get_if<LambdaV>(&fn.v);
+      if (f) {
+        for (auto& p : f->def->params) paramNames.push_back(p.name);
+        prevBound = f->bound.get();
+      } else if (l) {
+        for (auto& p : l->lam->params) paramNames.push_back(p.name);
+        prevBound = l->bound.get();
       } else {
-        for (auto& name : paramNames)
-          if (!bound->count(name)) {
-            target = name;
-            break;
-          }
-        if (target.empty())
-          throw EvalError("internal error: too many arguments");
+        throw EvalError("internal error: applying a non-function value");
       }
-      (*bound)[target] = std::move(value);
-    }
 
-    if (bound->size() < paramNames.size()) {
-      if (f) return Value{FunV{f->def, f->mod, std::move(bound)}};
-      return Value{LambdaV{l->lam, l->mod, l->captured, std::move(bound)}};
-    }
-
-    if (f) {
-      // Fully applied. An external body has no expression to evaluate:
-      // its arguments dispatch to the bound implementation instead.
-      if (f->def->body->kind == Expr::Kind::External) {
-        std::vector<Value> ordered;
-        for (auto& name : paramNames) ordered.push_back((*bound)[name]);
-        return callExternal(*f->def, *f->mod, mod, std::move(ordered));
+      auto bound = std::make_shared<std::map<std::string, Value>>();
+      if (prevBound) *bound = *prevBound;
+      for (auto& [label, value] : args) {
+        std::string target;
+        if (!label.empty()) {
+          if (bound->count(label))
+            throw EvalError("argument '~" + label + "' provided twice");
+          target = label;
+        } else {
+          for (auto& name : paramNames)
+            if (!bound->count(name)) {
+              target = name;
+              break;
+            }
+          if (target.empty())
+            throw EvalError("internal error: too many arguments");
+        }
+        (*bound)[target] = std::move(value);
       }
-      ApplyDepthGuard guard(*this, f->def->name);
-      Env env;
-      // A recursive definition finds itself under its own (surface)
-      // name - required for members of inline modules, whose stored
-      // names are dotted and unreachable from an unqualified lookup.
-      if (f->def->isRec)
-        env[f->def->name] = Value{FunV{f->def, f->mod, nullptr}};
-      for (auto& name : paramNames) env[name] = (*bound)[name];
-      return eval(*f->def->body, env, *f->mod);
+
+      if (bound->size() < paramNames.size()) {
+        if (f) return Value{FunV{f->def, f->mod, std::move(bound)}};
+        return Value{LambdaV{l->lam, l->mod, l->captured, std::move(bound)}};
+      }
+
+      std::optional<TailNext> next;
+      Value out;
+      if (f) {
+        // Fully applied. An external body has no expression to evaluate:
+        // its arguments dispatch to the bound implementation instead.
+        if (f->def->body->kind == Expr::Kind::External) {
+          std::vector<Value> ordered;
+          for (auto& name : paramNames) ordered.push_back((*bound)[name]);
+          return callExternal(*f->def, *f->mod, mod, std::move(ordered));
+        }
+        if (!guard) guard.emplace(*this, f->def->name);
+        Env env;
+        // A recursive definition finds itself under its own (surface)
+        // name - required for members of inline modules, whose stored
+        // names are dotted and unreachable from an unqualified lookup.
+        if (f->def->isRec)
+          env[f->def->name] = Value{FunV{f->def, f->mod, nullptr}};
+        for (auto& name : paramNames) env[name] = (*bound)[name];
+        out = evalTail(*f->def->body, env, *f->mod, next);
+      } else {
+        // The captured environment plus the bound params (params shadow
+        // captures), evaluated in the lambda's defining module.
+        if (!guard)
+          guard.emplace(*this, l->lam->name.empty() ? "<fun>"
+                                                    : l->lam->name);
+        Env env = *l->captured;
+        // A recursive local function finds itself under its own name,
+        // reconstructed per call from the lambda's own fields - no cyclic
+        // ownership. Parameters bind after it, so they shadow it as usual.
+        if (!l->lam->name.empty())
+          env[l->lam->name] =
+              Value{LambdaV{l->lam, l->mod, l->captured, nullptr}};
+        for (auto& name : paramNames) env[name] = (*bound)[name];
+        out = evalTail(*l->lam->items[0], env, *l->mod, next);
+      }
+      if (!next) return out;
+      fn = std::move(next->fn);
+      args = std::move(next->args);
     }
-    // The captured environment plus the bound params (params shadow
-    // captures), evaluated in the lambda's defining module.
-    ApplyDepthGuard guard(*this, l->lam->name.empty() ? "<fun>"
-                                                      : l->lam->name);
-    Env env = *l->captured;
-    // A recursive local function finds itself under its own name,
-    // reconstructed per call from the lambda's own fields - no cyclic
-    // ownership. Parameters bind after it, so they shadow it as usual.
-    if (!l->lam->name.empty())
-      env[l->lam->name] = Value{LambdaV{l->lam, l->mod, l->captured, nullptr}};
-    for (auto& name : paramNames) env[name] = (*bound)[name];
-    return eval(*l->lam->items[0], env, *l->mod);
+  }
+
+  // Evaluate `e` knowing it sits in tail position of a frame applyValue
+  // owns: let bodies, if branches and match arms stay on the tail spine
+  // (their env mutations need no restore - the frame is abandoned either
+  // way), and an application of a function value is returned to the loop
+  // as a TailNext instead of evaluated recursively. Everything else
+  // falls through to ordinary eval.
+  Value evalTail(const Expr& e, Env& env, const CheckedModule& mod,
+                 std::optional<TailNext>& next) {
+    switch (e.kind) {
+      case Expr::Kind::Let: {
+        Value bd = eval(*e.items[0], env, mod);
+        env[e.name] = std::move(bd);
+        return evalTail(*e.items[1], env, mod, next);
+      }
+      case Expr::Kind::If: {
+        Value cv = eval(*e.items[0], env, mod);
+        const BoolV* c = std::get_if<BoolV>(&cv.v);
+        if (!c)
+          throw EvalError(
+              "'if' condition is not a Bool at build time (a signal has "
+              "no single value to branch on)");
+        return evalTail(*e.items[c->v ? 1 : 2], env, mod, next);
+      }
+      case Expr::Kind::Match: {
+        Value scr = eval(*e.items[0], env, mod);
+        for (size_t a = 0; a < e.patterns.size(); a++) {
+          Env binds;
+          if (!matchPattern(e.patterns[a], scr, binds)) continue;
+          for (auto& [n, v] : binds) env[n] = v;
+          return evalTail(*e.items[a + 1], env, mod, next);
+        }
+        throw EvalError("no pattern matched the value at build time");
+      }
+      case Expr::Kind::App: {
+        // Constructor applications build data, not calls.
+        if (e.items[0]->kind == Expr::Kind::Ctor) return eval(e, env, mod);
+        std::vector<std::pair<std::string, Value>> args;
+        for (size_t i = 1; i < e.items.size(); i++) {
+          std::string label =
+              i - 1 < e.argLabels.size() ? e.argLabels[i - 1] : "";
+          args.emplace_back(std::move(label), eval(*e.items[i], env, mod));
+        }
+        Value fn = eval(*e.items[0], env, mod);
+        next = TailNext{std::move(fn), std::move(args)};
+        return {};
+      }
+      default:
+        return eval(e, env, mod);
+    }
   }
 
   // Build-time evaluation is recursive (let rec); the depth guard turns
@@ -728,11 +824,54 @@ class Interp {
 
 }  // namespace
 
+namespace {
+
+// Build-time evaluation is recursive, and one language-level frame costs
+// several interpreter frames of C++ stack. 4096 guarded language frames
+// can exceed the OS default thread stack, so the interpreter runs on its
+// own thread with an explicit stack large enough that the depth guard -
+// not the OS - is always what stops deep recursion.
+constexpr size_t kEvalStackBytes = 256 * 1024 * 1024;
+
+struct EvalThreadCtx {
+  std::function<bool()> fn;
+  bool result = false;
+  std::exception_ptr error;
+};
+
+void* evalThreadMain(void* arg) {
+  auto* ctx = static_cast<EvalThreadCtx*>(arg);
+  try {
+    ctx->result = ctx->fn();
+  } catch (...) {
+    ctx->error = std::current_exception();
+  }
+  return nullptr;
+}
+
+}  // namespace
+
 bool evaluateProgram(const Program& prog, std::vector<RenderTarget>& targets,
                      DiagnosticBag& diags,
                      std::vector<std::string>* loadedFiles,
                      const std::string& externalCacheDir) {
-  return Interp(prog, targets, diags, loadedFiles, externalCacheDir).run();
+  EvalThreadCtx ctx;
+  ctx.fn = [&] {
+    return Interp(prog, targets, diags, loadedFiles, externalCacheDir).run();
+  };
+  pthread_attr_t attr;
+  pthread_t thread;
+  if (pthread_attr_init(&attr) != 0 ||
+      pthread_attr_setstacksize(&attr, kEvalStackBytes) != 0 ||
+      pthread_create(&thread, &attr, evalThreadMain, &ctx) != 0) {
+    // Cannot get the big stack: evaluate on the calling thread (the
+    // guard still bounds depth; only extreme recursion is at risk).
+    return ctx.fn();
+  }
+  pthread_attr_destroy(&attr);
+  pthread_join(thread, nullptr);
+  if (ctx.error) std::rethrow_exception(ctx.error);
+  return ctx.result;
 }
 
 }  // namespace synth

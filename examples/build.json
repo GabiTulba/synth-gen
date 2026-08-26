@@ -1,5 +1,5 @@
 {
   "project": "examples",
   "description": "Root manifest: the examples tree builds as one project. Libraries are discovered dynamically from here; `synthc build` or `synthc watch` from this directory builds/watches every rule.",
-  "build": ["lib/voices", "lib/effects", "basic", "pluck", "primitives", "advanced", "song", "darksynth"]
+  "build": ["lib/voices", "lib/effects", "basic", "pluck", "primitives", "advanced", "sampling", "song", "darksynth"]
 }

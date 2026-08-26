@@ -915,3 +915,316 @@ TEST(engine_math_content_hashes_distinct) {
   CHECK(makeUnaryOp(SigUnaryOp::Exp, x)->contentHash ==
         makeUnaryOp(SigUnaryOp::Exp, x)->contentHash);
 }
+
+// --- The engine round: modulated filters, control, extraction --------------
+
+TEST(engine_modfilter_constant_cutoff_matches_fixed) {
+  // With a constant cutoff signal the per-frame coefficient recompute
+  // lands on exactly the fixed filter's alpha, so outputs are
+  // bit-identical.
+  SigPtr tone = makeOsc(OscKind::Sine, 1000.0);
+  Rendered fixedR =
+      renderWindow(makeFilter(FilterKind::Lowpass, 500.0, tone), 0.0, 0.25,
+                   8000.0);
+  Rendered modR = renderWindow(
+      makeModFilter(FilterKind::Lowpass, makeConst(500.0), tone), 0.0, 0.25,
+      8000.0);
+  CHECK(fixedR.frames == modR.frames);
+  for (size_t i = 0; i < fixedR.interleaved.size(); i++)
+    CHECK(fixedR.interleaved[i] == modR.interleaved[i]);
+  Rendered hpF =
+      renderWindow(makeFilter(FilterKind::Highpass, 500.0, tone), 0.0, 0.25,
+                   8000.0);
+  Rendered hpM = renderWindow(
+      makeModFilter(FilterKind::Highpass, makeConst(500.0), tone), 0.0, 0.25,
+      8000.0);
+  for (size_t i = 0; i < hpF.interleaved.size(); i++)
+    CHECK(hpF.interleaved[i] == hpM.interleaved[i]);
+}
+
+TEST(engine_modfilter_sweep_opens_over_time) {
+  // A rising cutoff lets progressively more of a bright tone through:
+  // the last quarter of the render must carry more energy than the
+  // first.
+  double rate = 16000.0;
+  SigPtr tone = makeOsc(OscKind::Saw, 800.0);
+  // cutoff ramps 20 Hz .. 8 kHz over 1 s.
+  SigPtr cutoff = makeBinOp(SigBinOp::Add, makeConst(20.0),
+                            makeBinOp(SigBinOp::Mul, makeTime(),
+                                      makeConst(8000.0)));
+  Rendered r = renderWindow(makeModFilter(FilterKind::Lowpass, cutoff, tone),
+                            0.0, 1.0, rate);
+  auto rms = [&](size_t from, size_t to) {
+    double acc = 0;
+    for (size_t i = from; i < to; i++) acc += r.interleaved[i] * r.interleaved[i];
+    return std::sqrt(acc / (double)(to - from));
+  };
+  size_t q = r.interleaved.size() / 4;
+  CHECK(rms(0, q) < rms(3 * q, 4 * q) * 0.7);
+}
+
+TEST(engine_modfilter_cutoff_must_be_mono) {
+  SigPtr stereo = makeChannels({makeConst(100.0), makeConst(200.0)});
+  bool threw = false;
+  try {
+    makeModFilter(FilterKind::Lowpass, stereo, makeOsc(OscKind::Sine, 440.0));
+  } catch (const EngineError&) {
+    threw = true;
+  }
+  CHECK(threw);
+}
+
+TEST(engine_resonant_is_selective_and_rings) {
+  double rate = 16000.0;
+  auto rms = [&](SigPtr s) {
+    Rendered r = renderWindow(s, 0.0, 0.5, rate);
+    double acc = 0;
+    for (double v : r.interleaved) acc += v * v;
+    return std::sqrt(acc / (double)r.interleaved.size());
+  };
+  // Selective: a 1.5 kHz tone dies through a 100 Hz resonant lowpass
+  // and survives one at 2.5 kHz (within the stability clamp, rate/6).
+  SigPtr tone = makeOsc(OscKind::Sine, 1500.0);
+  double closed = rms(makeResonant(makeConst(100.0), 0.7, tone));
+  double open = rms(makeResonant(makeConst(2500.0), 0.7, tone));
+  CHECK(closed < open * 0.2);
+  // Resonance: at the cutoff, a high q passes more energy than a flat q.
+  SigPtr at = makeOsc(OscKind::Sine, 500.0);
+  double flat = rms(makeResonant(makeConst(500.0), 0.7, at));
+  double ringing = rms(makeResonant(makeConst(500.0), 8.0, at));
+  CHECK(ringing > flat * 1.5);
+  // Output stays bounded even with the resonance high.
+  Rendered r = renderWindow(makeResonant(makeConst(500.0), 8.0, at), 0.0,
+                            1.0, rate);
+  for (double v : r.interleaved) CHECK(std::fabs(v) < 100.0);
+}
+
+TEST(engine_resonant_validates_parameters) {
+  bool threw = false;
+  try {
+    makeResonant(makeConst(500.0), 0.0, makeOsc(OscKind::Sine, 440.0));
+  } catch (const EngineError&) {
+    threw = true;
+  }
+  CHECK(threw);
+  threw = false;
+  try {
+    makeResonant(makeChannels({makeConst(1.0), makeConst(2.0)}), 1.0,
+                 makeOsc(OscKind::Sine, 440.0));
+  } catch (const EngineError&) {
+    threw = true;
+  }
+  CHECK(threw);
+}
+
+TEST(engine_follow_tracks_amplitude) {
+  // Following a 0.5-amplitude tone settles near 0.5 * mean(|sin|) ..
+  // 0.5; the point is that it lands well above zero and below the peak,
+  // and that a louder input follows higher.
+  double rate = 8000.0;
+  SigPtr tone = makeBinOp(SigBinOp::Mul, makeOsc(OscKind::Sine, 100.0),
+                          makeConst(0.5));
+  Rendered r = renderWindow(makeFollow(0.005, 0.05, tone), 0.0, 0.5, rate);
+  double tail = r.interleaved[r.interleaved.size() - 1];
+  CHECK(tail > 0.2);
+  CHECK(tail < 0.55);
+  SigPtr loud = makeOsc(OscKind::Sine, 100.0);
+  Rendered r2 = renderWindow(makeFollow(0.005, 0.05, loud), 0.0, 0.5, rate);
+  CHECK(r2.interleaved[r2.interleaved.size() - 1] > tail * 1.5);
+  // The follower releases: after the input's window ends, the envelope
+  // decays toward zero.
+  SigPtr burst = makePlace(loud, 0.0, 0.25, 0.0);
+  Rendered r3 = renderWindow(makeFollow(0.005, 0.02, burst), 0.0, 0.5, rate);
+  CHECK(r3.interleaved[r3.interleaved.size() - 1] < 0.01);
+}
+
+TEST(engine_follow_validates_input) {
+  bool threw = false;
+  try {
+    makeFollow(0.01, 0.1, makeChannels({makeConst(1.0), makeConst(2.0)}));
+  } catch (const EngineError&) {
+    threw = true;
+  }
+  CHECK(threw);
+  threw = false;
+  try {
+    makeFollow(-0.01, 0.1, makeConst(1.0));
+  } catch (const EngineError&) {
+    threw = true;
+  }
+  CHECK(threw);
+}
+
+TEST(engine_select_switches_on_gate) {
+  // gate = t (the time ramp), threshold 0.5: the first half of the
+  // second reads `below`, the rest `above`.
+  SigPtr sel = makeSelect(makeTime(), 0.5, makeConst(1.0), makeConst(-1.0));
+  Rendered r = renderWindow(sel, 0.0, 1.0, 8.0);
+  for (int f = 0; f < 4; f++) CHECK_NEAR(r.interleaved[(size_t)f], -1.0, 1e-12);
+  for (int f = 4; f < 8; f++) CHECK_NEAR(r.interleaved[(size_t)f], 1.0, 1e-12);
+}
+
+TEST(engine_select_merges_channels_and_validates_gate) {
+  SigPtr stereoA = makeChannels({makeConst(0.1), makeConst(0.2)});
+  SigPtr stereoB = makeChannels({makeConst(0.3), makeConst(0.4)});
+  SigPtr sel = makeSelect(makeConst(1.0), 0.5, stereoA, stereoB);
+  CHECK(sel->channels() == 2);
+  Rendered r = renderWindow(sel, 0.0, 0.5, 4.0);
+  CHECK_NEAR(r.interleaved[0], 0.1, 1e-12);
+  CHECK_NEAR(r.interleaved[1], 0.2, 1e-12);
+  bool threw = false;
+  try {
+    makeSelect(stereoA, 0.5, makeConst(1.0), makeConst(2.0));
+  } catch (const EngineError&) {
+    threw = true;
+  }
+  CHECK(threw);
+  threw = false;
+  try {
+    makeSelect(makeConst(1.0), 0.5, stereoA,
+               makeChannels({makeConst(0.1), makeConst(0.2), makeConst(0.3)}));
+  } catch (const EngineError&) {
+    threw = true;
+  }
+  CHECK(threw);
+}
+
+TEST(engine_feedback_delay_regenerates_the_tail) {
+  // A one-sample-short burst of 1.0 in [0, 0.1s), delayed 0.25s with
+  // gain 0.5: copies at 1.0, 0.5, 0.25 ... every 0.25 s.
+  SigPtr burst = makePlace(makeExpDecay(0.0), 0.0, 0.1, 0.0);
+  SigPtr fb = makeFeedbackDelay(0.25, 0.5, burst);
+  Rendered r = renderWindow(fb, 0.0, 1.0, 40.0);
+  auto at = [&](double t) { return r.interleaved[(size_t)llround(t * 40.0)]; };
+  CHECK_NEAR(at(0.05), 1.0, 1e-9);
+  CHECK_NEAR(at(0.15), 0.0, 1e-9);   // between copies
+  CHECK_NEAR(at(0.30), 0.5, 1e-9);   // first echo
+  CHECK_NEAR(at(0.55), 0.25, 1e-9);  // second
+  CHECK_NEAR(at(0.80), 0.125, 1e-9); // third
+}
+
+TEST(engine_feedback_delay_validates_parameters) {
+  for (double gain : {1.0, -1.0, 1.5}) {
+    bool threw = false;
+    try {
+      makeFeedbackDelay(0.25, gain, makeConst(1.0));
+    } catch (const EngineError&) {
+      threw = true;
+    }
+    CHECK(threw);
+  }
+  bool threw = false;
+  try {
+    makeFeedbackDelay(0.0, 0.5, makeConst(1.0));
+  } catch (const EngineError&) {
+    threw = true;
+  }
+  CHECK(threw);
+}
+
+TEST(engine_channel_extracts_one_lane) {
+  SigPtr stereo = makeChannels({makeConst(0.25), makeConst(-0.75)});
+  Rendered l = renderWindow(makeChannel(0, stereo), 0.0, 0.5, 4.0);
+  Rendered rr = renderWindow(makeChannel(1, stereo), 0.0, 0.5, 4.0);
+  CHECK(l.channels == 1);
+  CHECK_NEAR(l.interleaved[0], 0.25, 1e-12);
+  CHECK_NEAR(rr.interleaved[0], -0.75, 1e-12);
+  bool threw = false;
+  try {
+    makeChannel(2, stereo);
+  } catch (const EngineError&) {
+    threw = true;
+  }
+  CHECK(threw);
+  threw = false;
+  try {
+    makeChannel(-1, stereo);
+  } catch (const EngineError&) {
+    threw = true;
+  }
+  CHECK(threw);
+}
+
+TEST(engine_bandlimited_oscs_match_naive_away_from_edges) {
+  // PolyBLEP only touches samples within one increment of a
+  // discontinuity; everywhere else the bandlimited shapes equal the
+  // naive ones exactly. Both stay bounded near the edges.
+  double rate = 8000.0, freq = 441.0;
+  Rendered sawN = renderWindow(makeOsc(OscKind::Saw, freq), 0.0, 0.2, rate);
+  Rendered sawB = renderWindow(makeOsc(OscKind::SawBl, freq), 0.0, 0.2, rate);
+  Rendered sqN = renderWindow(makeOsc(OscKind::Square, freq), 0.0, 0.2, rate);
+  Rendered sqB = renderWindow(makeOsc(OscKind::SquareBl, freq), 0.0, 0.2, rate);
+  double dt = freq / rate;
+  bool differsSomewhere = false;
+  for (int64_t f = 0; f < sawN.frames; f++) {
+    double t = (double)f / rate;
+    double phase = freq * t;
+    double frac = phase - std::floor(phase);
+    double frac2 = frac + 0.5;
+    frac2 -= std::floor(frac2);
+    bool nearSawEdge = frac < dt || frac > 1.0 - dt;
+    bool nearSqEdge = nearSawEdge || frac2 < dt || frac2 > 1.0 - dt;
+    if (!nearSawEdge)
+      CHECK(sawN.interleaved[(size_t)f] == sawB.interleaved[(size_t)f]);
+    if (!nearSqEdge)
+      CHECK(sqN.interleaved[(size_t)f] == sqB.interleaved[(size_t)f]);
+    if (sawN.interleaved[(size_t)f] != sawB.interleaved[(size_t)f])
+      differsSomewhere = true;
+    CHECK(std::fabs(sawB.interleaved[(size_t)f]) < 1.5);
+    CHECK(std::fabs(sqB.interleaved[(size_t)f]) < 1.5);
+  }
+  CHECK(differsSomewhere);  // the correction actually fires
+}
+
+TEST(engine_trig_unary_rows) {
+  // sin/cos over the time ramp evaluate pointwise; abs rectifies; the
+  // silence lattice keeps sin(0)=0 silent-safe and cos(0)=1 loud.
+  Rendered s = renderWindow(makeUnaryOp(SigUnaryOp::Sin, makeTime()), 0.0,
+                            1.0, 4.0);
+  Rendered c = renderWindow(makeUnaryOp(SigUnaryOp::Cos, makeTime()), 0.0,
+                            1.0, 4.0);
+  for (int f = 0; f < 4; f++) {
+    double t = (double)f / 4.0;
+    CHECK_NEAR(s.interleaved[(size_t)f], std::sin(t), 1e-12);
+    CHECK_NEAR(c.interleaved[(size_t)f], std::cos(t), 1e-12);
+  }
+  Rendered a = renderWindow(
+      makeUnaryOp(SigUnaryOp::Abs,
+                  makeBinOp(SigBinOp::Mul, makeOsc(OscKind::Sine, 1.0),
+                            makeConst(-2.0))),
+      0.0, 1.0, 8.0);
+  for (double v : a.interleaved) CHECK(v >= 0.0);
+  CHECK_NEAR(a.interleaved[2], 2.0, 1e-9);  // |−2·sin(π/2)|
+  // cos of structural silence is 1.0, not silence.
+  SigPtr silent = makePlace(makeConst(1.0), 0.0, 0.1, 10.0);
+  Rendered cz = renderWindow(makeUnaryOp(SigUnaryOp::Cos, silent), 0.0, 1.0,
+                             4.0);
+  for (int f = 0; f < 4; f++) CHECK_NEAR(cz.interleaved[(size_t)f], 1.0, 1e-12);
+  Rendered az = renderWindow(makeUnaryOp(SigUnaryOp::Abs, silent), 0.0, 1.0,
+                             4.0);
+  for (int f = 0; f < 4; f++) CHECK_NEAR(az.interleaved[(size_t)f], 0.0, 1e-12);
+}
+
+TEST(engine_arith_broadcasts_mono_across_channels) {
+  // The D3 row: a mono signal lifts across a Vector signal's channels.
+  SigPtr stereo = makeChannels({makeConst(0.5), makeConst(-0.5)});
+  SigPtr env = makeExpDecay(1.0);
+  SigPtr scaled = makeBinOp(SigBinOp::Mul, stereo, env);
+  CHECK(scaled->channels() == 2);
+  Rendered r = renderWindow(scaled, 0.0, 1.0, 2.0);
+  CHECK_NEAR(r.interleaved[0], 0.5, 1e-12);
+  CHECK_NEAR(r.interleaved[1], -0.5, 1e-12);
+  CHECK_NEAR(r.interleaved[2], 0.5 * std::exp(-0.5), 1e-12);
+  CHECK_NEAR(r.interleaved[3], -0.5 * std::exp(-0.5), 1e-12);
+  // Either order works, and matches per-channel construction exactly.
+  SigPtr other = makeBinOp(SigBinOp::Mul, env, stereo);
+  SigPtr byHand = makeChannels(
+      {makeBinOp(SigBinOp::Mul, makeConst(0.5), env),
+       makeBinOp(SigBinOp::Mul, makeConst(-0.5), env)});
+  Rendered o = renderWindow(other, 0.0, 1.0, 2.0);
+  Rendered h = renderWindow(byHand, 0.0, 1.0, 2.0);
+  for (size_t i = 0; i < o.interleaved.size(); i++) {
+    CHECK(o.interleaved[i] == r.interleaved[i]);
+    CHECK(h.interleaved[i] == r.interleaved[i]);
+  }
+}

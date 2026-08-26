@@ -8,7 +8,9 @@
    Core is organized into functional submodules and must be brought into
    scope explicitly: `import Core` for qualified access
    (Core.Osc.sine), `open Core` for module-qualified access (Osc.sine),
-   or `open Core.Osc` for bare names (sine). *)
+   or `open Core.Osc` for bare names (sine). `Core.Dsp` is the working
+   prelude for sound-design files: `open Core open Core.Dsp` brings the
+   signal-tier working set in under bare names. *)
 
 (* --- The core types ---------------------------------------------------
    Declared here, ambient everywhere (like the built-in type names - no
@@ -26,12 +28,189 @@ type 'a list = | Nil | Cons of ('a, 'a list) ;;
 type 'a Signal ;;
 type 'a Sample = { sig : 'a Signal; from : Timestamp; to : Timestamp } ;;
 
+(* --- Math & Bool (math.cpp) ------------------------------------------ *)
+
+module Math = struct
+  (* Polymorphic over Scalars, Vectors and Signals (elementwise);
+     anything else is a build-time error. Domain follows IEEE. *)
+  let exp ~x:'a : 'a = external "math.cpp" ;;
+  let sqrt ~x:'a : 'a = external "math.cpp" ;;
+  let log ~x:'a : 'a = external "math.cpp" ;;
+  let pow ~x:'a ~y:Scalar : 'a = external "math.cpp" ;;
+  (* Trigonometry, same polymorphic rule; angles are radians. *)
+  let sin ~x:'a : 'a = external "math.cpp" ;;
+  let cos ~x:'a : 'a = external "math.cpp" ;;
+  let tan ~x:'a : 'a = external "math.cpp" ;;
+  let atan ~x:'a : 'a = external "math.cpp" ;;
+  let abs ~x:'a : 'a = external "math.cpp" ;;
+  (* A plain constant, and the documented exception to "presets are
+     functions": evaluating one number literal is free, and pi as a
+     function would poison every expression it appears in. *)
+  let pi : Scalar = 3.14159265358979312 ;;
+  (* The four-line functions everyone writes inline. *)
+  let min ~a:Scalar ~b:Scalar : Scalar = if a < b then a else b ;;
+  let max ~a:Scalar ~b:Scalar : Scalar = if a > b then a else b ;;
+  let clamp ~lo:Scalar ~hi:Scalar ~x:Scalar : Scalar =
+    if x < lo then lo else if x > hi then hi else x ;;
+  let lerp ~a:Scalar ~b:Scalar ~t:Scalar : Scalar = a + (b - a) * t ;;
+  (* Value-level randomness: jitter's splitmix64 exposed as a value.
+     A pure, platform-stable function of (seed, index), uniform in
+     [0, 1) - determinism and cacheability fully preserved. jitter IS
+     hash applied in the time domain, same bits. *)
+  let hash ~seed:Scalar ~i:Int : Scalar = external "math.cpp" ;;
+  (* Int <-> Scalar conversions. Ints never decay implicitly; going to
+     the continuous side is exact (to_scalar), coming back says how the
+     fraction is dropped (round / floor / ceil). *)
+  let to_scalar ~n:Int : Scalar = external "math.cpp" ;;
+  let round ~x:Scalar : Int = external "math.cpp" ;;
+  let floor ~x:Scalar : Int = external "math.cpp" ;;
+  let ceil ~x:Scalar : Int = external "math.cpp" ;;
+  (* Boolean negation; && and || are (short-circuiting) operators. *)
+  let not ~b:Bool : Bool = external "math.cpp" ;;
+end ;;
+
+(* --- List functions - written in SynthGraph ----------------------------
+   Lists are Cons chains, so these are plain recursive functions. Every
+   combinator recurses in tail position (accumulate, then reverse), so
+   evaluation runs at constant depth however long the list - the
+   evaluator eliminates tail calls, and the recursion guard only ever
+   sees genuine runaway recursion. *)
+
+module List = struct
+  let rec fold ~f:('a -> 'b -> 'a) ~init:'a ~xs:'b list : 'a =
+    match xs with
+    | Nil -> init
+    | Cons (x, rest) -> fold ~f:f ~init:(f init x) ~xs:rest ;;
+  let rev ~xs:'a list : 'a list =
+    fold ~f:(fun acc:'a list x:'a -> Cons (x, acc)) ~init:Nil ~xs:xs ;;
+  (* map applies f front to back (an effectful f sees the list order). *)
+  let map ~f:('a -> 'b) ~xs:'a list : 'b list =
+    let rec go acc:'b list rem:'a list : 'b list =
+      match rem with
+      | Nil -> rev ~xs:acc
+      | Cons (x, rest) -> go (Cons (f x, acc)) rest in
+    go Nil xs ;;
+  (* Index-aware map: f is handed each element's position. *)
+  let mapi ~f:(Int -> 'a -> 'b) ~xs:'a list : 'b list =
+    let rec go i:Int acc:'b list rem:'a list : 'b list =
+      match rem with
+      | Nil -> rev ~xs:acc
+      | Cons (x, rest) -> go (i + 1) (Cons (f i x, acc)) rest in
+    go 0 Nil xs ;;
+  (* init builds [f 0; f 1; ...; f (n-1)]; counts are Ints, so the type
+     system guarantees they are whole (negatives yield the empty list). *)
+  let init ~n:Int ~f:(Int -> 'a) : 'a list =
+    let rec go i:Int acc:'a list : 'a list =
+      if i >= n then rev ~xs:acc else go (i + 1) (Cons (f i, acc)) in
+    go 0 Nil ;;
+  let repeat ~n:Int ~x:'a : 'a list =
+    init ~n:n ~f:(fun i:Int -> x) ;;
+  (* --- Structure ------------------------------------------------------
+     length, indexing and concatenation: what it takes to treat a list as
+     a sequence rather than something to walk once. *)
+  let length ~xs:'a list : Int =
+    fold ~f:(fun acc:Int x:'a -> acc + 1) ~init:0 ~xs:xs ;;
+  let append ~xs:'a list ~ys:'a list : 'a list =
+    let rec go acc:'a list rem:'a list : 'a list =
+      match rem with
+      | Nil -> acc
+      | Cons (x, rest) -> go (Cons (x, acc)) rest in
+    go ys (rev ~xs:xs) ;;
+  (* Out-of-range indices answer with `default` rather than failing the
+     build: there is no option type, and a partial primitive would make
+     every caller carry a bounds check the list already knows. *)
+  let rec nth ~xs:'a list ~i:Int ~default:'a : 'a =
+    if i < 0 then default
+    else match xs with
+         | Nil -> default
+         | Cons (x, rest) ->
+             if i <= 0 then x
+             else nth ~xs:rest ~i:(i - 1) ~default:default ;;
+  (* --- Selection and expansion --------------------------------------- *)
+  let filter ~f:('a -> Bool) ~xs:'a list : 'a list =
+    let rec go acc:'a list rem:'a list : 'a list =
+      match rem with
+      | Nil -> rev ~xs:acc
+      | Cons (x, rest) ->
+          go (if f x then Cons (x, acc) else acc) rest in
+    go Nil xs ;;
+  let concat ~xss:'a list list : 'a list =
+    rev ~xs:(fold ~f:(fun acc:'a list xs:'a list ->
+                        fold ~f:(fun a:'a list x:'a -> Cons (x, a))
+                             ~init:acc ~xs:xs)
+                  ~init:Nil ~xs:xss) ;;
+  let flat_map ~f:('a -> 'b list) ~xs:'a list : 'b list =
+    rev ~xs:(fold ~f:(fun acc:'b list x:'a ->
+                        fold ~f:(fun a:'b list y:'b -> Cons (y, a))
+                             ~init:acc ~xs:(f x))
+                  ~init:Nil ~xs:xs) ;;
+  (* zip stops at the shorter list, so pairing a melody with a rhythm
+     never invents an element neither side had. *)
+  let zip ~xs:'a list ~ys:'b list : ('a, 'b) list =
+    let rec go acc:('a, 'b) list rxs:'a list rys:'b list : ('a, 'b) list =
+      match rxs with
+      | Nil -> rev ~xs:acc
+      | Cons (x, xrest) ->
+          (match rys with
+           | Nil -> rev ~xs:acc
+           | Cons (y, yrest) -> go (Cons ((x, y), acc)) xrest yrest) in
+    go Nil xs ys ;;
+  (* The first n elements / everything after them; a count past either
+     end answers with what is there (take of a short list is the list,
+     drop past the end is empty, negative counts take/drop nothing). *)
+  let take ~n:Int ~xs:'a list : 'a list =
+    let rec go i:Int acc:'a list rem:'a list : 'a list =
+      if i >= n then rev ~xs:acc
+      else match rem with
+           | Nil -> rev ~xs:acc
+           | Cons (x, rest) -> go (i + 1) (Cons (x, acc)) rest in
+    go 0 Nil xs ;;
+  let drop ~n:Int ~xs:'a list : 'a list =
+    let rec go i:Int rem:'a list : 'a list =
+      if i >= n then rem
+      else match rem with
+           | Nil -> Nil
+           | Cons (x, rest) -> go (i + 1) rest in
+    go 0 xs ;;
+  (* Running fold: n+1 entries, init first - the cumulative-starts
+     engine under Tempo.marks and any "each length follows from the
+     previous" structure. *)
+  let scan ~f:('a -> 'b -> 'a) ~init:'a ~xs:'b list : 'a list =
+    let rec go acc:'a out:'a list rem:'b list : 'a list =
+      match rem with
+      | Nil -> rev ~xs:(Cons (acc, out))
+      | Cons (x, rest) -> go (f acc x) (Cons (acc, out)) rest in
+    go init Nil xs ;;
+  (* --- Numeric folds --------------------------------------------------
+     `range` is the Int counterpart of time_steps; `maximum` takes the
+     value an empty list answers with, which doubles as a floor. *)
+  let range ~from:Int ~count:Int : Int list =
+    init ~n:count ~f:(fun i:Int -> from + i) ;;
+  let sum ~xs:Scalar list : Scalar =
+    fold ~f:(fun acc:Scalar x:Scalar -> acc + x) ~init:0.0 ~xs:xs ;;
+  let maximum ~xs:Scalar list ~least:Scalar : Scalar =
+    fold ~f:(fun acc:Scalar x:Scalar -> if x > acc then x else acc)
+         ~init:least ~xs:xs ;;
+  (* Iterate an effectful function (renders) over a list. The one List
+     function that cannot be written in the language: `unit` has no
+     literal, so a synth-side iterator would have nothing to return in
+     its Nil arm. C++ can mint the unit value. *)
+  let iter ~f:('a -> unit) ~xs:'a list : unit = external "lists.cpp" ;;
+end ;;
+
 (* --- Oscillators & modulation (oscillators.cpp) ---------------------- *)
 
 module Osc = struct
   let sine ~freq:Scalar : Scalar Signal = external "oscillators.cpp" ;;
   let saw ~freq:Scalar : Scalar Signal = external "oscillators.cpp" ;;
   let square ~freq:Scalar : Scalar Signal = external "oscillators.cpp" ;;
+  (* Bandlimited (PolyBLEP) variants: the naive shapes alias audibly on
+     bright, high-fundamental material; these correct the
+     discontinuities. New names, so existing artifacts stay
+     byte-identical. *)
+  let saw_bl ~freq:Scalar : Scalar Signal = external "oscillators.cpp" ;;
+  let square_bl ~freq:Scalar : Scalar Signal =
+    external "oscillators.cpp" ;;
   (* Deterministic pseudo-noise via cascaded FM: no RNG anywhere,
      renders stay reproducible. freq sets the spectral center. *)
   let noise ~freq:Scalar : Scalar Signal = external "oscillators.cpp" ;;
@@ -43,10 +222,63 @@ module Osc = struct
       : 'a Signal = external "oscillators.cpp" ;;
 end ;;
 
+(* --- Time: conversions and Timestamp sequences ------------------------
+   (math.cpp for conversions, lists.cpp for the sequence builders). ----- *)
+
+module Time = struct
+  (* The computed counterpart of the literal suffixes; there is
+     deliberately no conversion back from Timestamp. *)
+  let to_sec ~x:Scalar : Timestamp = external "math.cpp" ;;
+  let to_ms ~x:Scalar : Timestamp = external "math.cpp" ;;
+  let to_min ~x:Scalar : Timestamp = external "math.cpp" ;;
+  (* The quotient of two durations is a dimensionless *count*, not a
+     decayed number: div answers "how many of these fit" (an Int - it
+     lands exactly where ~count parameters want it) and rem "what is
+     left" (still a duration). Floor convention, pairing with
+     Scale.wrap_div; num == den * div + rem with 0s <= rem < den.
+     Division by 0s is a build error. No unit ever decays. *)
+  let div ~num:Timestamp ~den:Timestamp : Int = external "math.cpp" ;;
+  let rem ~num:Timestamp ~den:Timestamp : Timestamp =
+    external "math.cpp" ;;
+  let time_steps ~start:Timestamp ~step:Timestamp ~count:Int
+      : Timestamp list = external "lists.cpp" ;;
+  (* Humanization: hash-derived deltas in [-spread, +spread], a pure
+     function of (seed, index) - deterministic and cacheable. jitter is
+     Math.hash applied in the time domain, same bits. *)
+  let jitter ~seed:Scalar ~spread:Timestamp ~steps:Timestamp list
+      : Timestamp list = external "lists.cpp" ;;
+end ;;
+
+(* --- Slicing, placement, mixing (sampling.cpp) ----------------------- *)
+
+module Arrange = struct
+  let mix_all ~signals:'a Signal list : 'a Signal =
+    external "sampling.cpp" ;;
+  let channels ~chans:Scalar Signal list : Vector Signal =
+    external "sampling.cpp" ;;
+  (* The inverse channels never had: one channel of a multichannel
+     signal as mono. The index is validated against the signal's static
+     channel count when the graph is built. *)
+  let channel ~n:Int ~input:Vector Signal : Scalar Signal =
+    external "sampling.cpp" ;;
+  let sample ~signal:'a Signal ~from:Timestamp ~to:Timestamp : 'a Sample =
+    external "sampling.cpp" ;;
+  let place ~sample:'a Sample ~at:Timestamp : 'a Signal =
+    external "sampling.cpp" ;;
+  let place_multi ~sample:'a Sample ~ats:Timestamp list : 'a Signal =
+    external "sampling.cpp" ;;
+end ;;
+
 (* --- Effects, filters, envelopes (effects.cpp) ----------------------- *)
 
 module Fx = struct
   let delay ~by:Timestamp ~signal:'a Signal : 'a Signal =
+    external "effects.cpp" ;;
+  (* Feedback delay: out(t) = in(t) + gain * out(t - by), |gain| < 1.
+     Dub delays, flangers, Karplus-Strong-style plucks. The loop lives
+     inside the node's per-render state (like reverb's); the
+     language-level graph stays acyclic. *)
+  let feedback ~by:Timestamp ~gain:Scalar ~input:'a Signal : 'a Signal =
     external "effects.cpp" ;;
   (* Time warping: f is a playback-rate multiplier sampled on the
      output's time base (1.0 identity, 0.5 an octave down, 2.0 up). *)
@@ -62,25 +294,53 @@ module Fx = struct
     external "effects.cpp" ;;
   let highpass ~cutoff:Scalar ~input:'a Signal : 'a Signal =
     external "effects.cpp" ;;
+  (* The one-poles with a signal-rate cutoff: filter sweeps as a
+     gesture. The cutoff (Hz) must be mono, like am's modulator. *)
+  let lowpass_mod ~cutoff:Scalar Signal ~input:'a Signal : 'a Signal =
+    external "effects.cpp" ;;
+  let highpass_mod ~cutoff:Scalar Signal ~input:'a Signal : 'a Signal =
+    external "effects.cpp" ;;
+  (* Two-pole state-variable lowpass with resonance: q around 0.7 is
+     flat, higher values ring at the cutoff - acid lines, wubs, the
+     opening-filter gesture. The cutoff clamps to a stable fraction of
+     the render rate. *)
+  let resonant ~cutoff:Scalar Signal ~q:Scalar ~input:'a Signal
+      : 'a Signal = external "effects.cpp" ;;
+  (* Envelope follower: |input| smoothed with separate attack/release
+     times - the listening half of compressors, gates, auto-wahs and
+     program-dependent sidechains (follow a bus after mixing it down;
+     the input must be mono). *)
+  let follow ~attack:Timestamp ~release:Timestamp ~input:Scalar Signal
+      : Scalar Signal = external "effects.cpp" ;;
   let hard_clip ~threshold:Scalar ~input:'a Signal : 'a Signal =
     external "effects.cpp" ;;
   let soft_clip ~threshold:Scalar ~input:'a Signal : 'a Signal =
     external "effects.cpp" ;;
-end ;;
-
-(* --- Slicing, placement, mixing (sampling.cpp) ----------------------- *)
-
-module Arrange = struct
-  let mix_all ~signals:'a Signal list : 'a Signal =
-    external "sampling.cpp" ;;
-  let channels ~chans:Scalar Signal list : Vector Signal =
-    external "sampling.cpp" ;;
-  let sample ~signal:'a Signal ~from:Timestamp ~to:Timestamp : 'a Sample =
-    external "sampling.cpp" ;;
-  let place ~sample:'a Sample ~at:Timestamp : 'a Signal =
-    external "sampling.cpp" ;;
-  let place_multi ~sample:'a Sample ~ats:Timestamp list : 'a Signal =
-    external "sampling.cpp" ;;
+  (* The voice-window idiom written once, fixing the convention: the
+     window ends where the envelope does, at
+     max hold (attack + decay) + release. *)
+  let gated ~attack:Timestamp ~decay:Timestamp ~sustain:Scalar
+      ~release:Timestamp ~hold:Timestamp ~input:Scalar Signal
+      : Scalar Sample =
+    let body : Timestamp =
+      if hold > attack + decay then hold else attack + decay in
+    Arrange.sample
+      ~signal:(input * adsr ~attack:attack ~decay:decay ~sustain:sustain
+                            ~release:release ~hold:hold)
+      ~from:0s ~to:(body + release) ;;
+  (* Feedforward echo stack: input + sum of delay(by*i) * gain^i for
+     i in 1..n - the hand-unrolled dry + delay*g + delay^2*g^2 pattern. *)
+  let echoes ~by:Timestamp ~gain:Scalar ~n:Int ~input:'a Signal
+      : 'a Signal =
+    Arrange.mix_all
+      ~signals:(Cons (input,
+                      List.init
+                        ~n:n
+                        ~f:(fun i:Int ->
+                              delay ~by:(by * Math.to_scalar (i + 1))
+                                    ~signal:input
+                                * Math.pow ~x:gain
+                                           ~y:(Math.to_scalar (i + 1))))) ;;
 end ;;
 
 (* --- Render targets (render.cpp) - the language's only effect.
@@ -105,103 +365,6 @@ module Io = struct
   let load_multi ~path:String : Vector Signal = external "io.cpp" ;;
 end ;;
 
-(* --- List functions - written in SynthGraph ----------------------------
-   Lists are Cons chains, so these are plain recursive functions; both
-   map and fold walk the list front to back. *)
-
-module List = struct
-  let rec map ~f:('a -> 'b) ~xs:'a list : 'b list =
-    match xs with
-    | Nil -> Nil
-    | Cons (x, rest) -> Cons (f x, map ~f:f ~xs:rest) ;;
-  let rec fold ~f:('a -> 'b -> 'a) ~init:'a ~xs:'b list : 'a =
-    match xs with
-    | Nil -> init
-    | Cons (x, rest) -> fold ~f:f ~init:(f init x) ~xs:rest ;;
-  (* init builds [f 0; f 1; ...; f (n-1)]; counts are Ints, so the type
-     system guarantees they are whole (negatives yield the empty list). *)
-  let init ~n:Int ~f:(Int -> 'a) : 'a list =
-    let rec go i:Int : 'a list =
-      if i >= n then Nil else Cons (f i, go (i + 1)) in
-    go 0 ;;
-  let repeat ~n:Int ~x:'a : 'a list =
-    init ~n:n ~f:(fun i:Int -> x) ;;
-  (* --- Structure ------------------------------------------------------
-     length, indexing and concatenation: what it takes to treat a list as
-     a sequence rather than something to walk once. *)
-  let rec length ~xs:'a list : Int =
-    match xs with
-    | Nil -> 0
-    | Cons (_, rest) -> 1 + length ~xs:rest ;;
-  let rec append ~xs:'a list ~ys:'a list : 'a list =
-    match xs with
-    | Nil -> ys
-    | Cons (x, rest) -> Cons (x, append ~xs:rest ~ys:ys) ;;
-  (* Out-of-range indices answer with `default` rather than failing the
-     build: there is no option type, and a partial primitive would make
-     every caller carry a bounds check the list already knows. *)
-  let rec nth ~xs:'a list ~i:Int ~default:'a : 'a =
-    if i < 0 then default
-    else match xs with
-         | Nil -> default
-         | Cons (x, rest) ->
-             if i <= 0 then x
-             else nth ~xs:rest ~i:(i - 1) ~default:default ;;
-  let rev ~xs:'a list : 'a list =
-    fold ~f:(fun acc:'a list x:'a -> Cons (x, acc)) ~init:Nil ~xs:xs ;;
-  (* --- Selection and expansion --------------------------------------- *)
-  let rec filter ~f:('a -> Bool) ~xs:'a list : 'a list =
-    match xs with
-    | Nil -> Nil
-    | Cons (x, rest) ->
-        if f x then Cons (x, filter ~f:f ~xs:rest)
-        else filter ~f:f ~xs:rest ;;
-  let rec concat ~xss:'a list list : 'a list =
-    match xss with
-    | Nil -> Nil
-    | Cons (xs, rest) -> append ~xs:xs ~ys:(concat ~xss:rest) ;;
-  let rec flat_map ~f:('a -> 'b list) ~xs:'a list : 'b list =
-    match xs with
-    | Nil -> Nil
-    | Cons (x, rest) -> append ~xs:(f x) ~ys:(flat_map ~f:f ~xs:rest) ;;
-  (* zip stops at the shorter list, so pairing a melody with a rhythm
-     never invents an element neither side had. *)
-  let rec zip ~xs:'a list ~ys:'b list : ('a, 'b) list =
-    match xs with
-    | Nil -> Nil
-    | Cons (x, xrest) ->
-        (match ys with
-         | Nil -> Nil
-         | Cons (y, yrest) -> Cons ((x, y), zip ~xs:xrest ~ys:yrest)) ;;
-  (* --- Numeric folds --------------------------------------------------
-     `range` is the Int counterpart of time_steps; `maximum` takes the
-     value an empty list answers with, which doubles as a floor. *)
-  let range ~from:Int ~count:Int : Int list =
-    init ~n:count ~f:(fun i:Int -> from + i) ;;
-  let sum ~xs:Scalar list : Scalar =
-    fold ~f:(fun acc:Scalar x:Scalar -> acc + x) ~init:0.0 ~xs:xs ;;
-  let maximum ~xs:Scalar list ~least:Scalar : Scalar =
-    fold ~f:(fun acc:Scalar x:Scalar -> if x > acc then x else acc)
-         ~init:least ~xs:xs ;;
-end ;;
-
-(* --- Time: conversions and Timestamp sequences ------------------------
-   (math.cpp for conversions, lists.cpp for the sequence builders). ----- *)
-
-module Time = struct
-  (* The computed counterpart of the literal suffixes; there is
-     deliberately no conversion back from Timestamp. *)
-  let to_sec ~x:Scalar : Timestamp = external "math.cpp" ;;
-  let to_ms ~x:Scalar : Timestamp = external "math.cpp" ;;
-  let to_min ~x:Scalar : Timestamp = external "math.cpp" ;;
-  let time_steps ~start:Timestamp ~step:Timestamp ~count:Int
-      : Timestamp list = external "lists.cpp" ;;
-  (* Humanization: hash-derived deltas in [-spread, +spread], a pure
-     function of (seed, index) - deterministic and cacheable. *)
-  let jitter ~seed:Scalar ~spread:Timestamp ~steps:Timestamp list
-      : Timestamp list = external "lists.cpp" ;;
-end ;;
-
 (* --- Signal constructors (signals.cpp) ------------------------------- *)
 
 module Sig = struct
@@ -214,26 +377,63 @@ module Sig = struct
     external "signals.cpp" ;;
   let signal_multi ~fs:(Scalar -> Scalar) list : Vector Signal =
     external "signals.cpp" ;;
+  (* The sample-wise choice build-time `if` deliberately is not:
+     gate(t) >= threshold picks `above`, else `below`. The gate must be
+     mono. *)
+  let select ~gate:Scalar Signal ~threshold:Scalar ~above:'a Signal
+      ~below:'a Signal : 'a Signal = external "signals.cpp" ;;
 end ;;
 
-(* --- Math & Bool (math.cpp) ------------------------------------------ *)
+(* --- Groove: the sequencing tier - written in SynthGraph --------------
+   A hit placed on a Timestamp grid, straight or humanized, plus the
+   step-sequencer tools (masks, Euclidean patterns). Everything takes
+   the *step list* rather than baking in grid arithmetic, so it
+   composes with Tempo.grid, swing, jitter, mask and euclid without a
+   parameter explosion. *)
 
-module Math = struct
-  (* Polymorphic over Scalars, Vectors and Signals (elementwise);
-     anything else is a build-time error. Domain follows IEEE. *)
-  let exp ~x:'a : 'a = external "math.cpp" ;;
-  let sqrt ~x:'a : 'a = external "math.cpp" ;;
-  let log ~x:'a : 'a = external "math.cpp" ;;
-  let pow ~x:'a ~y:Scalar : 'a = external "math.cpp" ;;
-  (* Int <-> Scalar conversions. Ints never decay implicitly; going to
-     the continuous side is exact (to_scalar), coming back says how the
-     fraction is dropped (round / floor / ceil). *)
-  let to_scalar ~n:Int : Scalar = external "math.cpp" ;;
-  let round ~x:Scalar : Int = external "math.cpp" ;;
-  let floor ~x:Scalar : Int = external "math.cpp" ;;
-  let ceil ~x:Scalar : Int = external "math.cpp" ;;
-  (* Boolean negation; && and || are (short-circuiting) operators. *)
-  let not ~b:Bool : Bool = external "math.cpp" ;;
+module Groove = struct
+  let pattern ~hit:'a Sample ~steps:Timestamp list : 'a Signal =
+    Arrange.place_multi ~sample:hit ~ats:steps ;;
+  (* pattern with humanizing jitter at the placement; same seed
+     contract as Time.jitter (pure - give each layer its own seed). *)
+  let humanized ~hit:'a Sample ~steps:Timestamp list ~seed:Scalar
+      ~spread:Timestamp : 'a Signal =
+    Arrange.place_multi
+      ~sample:hit
+      ~ats:(Time.jitter ~seed:seed ~spread:spread ~steps:steps) ;;
+  (* keep cycles over the steps: the x..x row of a step sequencer. *)
+  let mask ~keep:Bool list ~steps:Timestamp list : Timestamp list =
+    let k : Int = List.length ~xs:keep in
+    if k <= 0 then steps
+    else
+      let rec go i:Int acc:Timestamp list rem:Timestamp list
+          : Timestamp list =
+        match rem with
+        | Nil -> List.rev ~xs:acc
+        | Cons (t, rest) ->
+            go (i + 1)
+               (if List.nth ~xs:keep ~i:(i - k * (i / k)) ~default:true
+                then Cons (t, acc)
+                else acc)
+               rest in
+      go 0 Nil steps ;;
+  (* Euclidean rhythm: `hits` onsets spread as evenly as possible over
+     the given grid (Bjorklund selection: step i stays when
+     (i * hits) mod n < hits, n the grid length, so the pattern starts
+     on a hit). hits <= 0 keeps nothing; hits >= n keeps everything. *)
+  let euclid ~hits:Int ~steps:Timestamp list : Timestamp list =
+    let n : Int = List.length ~xs:steps in
+    if hits <= 0 then Nil
+    else if hits >= n then steps
+    else
+      let rec go i:Int acc:Timestamp list rem:Timestamp list
+          : Timestamp list =
+        match rem with
+        | Nil -> List.rev ~xs:acc
+        | Cons (t, rest) ->
+            let r : Int = i * hits - n * (i * hits / n) in
+            go (i + 1) (if r < hits then Cons (t, acc) else acc) rest in
+      go 0 Nil steps ;;
 end ;;
 
 (* --- Pitch: notes, temperaments and cents - written in SynthGraph -----
@@ -277,6 +477,13 @@ module Pitch = struct
   let shift ~note:Note ~by:Int : Note =
     of_step ~step:(step ~note:note + by) ;;
   let flat ~note:Note : Note = shift ~note:note ~by:(-1) ;;
+  (* The register fold: `note` moved by whole octaves into
+     [low, low + octave). Voicings over a register floor fall out of it
+     - the voicing ~count:1 + nth idiom, named. *)
+  let wrap_to ~note:Note ~low:Note : Note =
+    let d : Int = step ~note:note - step ~note:low in
+    let o : Int = Math.floor ~x:(Math.to_scalar d / 12.0) in
+    shift ~note:note ~by:(0 - 12 * o) ;;
 
   (* --- Temperaments ---------------------------------------------------
      Presets are functions, not constants: a paramless definition is
@@ -375,6 +582,8 @@ module Tempo = struct
   let beats ~t:Tempo ~n:Scalar : Timestamp = beat ~t:t * n ;;
   let bar ~t:Tempo : Timestamp =
     beats ~t:t ~n:(Math.to_scalar t.meter.beats) ;;
+  (* n bars, fractional is fine - the sibling `beats` already has. *)
+  let bars ~t:Tempo ~n:Scalar : Timestamp = bar ~t:t * n ;;
 
   (* --- Note values ----------------------------------------------------
      A whole note is `unit` beats whatever the meter - four beats in
@@ -393,6 +602,14 @@ module Tempo = struct
       | Tuplet (n, m, inner) ->
           Math.to_scalar m / Math.to_scalar n * frac inner in
     beats ~t:t ~n:(Math.to_scalar t.meter.unit * frac v) ;;
+  (* How many of a note value fit in one bar: the count a grid's ~count
+     wants, correct in any meter, compound included. *)
+  let per_bar ~t:Tempo ~v:Value : Int =
+    Time.div ~num:(bar ~t:t) ~den:(value ~t:t ~v:v) ;;
+  (* The bars -> beats bridge Score.move and chord ~len need. Named
+     bar_beats rather than span so Score.span stays unshadowed. *)
+  let bar_beats ~t:Tempo ~n:Int : Scalar =
+    Math.to_scalar (n * t.meter.beats) ;;
 
   (* --- Positions and grids --------------------------------------------
      `grid` is the tempo-aware Time.time_steps: the call names the tempo
@@ -415,6 +632,20 @@ module Tempo = struct
           Cons (if off then x + step * amount else x,
                 go rest (Math.not ~b:off)) in
     go steps false ;;
+  (* grid and swing in one call, so the step is named once - a
+     disagreement between the two is a silent groove bug. *)
+  let swung_grid ~t:Tempo ~from:Timestamp ~step:Value ~count:Int
+      ~amount:Scalar : Timestamp list =
+    swing ~amount:amount ~step:(value ~t:t ~v:step)
+          ~steps:(grid ~t:t ~from:from ~step:step ~count:count) ;;
+  (* Section lengths (in bars) to section starts: n+1 Timestamps - each
+     section's start, plus the ending. The cumulative arithmetic (the
+     part that breaks when a section is re-lengthened mid-writing)
+     becomes one edit; the named landmarks stay yours to bind. *)
+  let marks ~t:Tempo ~bars:Int list : Timestamp list =
+    List.map ~f:(fun b:Int -> bar ~t:t * Math.to_scalar b)
+             ~xs:(List.scan ~f:(fun acc:Int n:Int -> acc + n) ~init:0
+                            ~xs:bars) ;;
 
   (* A preset is a function, not a constant: a paramless definition is
      evaluated on every build of every project. Any other meter is a
@@ -439,17 +670,28 @@ end ;;
    `triad` and `seventh` hand back the notes rather than forcing them
    through `ChordQuality`. `Chord` stays for chords you *name*, and
    `invert`, `voicing` and `freqs` work on any list from either
-   source. *)
+   source.
+
+   Both quality enums are open: `CustomQ` takes any semitone ladder
+   (harmonic major, Hirajoshi, an octatonic, a maqam approximation) and
+   `Shape` any chord shape, and every function here - degree, snap,
+   stack, triad, in_key - works over them unchanged, because they all
+   go through offsets/shape. *)
 
 module Scale = struct
   type Quality = | Major | Minor | Dorian | Phrygian | Lydian | Mixolydian
                  | Locrian | HarmMinor | MelMinor | PentMajor | PentMinor
-                 | Blues | WholeTone | Chromatic ;;
+                 | Blues | WholeTone | Chromatic
+                 | CustomQ of Int list ;;
   type Scale = { tonic : Pitch.Note; quality : Quality } ;;
   (* Spelled short (Maj/Min) where the scale qualities are spelled long
-     (Major/Minor), so both can be opened at once. *)
+     (Major/Minor), so both can be opened at once. Named chords are
+     documentation; `Shape` is the escape hatch. *)
   type ChordQuality = | Maj | Min | Dim | Aug | Maj7 | Min7 | Dom7
-                      | HalfDim7 | Dim7 | Sus2 | Sus4 | Add9 ;;
+                      | HalfDim7 | Dim7 | Sus2 | Sus4 | Add9
+                      | Sixth | Min6 | Dom9 | Maj9 | Min9 | MinMaj7
+                      | Dom7b9 | Dom13
+                      | Shape of Int list ;;
   type Chord = { root : Pitch.Note; quality : ChordQuality } ;;
 
   (* Floor division and its non-negative remainder. The language has no
@@ -478,7 +720,8 @@ module Scale = struct
     | PentMinor -> [0; 3; 5; 7; 10]
     | Blues -> [0; 3; 5; 6; 7; 10]
     | WholeTone -> [0; 2; 4; 6; 8; 10]
-    | Chromatic -> [0; 1; 2; 3; 4; 5; 6; 7; 8; 9; 10; 11] ;;
+    | Chromatic -> [0; 1; 2; 3; 4; 5; 6; 7; 8; 9; 10; 11]
+    | CustomQ os -> os ;;
 
   let degree ~s:Scale ~n:Int : Pitch.Note =
     let os : Int list = offsets ~q:s.quality in
@@ -507,7 +750,8 @@ module Scale = struct
                  ~xs:(List.append ~xs:(offsets ~q:s.quality) ~ys:[12])) ;;
 
   (* --- Chords ---------------------------------------------------------
-     A named chord is a root and a shape in semitones. *)
+     A named chord is a root and a shape in semitones. (Dom13 omits the
+     11th, as played; spell any other voicing with Shape.) *)
   let shape ~q:ChordQuality : Int list =
     match q with
     | Maj -> [0; 4; 7]
@@ -521,7 +765,16 @@ module Scale = struct
     | Dim7 -> [0; 3; 6; 9]
     | Sus2 -> [0; 2; 7]
     | Sus4 -> [0; 5; 7]
-    | Add9 -> [0; 4; 7; 14] ;;
+    | Add9 -> [0; 4; 7; 14]
+    | Sixth -> [0; 4; 7; 9]
+    | Min6 -> [0; 3; 7; 9]
+    | Dom9 -> [0; 4; 7; 10; 14]
+    | Maj9 -> [0; 4; 7; 11; 14]
+    | Min9 -> [0; 3; 7; 10; 14]
+    | MinMaj7 -> [0; 3; 7; 11]
+    | Dom7b9 -> [0; 4; 7; 10; 13]
+    | Dom13 -> [0; 4; 7; 10; 14; 21]
+    | Shape ss -> ss ;;
   let tones ~c:Chord : Pitch.Note list =
     List.map ~f:(fun i:Int -> Pitch.shift ~note:c.root ~by:i)
              ~xs:(shape ~q:c.quality) ;;
@@ -535,6 +788,24 @@ module Scale = struct
     stack ~s:s ~from:degree ~count:3 ;;
   let seventh ~s:Scale ~degree:Int : Pitch.Note list =
     stack ~s:s ~from:degree ~count:4 ;;
+
+  (* --- Progressions ---------------------------------------------------
+     A key plus a degree cycle, with wrapping lookup - the structure
+     every project rebuilt by hand. `prog_degree` is the wrapped lookup
+     the rest compose from. *)
+  type Prog = { key : Scale; degrees : Int list } ;;
+
+  let prog_len ~p:Prog : Int = List.length ~xs:p.degrees ;;
+  let prog_degree ~p:Prog ~i:Int : Int =
+    let k : Int = List.length ~xs:p.degrees in
+    if k <= 0 then 0
+    else List.nth ~xs:p.degrees ~i:(wrap_rem ~n:i ~k:k) ~default:0 ;;
+  let prog_root ~p:Prog ~i:Int : Pitch.Note =
+    degree ~s:p.key ~n:(prog_degree ~p:p ~i:i) ;;
+  let prog_chord ~p:Prog ~i:Int : Pitch.Note list =
+    triad ~s:p.key ~degree:(prog_degree ~p:p ~i:i) ;;
+  let prog_stack ~p:Prog ~i:Int ~count:Int : Pitch.Note list =
+    stack ~s:p.key ~from:(prog_degree ~p:p ~i:i) ~count:count ;;
 
   (* --- Voicing --------------------------------------------------------
      Both work on any note list, from `tones` or from `stack`. *)
@@ -585,25 +856,28 @@ end ;;
    `Pitch.Note`s, so one phrase plays at any tempo in any temperament
    and every transform below is a pure edit of the score. An `Event` is
    realized: a frequency, a Timestamp and a length, ready to place.
-   `realize` is the one bridge, and it is where a tempo and a tuning are
-   named.
+   `realize` (and `realize_with`, for any note -> frequency mapping) is
+   the one bridge, and it is where a tempo and a tuning are named.
 
    Several names here are spelled to stay out of the way of modules that
    are usually open beside this one: `span` rather than `length`
    (List.length), `layer` rather than `stack` (Scale.stack), `loop`
    rather than `repeat` (List.repeat), `move` rather than `shift`
-   (Pitch.shift). `Forte` and `Piano` are spelled out where the rest of
-   the dynamic levels are abbreviated, because a bare `F` would collide
-   with the pitch class of the same name.
+   (Pitch.shift), `shuffle` rather than `swing` (Tempo.swing). `Forte`
+   and `Piano` are spelled out where the rest of the dynamic levels are
+   abbreviated, because a bare `F` would collide with the pitch class
+   of the same name.
 
    Dynamics live here rather than in a module of their own: a level is
    only ever a velocity, and `db` is small enough that a module for it
    would be ceremony. *)
 
 module Score = struct
-  (* Symbolic: beats, not seconds. *)
+  (* Symbolic: beats, not seconds. `bend` is a per-note inflection in
+     cents (quarter-tones, blue notes), applied at realization; the
+     builders default it to 0.0. *)
   type Step = { note : Pitch.Note; at : Scalar; len : Scalar;
-                vel : Scalar } ;;
+                vel : Scalar; bend : Scalar } ;;
   type Phrase = { steps : Step list } ;;
   (* Realized: real time, and a frequency the tuning has already
      resolved - so a voice never has to know about temperament. *)
@@ -648,7 +922,8 @@ module Score = struct
       | Cons (it, rest) ->
           match it with
           | Play (n, len) ->
-              Cons ({ note = n; at = at; len = len; vel = 1.0 },
+              Cons ({ note = n; at = at; len = len; vel = 1.0;
+                      bend = 0.0 },
                     go ~items:rest ~at:(at + len))
           | Rest len -> go ~items:rest ~at:(at + len) in
     { steps = go ~items:items ~at:0.0 } ;;
@@ -657,7 +932,8 @@ module Score = struct
   let chord ~notes:Pitch.Note list ~at:Scalar ~len:Scalar : Phrase =
     { steps = List.map
                 ~f:(fun n:Pitch.Note ->
-                      { note = n; at = at; len = len; vel = 1.0 })
+                      { note = n; at = at; len = len; vel = 1.0;
+                        bend = 0.0 })
                 ~xs:notes } ;;
   (* `count` notes cycling upward through `notes`, one every `step`
      beats - the arpeggio of whatever Scale.tones or Scale.stack gave. *)
@@ -671,7 +947,16 @@ module Score = struct
                                           ~i:(Scale.wrap_rem ~n:i ~k:k)
                                           ~default:(Pitch.of_step ~step:0);
                           at = Math.to_scalar i * step;
-                          len = step; vel = 1.0 }) } ;;
+                          len = step; vel = 1.0; bend = 0.0 }) } ;;
+  (* Rhythm without a dummy note: unpitched steps laid end to end (they
+     carry of_step 0, which `strike` ignores). `hits` is the even case:
+     n steps of one length. *)
+  let rhythm ~lens:Scalar list : Phrase =
+    line ~items:(List.map ~f:(fun l:Scalar ->
+                                Play (Pitch.of_step ~step:0, l))
+                          ~xs:lens) ;;
+  let hits ~n:Int ~len:Scalar : Phrase =
+    rhythm ~lens:(List.repeat ~n:n ~x:len) ;;
 
   (* --- The phrase algebra ---------------------------------------------
      Every one of these is a pure edit: a Phrase in, a Phrase out. *)
@@ -680,19 +965,20 @@ module Score = struct
                     if s.at + s.len > acc then s.at + s.len else acc)
               ~init:0.0 ~xs:p.steps ;;
   let move ~p:Phrase ~beats:Scalar : Phrase =
-    { steps = List.map
-                ~f:(fun s:Step ->
-                      { note = s.note; at = s.at + beats; len = s.len;
-                        vel = s.vel })
-                ~xs:p.steps } ;;
-  (* One after another: each phrase starts where the last one ended. *)
-  let rec seq ~ps:Phrase list : Phrase =
-    match ps with
-    | Nil -> { steps = Nil }
-    | Cons (p, rest) ->
-        { steps = List.append
-                    ~xs:p.steps
-                    ~ys:(move ~p:(seq ~ps:rest) ~beats:(span ~p:p)).steps } ;;
+    { steps = List.map ~f:(fun s:Step -> { s with at = s.at + beats })
+                       ~xs:p.steps } ;;
+  (* One after another: each phrase starts where the last one ended. A
+     left fold carrying (offset, steps-so-far): linear work, one fold
+     frame per phrase - the nested form this replaces re-positioned
+     every suffix once per preceding phrase. *)
+  let seq ~ps:Phrase list : Phrase =
+    let step acc:(Scalar, Step list) p:Phrase : (Scalar, Step list) =
+      let (off, ss) : (Scalar, Step list) = acc in
+      (off + span ~p:p,
+       List.append ~xs:ss ~ys:(move ~p:p ~beats:off).steps) in
+    let (off, ss) : (Scalar, Step list) =
+      List.fold ~f:step ~init:(0.0, Nil) ~xs:ps in
+    { steps = ss } ;;
   (* Simultaneous: the phrases keep their own positions. *)
   let layer ~ps:Phrase list : Phrase =
     { steps = List.concat
@@ -702,30 +988,74 @@ module Score = struct
   let transpose ~p:Phrase ~semitones:Int : Phrase =
     { steps = List.map
                 ~f:(fun s:Step ->
-                      { note = Pitch.shift ~note:s.note ~by:semitones;
-                        at = s.at; len = s.len; vel = s.vel })
+                      { s with note = Pitch.shift ~note:s.note
+                                                  ~by:semitones })
                 ~xs:p.steps } ;;
   let in_key ~p:Phrase ~s:Scale.Scale : Phrase =
     { steps = List.map
                 ~f:(fun st:Step ->
-                      { note = Scale.snap ~s:s ~note:st.note;
-                        at = st.at; len = st.len; vel = st.vel })
+                      { st with note = Scale.snap ~s:s ~note:st.note })
                 ~xs:p.steps } ;;
   let velocity ~p:Phrase ~f:(Scalar -> Scalar) : Phrase =
+    { steps = List.map ~f:(fun s:Step -> { s with vel = f s.vel })
+                       ~xs:p.steps } ;;
+  (* Per-step dynamics: vs cycles over the steps in order, scaling each
+     velocity, so [1.0; 0.6] alternates accents - the consumer `ramp`
+     never had. An empty vs leaves the phrase alone. *)
+  let vels ~p:Phrase ~vs:Scalar list : Phrase =
+    let k : Int = List.length ~xs:vs in
+    if k <= 0 then p
+    else
+      { steps = List.mapi
+                  ~f:(fun i:Int s:Step ->
+                        { s with vel = s.vel
+                                         * List.nth
+                                             ~xs:vs
+                                             ~i:(Scale.wrap_rem ~n:i ~k:k)
+                                             ~default:1.0 })
+                  ~xs:p.steps } ;;
+  let crescendo ~p:Phrase ~from:Level ~to:Level : Phrase =
+    vels ~p:p ~vs:(ramp ~from:from ~to:to
+                        ~n:(List.length ~xs:p.steps)) ;;
+  (* Per-note inflection: set bend (in cents) by step index; realize*
+     applies it through Pitch.cents. *)
+  let bend ~p:Phrase ~f:(Int -> Scalar) : Phrase =
+    { steps = List.mapi ~f:(fun i:Int s:Step -> { s with bend = f i })
+                        ~xs:p.steps } ;;
+  (* Feel, in beats, on the symbolic side - what lets humanization and
+     shuffle finally compose with duration-aware voices. Both are pure
+     via Math.hash: same reproducibility contract as Time.jitter, and
+     the same guidance - give each layer its own seed. Positions clamp
+     at beat 0, as jitter clamps at 0s. *)
+  let humanize ~p:Phrase ~seed:Scalar ~spread:Scalar : Phrase =
+    { steps = List.mapi
+                ~f:(fun i:Int s:Step ->
+                      let at2 : Scalar =
+                        s.at + (Math.hash ~seed:seed ~i:i * 2.0 - 1.0)
+                                 * spread in
+                      { s with at = if at2 < 0.0 then 0.0 else at2 })
+                ~xs:p.steps } ;;
+  (* `shuffle`, not `swing`: Tempo.swing stays for Timestamp lists (the
+     module's name-dodging convention). Steps landing on odd multiples
+     of `grid` beats displace later by grid * amount. *)
+  let shuffle ~p:Phrase ~grid:Scalar ~amount:Scalar : Phrase =
     { steps = List.map
                 ~f:(fun s:Step ->
-                      { note = s.note; at = s.at; len = s.len;
-                        vel = f s.vel })
+                      let q : Scalar = s.at / grid in
+                      let k : Int = Math.round ~x:q in
+                      let near : Scalar =
+                        Math.abs ~x:(q - Math.to_scalar k) in
+                      if Scale.wrap_rem ~n:k ~k:2 == 1 && near < 0.000001
+                      then { s with at = s.at + grid * amount }
+                      else s)
                 ~xs:p.steps } ;;
   (* Articulation: `staccato` shortens every note by a ratio of its
      written length; `legato` stretches each one to the next attack,
-     leaving the last as written. *)
+     leaving the last as written. (legato's next-attack search is a
+     fold per step - quadratic, and fine at musical sizes.) *)
   let staccato ~p:Phrase ~ratio:Scalar : Phrase =
-    { steps = List.map
-                ~f:(fun s:Step ->
-                      { note = s.note; at = s.at; len = s.len * ratio;
-                        vel = s.vel })
-                ~xs:p.steps } ;;
+    { steps = List.map ~f:(fun s:Step -> { s with len = s.len * ratio })
+                       ~xs:p.steps } ;;
   let legato ~p:Phrase : Phrase =
     { steps = List.map
                 ~f:(fun s:Step ->
@@ -735,24 +1065,29 @@ module Score = struct
                                 if o.at > s.at && (acc <= s.at || o.at < acc)
                                 then o.at else acc)
                           ~init:s.at ~xs:p.steps in
-                      { note = s.note; at = s.at;
-                        len = if nxt > s.at then nxt - s.at else s.len;
-                        vel = s.vel })
+                      { s with len = if nxt > s.at then nxt - s.at
+                                     else s.len })
                 ~xs:p.steps } ;;
 
   (* --- The bridge to audio --------------------------------------------
-     `realize` is where beats become Timestamps and notes become
-     frequencies, so it names both a tempo and a temperament and
-     everything downstream is plain numbers. *)
-  let realize ~tempo:Tempo.Tempo ~tuning:Pitch.Tuning ~p:Phrase
-      : Event list =
+     `realize_with` is where beats become Timestamps and notes become
+     frequencies, against *any* note -> frequency mapping - scordatura,
+     a well-temperament table, a step_hz-backed n /= 12 ladder are one
+     lambda away, and Score never learns about tuning. `realize` is the
+     sugar for the common case. Per-step `bend` applies here through
+     Pitch.cents (a bend of 0.0 multiplies by exactly 1.0). *)
+  let realize_with ~tempo:Tempo.Tempo ~pitch:(Pitch.Note -> Scalar)
+      ~p:Phrase : Event list =
     List.map
       ~f:(fun s:Step ->
-            { freq = Pitch.hz ~t:tuning ~note:s.note;
+            { freq = pitch s.note * Pitch.cents ~n:s.bend;
               at = Tempo.beats ~t:tempo ~n:s.at;
               dur = Tempo.beats ~t:tempo ~n:s.len;
               vel = s.vel })
       ~xs:p.steps ;;
+  let realize ~tempo:Tempo.Tempo ~tuning:Pitch.Tuning ~p:Phrase
+      : Event list =
+    realize_with ~tempo:tempo ~pitch:(Pitch.hz ~t:tuning) ~p:p ;;
   (* A voice is a function of frequency, duration and velocity: it is
      handed how long the note is meant to sound, which is what a
      pre-baked fixed-length sample cannot express. Like place_multi,
@@ -773,4 +1108,186 @@ module Score = struct
                   ~f:(fun e:Event ->
                         Arrange.place ~sample:(voice e.vel) ~at:e.at)
                   ~xs:events) ;;
+end ;;
+
+(* --- Mix: the stereo and bus vocabulary - written in SynthGraph -------
+   The musical layer above channels/mix_all (which stay in Arrange
+   untouched): panning, weighted mixes, decibel gains, bus automation
+   and the grid sidechain. *)
+
+module Mix = struct
+  (* Equal-power pan: pos runs -1 (left) .. +1 (right). *)
+  let pan ~pos:Scalar ~input:Scalar Signal : Vector Signal =
+    Arrange.channels
+      ~chans:[input * Math.sqrt ~x:((1.0 - pos) * 0.5);
+              input * Math.sqrt ~x:((1.0 + pos) * 0.5)] ;;
+  (* The same law with the position automated - autopans, Doppler
+     sweeps. *)
+  let pan_sig ~pos:Scalar Signal ~input:Scalar Signal : Vector Signal =
+    Arrange.channels
+      ~chans:[input * Math.sqrt ~x:((1.0 - pos) * 0.5);
+              input * Math.sqrt ~x:((1.0 + pos) * 0.5)] ;;
+  (* Weighted mix: the gains stay readable next to their parts, and
+     with `db` they read as decibels - mix [(db (-6.0), drums); ...]. *)
+  let mix ~parts:(Scalar, 'a Signal) list : 'a Signal =
+    Arrange.mix_all
+      ~signals:(List.map
+                  ~f:(fun part:(Scalar, 'a Signal) ->
+                        let (g, s) : (Scalar, 'a Signal) = part in s * g)
+                  ~xs:parts) ;;
+  (* Decibels, reachable from mixing code without open Core.Score. *)
+  let db ~x:Scalar : Scalar = Score.db ~x:x ;;
+  let gain_db ~x:Scalar ~input:'a Signal : 'a Signal =
+    input * db ~x:x ;;
+  (* Mono gain over any bus: the operator table's broadcast row, named.
+     Fading a Vector master with an envelope is vca ~gain:env. *)
+  let vca ~gain:Scalar Signal ~input:'a Signal : 'a Signal =
+    input * gain ;;
+  (* Grid sidechain: a 1 -> 1-depth -> 1 dip placed at every timestamp,
+     multiplied onto the bus - pumping pads under a four-floor kick, no
+     envelope follower needed (program-dependent sidechaining is
+     Fx.follow + vca). Overlapping dips sum; keep depth * overlaps
+     under 1. *)
+  let duck ~ats:Timestamp list ~depth:Scalar ~dip:Timestamp
+      ~recover:Timestamp ~input:'a Signal : 'a Signal =
+    let shape : Scalar Signal =
+      Fx.adsr ~attack:0s ~decay:0s ~sustain:1.0 ~release:recover
+              ~hold:dip in
+    let dips : Scalar Signal =
+      Arrange.place_multi
+        ~sample:(Arrange.sample ~signal:shape ~from:0s
+                                ~to:(dip + recover))
+        ~ats:ats in
+    vca ~gain:(1.0 - dips * depth) ~input:input ;;
+end ;;
+
+(* --- Str: computed names (str.cpp) ------------------------------------
+   Two functions, one workflow: computed render-target names
+   (cat "section-" (of_int i), iterated with List.iter). Deliberately
+   not a string library - anything more waits for a real need. *)
+
+module Str = struct
+  let cat ~a:String ~b:String : String = external "str.cpp" ;;
+  let of_int ~n:Int : String = external "str.cpp" ;;
+end ;;
+
+(* --- Dsp: the signal-tier prelude -------------------------------------
+   One view re-exporting the sound-design working set under bare names,
+   so the standard preamble becomes `open Core open Core.Dsp`. The
+   submodules above stay the canonical, documented homes; this is a
+   working-file convenience. Deliberately excluded: Io (rare), the
+   stems renders (arrangement-file vocabulary), and all of
+   Pitch/Tempo/Scale/Score - their opens are meaningful decisions. *)
+
+module Dsp = struct
+  (* oscillators & modulation *)
+  let sine ~freq:Scalar : Scalar Signal = Osc.sine ~freq:freq ;;
+  let saw ~freq:Scalar : Scalar Signal = Osc.saw ~freq:freq ;;
+  let square ~freq:Scalar : Scalar Signal = Osc.square ~freq:freq ;;
+  let saw_bl ~freq:Scalar : Scalar Signal = Osc.saw_bl ~freq:freq ;;
+  let square_bl ~freq:Scalar : Scalar Signal =
+    Osc.square_bl ~freq:freq ;;
+  let noise ~freq:Scalar : Scalar Signal = Osc.noise ~freq:freq ;;
+  let fm ~carrier:Scalar ~modulator:Scalar Signal : Scalar Signal =
+    Osc.fm ~carrier:carrier ~modulator:modulator ;;
+  let pm ~carrier:Scalar ~modulator:Scalar Signal : Scalar Signal =
+    Osc.pm ~carrier:carrier ~modulator:modulator ;;
+  let am ~carrier:'a Signal ~modulator:Scalar Signal ~depth:Scalar
+      : 'a Signal =
+    Osc.am ~carrier:carrier ~modulator:modulator ~depth:depth ;;
+  (* envelopes, filters, distortion, time effects *)
+  let exp_decay ~rate:Scalar : Scalar Signal = Fx.exp_decay ~rate:rate ;;
+  let adsr ~attack:Timestamp ~decay:Timestamp ~sustain:Scalar
+      ~release:Timestamp ~hold:Timestamp : Scalar Signal =
+    Fx.adsr ~attack:attack ~decay:decay ~sustain:sustain
+            ~release:release ~hold:hold ;;
+  let lowpass ~cutoff:Scalar ~input:'a Signal : 'a Signal =
+    Fx.lowpass ~cutoff:cutoff ~input:input ;;
+  let highpass ~cutoff:Scalar ~input:'a Signal : 'a Signal =
+    Fx.highpass ~cutoff:cutoff ~input:input ;;
+  let lowpass_mod ~cutoff:Scalar Signal ~input:'a Signal : 'a Signal =
+    Fx.lowpass_mod ~cutoff:cutoff ~input:input ;;
+  let highpass_mod ~cutoff:Scalar Signal ~input:'a Signal : 'a Signal =
+    Fx.highpass_mod ~cutoff:cutoff ~input:input ;;
+  let resonant ~cutoff:Scalar Signal ~q:Scalar ~input:'a Signal
+      : 'a Signal = Fx.resonant ~cutoff:cutoff ~q:q ~input:input ;;
+  let follow ~attack:Timestamp ~release:Timestamp ~input:Scalar Signal
+      : Scalar Signal =
+    Fx.follow ~attack:attack ~release:release ~input:input ;;
+  let hard_clip ~threshold:Scalar ~input:'a Signal : 'a Signal =
+    Fx.hard_clip ~threshold:threshold ~input:input ;;
+  let soft_clip ~threshold:Scalar ~input:'a Signal : 'a Signal =
+    Fx.soft_clip ~threshold:threshold ~input:input ;;
+  let delay ~by:Timestamp ~signal:'a Signal : 'a Signal =
+    Fx.delay ~by:by ~signal:signal ;;
+  let feedback ~by:Timestamp ~gain:Scalar ~input:'a Signal : 'a Signal =
+    Fx.feedback ~by:by ~gain:gain ~input:input ;;
+  let resample ~input:'a Signal ~f:(Scalar -> Scalar) : 'a Signal =
+    Fx.resample ~input:input ~f:f ;;
+  let reverb ~decay:Timestamp ~damping:Scalar ~mix:Scalar
+      ~input:'a Signal : 'a Signal =
+    Fx.reverb ~decay:decay ~damping:damping ~mix:mix ~input:input ;;
+  let gated ~attack:Timestamp ~decay:Timestamp ~sustain:Scalar
+      ~release:Timestamp ~hold:Timestamp ~input:Scalar Signal
+      : Scalar Sample =
+    Fx.gated ~attack:attack ~decay:decay ~sustain:sustain
+             ~release:release ~hold:hold ~input:input ;;
+  let echoes ~by:Timestamp ~gain:Scalar ~n:Int ~input:'a Signal
+      : 'a Signal = Fx.echoes ~by:by ~gain:gain ~n:n ~input:input ;;
+  (* arrangement *)
+  let mix_all ~signals:'a Signal list : 'a Signal =
+    Arrange.mix_all ~signals:signals ;;
+  let channels ~chans:Scalar Signal list : Vector Signal =
+    Arrange.channels ~chans:chans ;;
+  let channel ~n:Int ~input:Vector Signal : Scalar Signal =
+    Arrange.channel ~n:n ~input:input ;;
+  let sample ~signal:'a Signal ~from:Timestamp ~to:Timestamp : 'a Sample =
+    Arrange.sample ~signal:signal ~from:from ~to:to ;;
+  let place ~sample:'a Sample ~at:Timestamp : 'a Signal =
+    Arrange.place ~sample:sample ~at:at ;;
+  let place_multi ~sample:'a Sample ~ats:Timestamp list : 'a Signal =
+    Arrange.place_multi ~sample:sample ~ats:ats ;;
+  (* signal constructors *)
+  let constant ~value:Scalar : Scalar Signal = Sig.constant ~value:value ;;
+  let constant_multi ~levels:Scalar list : Vector Signal =
+    Sig.constant_multi ~levels:levels ;;
+  let time : Scalar Signal = Sig.time ;;
+  let signal ~f:(Scalar -> Scalar) : Scalar Signal = Sig.signal ~f:f ;;
+  let signal_multi ~fs:(Scalar -> Scalar) list : Vector Signal =
+    Sig.signal_multi ~fs:fs ;;
+  let select ~gate:Scalar Signal ~threshold:Scalar ~above:'a Signal
+      ~below:'a Signal : 'a Signal =
+    Sig.select ~gate:gate ~threshold:threshold ~above:above ~below:below ;;
+  (* renders *)
+  let render ~name:String ~rate:Scalar ~sample:'a Sample : unit =
+    Render.render ~name:name ~rate:rate ~sample:sample ;;
+  let render_vis ~name:String ~rate:Scalar ~sample:'a Sample : unit =
+    Render.render_vis ~name:name ~rate:rate ~sample:sample ;;
+  (* time conversions *)
+  let to_sec ~x:Scalar : Timestamp = Time.to_sec ~x:x ;;
+  let to_ms ~x:Scalar : Timestamp = Time.to_ms ~x:x ;;
+  let to_min ~x:Scalar : Timestamp = Time.to_min ~x:x ;;
+  (* the Math family *)
+  let exp ~x:'a : 'a = Math.exp ~x:x ;;
+  let sqrt ~x:'a : 'a = Math.sqrt ~x:x ;;
+  let log ~x:'a : 'a = Math.log ~x:x ;;
+  let pow ~x:'a ~y:Scalar : 'a = Math.pow ~x:x ~y:y ;;
+  let sin ~x:'a : 'a = Math.sin ~x:x ;;
+  let cos ~x:'a : 'a = Math.cos ~x:x ;;
+  let tan ~x:'a : 'a = Math.tan ~x:x ;;
+  let atan ~x:'a : 'a = Math.atan ~x:x ;;
+  let abs ~x:'a : 'a = Math.abs ~x:x ;;
+  let pi : Scalar = Math.pi ;;
+  let min ~a:Scalar ~b:Scalar : Scalar = Math.min ~a:a ~b:b ;;
+  let max ~a:Scalar ~b:Scalar : Scalar = Math.max ~a:a ~b:b ;;
+  let clamp ~lo:Scalar ~hi:Scalar ~x:Scalar : Scalar =
+    Math.clamp ~lo:lo ~hi:hi ~x:x ;;
+  let lerp ~a:Scalar ~b:Scalar ~t:Scalar : Scalar =
+    Math.lerp ~a:a ~b:b ~t:t ;;
+  let hash ~seed:Scalar ~i:Int : Scalar = Math.hash ~seed:seed ~i:i ;;
+  let to_scalar ~n:Int : Scalar = Math.to_scalar ~n:n ;;
+  let round ~x:Scalar : Int = Math.round ~x:x ;;
+  let floor ~x:Scalar : Int = Math.floor ~x:x ;;
+  let ceil ~x:Scalar : Int = Math.ceil ~x:x ;;
+  let not ~b:Bool : Bool = Math.not ~b:b ;;
 end ;;

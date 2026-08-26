@@ -39,6 +39,10 @@ struct DiagnosticBag {
   void error(std::string file, Span span, std::string msg) {
     items.push_back({Severity::Error, std::move(file), span, std::move(msg)});
   }
+  void warning(std::string file, Span span, std::string msg) {
+    items.push_back(
+        {Severity::Warning, std::move(file), span, std::move(msg)});
+  }
   void projectError(std::string msg) {
     items.push_back({Severity::Error, {}, {}, std::move(msg)});
   }

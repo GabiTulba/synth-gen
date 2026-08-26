@@ -77,6 +77,10 @@ struct ModuleLoadContext {
   // absolute path: a file present here is read from the map instead of
   // disk. The LSP server uses this to check unsaved editor buffers.
   const std::map<std::string, std::string>* overlay = nullptr;
+  // Warn on `open`s that bind nothing the file uses. Only the root
+  // files themselves are checked (imports stay quiet); `synthc lint`
+  // sets this.
+  bool warnUnusedOpens = false;
 };
 
 // Loads, parses and type-checks `rootFiles` plus everything they import.

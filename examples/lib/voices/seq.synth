@@ -1,41 +1,22 @@
-(* Sequencing helpers: a hit repeated on a regular grid, straight
-   (`pattern`) or with humanizing timing jitter (`humanized`). The hit is
-   an 'a Sample - the grid does not care whether it places mono or
-   multi-channel material, so the signatures say so.
-
-   The timing feel is a variant: one grid builder matches on it, and
-   the two public entry points are thin wrappers over the two shapes. *)
+(* Sequencing helpers - now thin, deprecated wrappers over Core.Groove,
+   where the idiom was promoted. Groove.pattern/humanized take the step
+   *list* itself, which composes with Tempo.grid, Tempo.swing,
+   Time.jitter, Groove.mask and Groove.euclid; these wrappers keep the
+   old grid-shaped signatures alive for one release of the examples and
+   then go away - write new code against Core.Groove. *)
 
 open Core
-open Core.Osc
-open Core.Fx
-open Core.Arrange
-open Core.Render
-open Core.Io
 open Core.Time
-open Core.Sig
-open Core.Math
-
-type Feel = | Straight | Humanized of (Scalar, Timestamp) ;;
-
-let steps ~start:Timestamp ~step:Timestamp ~count:Int ~feel:Feel
-    : Timestamp list =
-  let grid : Timestamp list =
-    time_steps ~start:start ~step:step ~count:count in
-  match feel with
-  | Straight -> grid
-  | Humanized (seed, spread) ->
-      jitter ~seed:seed ~spread:spread ~steps:grid
-;;
 
 let pattern hit:'a Sample ~start:Timestamp ~step:Timestamp ~count:Int
     : 'a Signal =
-  place_multi hit (steps ~start:start ~step:step ~count:count
-                     ~feel:Straight)
+  Groove.pattern ~hit:hit
+                 ~steps:(time_steps ~start:start ~step:step ~count:count)
 ;;
 
 let humanized hit:'a Sample ~start:Timestamp ~step:Timestamp
               ~count:Int ~seed:Scalar ~spread:Timestamp : 'a Signal =
-  place_multi hit (steps ~start:start ~step:step ~count:count
-                     ~feel:(Humanized (seed, spread)))
+  Groove.humanized ~hit:hit
+                   ~steps:(time_steps ~start:start ~step:step ~count:count)
+                   ~seed:seed ~spread:spread
 ;;

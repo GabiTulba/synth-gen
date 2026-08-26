@@ -44,8 +44,10 @@ class ModuleChecker {
   // declaration's parameters against a use site's arguments - would
   // conflate them.
   ModuleChecker(CheckedModule& mod, const Program& prog,
-                DiagnosticBag& diags, int& typeVarSeq)
-      : mod_(mod), prog_(prog), diags_(diags), typeVarSeq_(typeVarSeq) {}
+                DiagnosticBag& diags, int& typeVarSeq,
+                bool warnUnusedOpens = false)
+      : mod_(mod), prog_(prog), diags_(diags), typeVarSeq_(typeVarSeq),
+        warnUnusedOpens_(warnUnusedOpens) {}
 
   void run() {
     frames_.emplace_back();  // the file-level scope
@@ -56,11 +58,20 @@ class ModuleChecker {
     // seed there.
     for (const char* name : {"list", "Signal", "Sample"}) {
       if (const TypeDecl* d = coreDecl(name)) {
-        frames_.back().types[name] = d;
+        frames_.back().types[name] = {d, nullptr};
         bindDeclCtors(frames_.back(), d);
       }
     }
     checkDefs(mod_.parsed.defs, "");
+    // The lint aid against the cargo-culted preamble: an `open` none of
+    // whose bindings (values, types, constructors, or the module name
+    // itself) resolved anything in this file is noise for the reader.
+    if (warnUnusedOpens_)
+      for (const TopDef* open : allOpens_)
+        if (!usedOpens_.count(open))
+          diags_.warning(mod_.parsed.path, open->span,
+                         "unused open: nothing from '" + open->moduleName +
+                             "' is used by this file");
   }
 
  private:
@@ -68,16 +79,29 @@ class ModuleChecker {
   const Program& prog_;
   DiagnosticBag& diags_;
   int& typeVarSeq_;
+  bool warnUnusedOpens_ = false;
+  // Every successfully resolved `open`, in order, and the ones some
+  // lookup actually went through. Lookups are const, so the used-set is
+  // mutable.
+  std::vector<const TopDef*> allOpens_;
+  mutable std::set<const TopDef*> usedOpens_;
+
+  void markOpenUsed(const TopDef* origin) const {
+    if (origin) usedOpens_.insert(origin);
+  }
 
   // One lexical scope layer: the file's top level, or one `struct` body.
   // Lookup runs innermost frame outward; within a frame, later writes
   // overwrite earlier ones, which is exactly position-ordered shadowing.
+  // Entries carry the `open` that injected them (null for every other
+  // binder) so lint can tell which opens earned their keep.
   struct ScopeVal {
     TypePtr type;
     std::string moduleId;    // canonical id of the module storing it;
                              // "" = this module
     std::string storedName;  // its key there: dotted for inline-module
                              // members ("A.x"), bare otherwise
+    const TopDef* fromOpen = nullptr;
   };
   // A module name in scope: a whole file module/library (prefix empty),
   // or an inline module - the dotted path `prefix` inside `moduleId`
@@ -85,22 +109,35 @@ class ModuleChecker {
   struct ModRef {
     std::string moduleId;
     std::string prefix;
+    const TopDef* fromOpen = nullptr;
+  };
+  struct TypeRef {
+    const TypeDecl* decl = nullptr;
+    const TopDef* fromOpen = nullptr;
+  };
+  struct CtorRef {
+    const TypeDecl* decl = nullptr;
+    int index = 0;
+    const TopDef* fromOpen = nullptr;
   };
   struct Frame {
     std::map<std::string, ScopeVal> values;
     std::map<std::string, ModRef> modules;
     // Type declarations in scope, by surface name. Same position-ordered
     // shadowing as values.
-    std::map<std::string, const TypeDecl*> types;
+    std::map<std::string, TypeRef> types;
     // Variant constructors in scope: name -> (declaration, index).
-    std::map<std::string, std::pair<const TypeDecl*, int>> ctors;
+    std::map<std::string, CtorRef> ctors;
   };
   std::vector<Frame> frames_;
 
   const TypeDecl* lookupTypeDecl(const std::string& name) const {
     for (auto it = frames_.rbegin(); it != frames_.rend(); ++it) {
       auto v = it->types.find(name);
-      if (v != it->types.end()) return v->second;
+      if (v != it->types.end()) {
+        markOpenUsed(v->second.fromOpen);
+        return v->second.decl;
+      }
     }
     return nullptr;
   }
@@ -122,24 +159,30 @@ class ModuleChecker {
     return t->kind == Type::Kind::Named && t->decl == coreDecl("Signal");
   }
 
-  const std::pair<const TypeDecl*, int>* lookupCtor(
-      const std::string& name) const {
+  const CtorRef* lookupCtor(const std::string& name) const {
     for (auto it = frames_.rbegin(); it != frames_.rend(); ++it) {
       auto v = it->ctors.find(name);
-      if (v != it->ctors.end()) return &v->second;
+      if (v != it->ctors.end()) {
+        markOpenUsed(v->second.fromOpen);
+        return &v->second;
+      }
     }
     return nullptr;
   }
 
-  static void bindDeclCtors(Frame& frame, const TypeDecl* decl) {
+  static void bindDeclCtors(Frame& frame, const TypeDecl* decl,
+                            const TopDef* fromOpen = nullptr) {
     for (size_t i = 0; i < decl->ctors.size(); i++)
-      frame.ctors[decl->ctors[i].name] = {decl, (int)i};
+      frame.ctors[decl->ctors[i].name] = {decl, (int)i, fromOpen};
   }
 
   const ScopeVal* lookupValue(const std::string& name) const {
     for (auto it = frames_.rbegin(); it != frames_.rend(); ++it) {
       auto v = it->values.find(name);
-      if (v != it->values.end()) return &v->second;
+      if (v != it->values.end()) {
+        markOpenUsed(v->second.fromOpen);
+        return &v->second;
+      }
     }
     return nullptr;
   }
@@ -232,7 +275,7 @@ class ModuleChecker {
     // refer to itself. Registration is what makes it visible to later
     // definitions, too (shadowing any opened name, like a let).
     mod_.typeDecls[stored] = decl;
-    frames_.back().types[def.name] = decl.get();
+    frames_.back().types[def.name] = {decl.get(), nullptr};
     // Members may only use the declared parameters - a stray 'c in a
     // field has no meaning at any use site.
     declTypeVarsOnly_ = true;
@@ -440,7 +483,9 @@ class ModuleChecker {
         // signature. Like a parameter, it is NOT instantiated: inside
         // the body its 'a stays rigid (no polymorphic recursion).
         if (!def.retType)
-          fail(def.span, "missing return type annotation");
+          fail(def.span, "missing return type annotation ('let rec' must "
+                         "declare its return type; the recursive name is "
+                         "in scope in its own body at that type)");
         if (env.count(def.name))
           fail(def.span, "a parameter of '" + def.name +
                              "' shadows the recursive name itself");
@@ -466,22 +511,35 @@ class ModuleChecker {
                    typeName(bodyType) + "); only render produces unit");
         return;
       }
-      if (!def.retType) fail(def.span, "missing return type annotation");
-      // A partial application of a polymorphic primitive leaves free type
-      // variables in the body type, which the declared annotation resolves;
-      // a body built from this definition's own 'a carries rigid ones,
-      // which unify only against the same variable in the annotation.
-      bool matches;
-      if (containsAnyVar(bodyType)) {
-        Subst subst;
-        matches = unify(bodyType, def.retType, subst);
+      if (!def.retType) {
+        // Local inference: an unannotated binding takes its body's
+        // synthesized type. A leftover *free* variable means nothing in
+        // the body determined it (an un-pinned partial application, an
+        // empty list) - the annotation is then genuinely needed.
+        if (containsFreeVar(bodyType))
+          fail(def.body->span,
+               "cannot infer the type of '" + def.name +
+                   "' (the body leaves a type undetermined); annotate "
+                   "the return type");
+        def.retType = bodyType;
       } else {
-        matches = typeEquals(bodyType, def.retType);
+        // A partial application of a polymorphic primitive leaves free
+        // type variables in the body type, which the declared annotation
+        // resolves; a body built from this definition's own 'a carries
+        // rigid ones, which unify only against the same variable in the
+        // annotation.
+        bool matches;
+        if (containsAnyVar(bodyType)) {
+          Subst subst;
+          matches = unify(bodyType, def.retType, subst);
+        } else {
+          matches = typeEquals(bodyType, def.retType);
+        }
+        if (!matches)
+          fail(def.body->span, "body has type " + typeName(bodyType) +
+                                   " but the signature declares " +
+                                   typeName(def.retType));
       }
-      if (!matches)
-        fail(def.body->span, "body has type " + typeName(bodyType) +
-                                 " but the signature declares " +
-                                 typeName(def.retType));
       if (mod_.defTypes.count(stored))
         fail(def.span, "duplicate definition of '" + stored + "'");
       mod_.defTypes[stored] = def.params.empty() ? def.retType
@@ -548,7 +606,8 @@ class ModuleChecker {
     std::set<std::string> want(e.argLabels.begin(), e.argLabels.end());
     for (auto it = frames_.rbegin(); it != frames_.rend(); ++it) {
       const TypeDecl* found = nullptr;
-      for (auto& [name, decl] : it->types) {
+      for (auto& [name, tref] : it->types) {
+        const TypeDecl* decl = tref.decl;
         if (decl->flavor != TypeDecl::Flavor::Record) continue;
         if (decl->fields.size() != want.size()) continue;
         bool all = true;
@@ -564,6 +623,7 @@ class ModuleChecker {
                            "'; annotate the binding or qualify a field "
                            "through an update ({ base with ... })");
         found = decl;
+        markOpenUsed(tref.fromOpen);
       }
       if (found) return found;
     }
@@ -581,7 +641,7 @@ class ModuleChecker {
                                               const std::string& name,
                                               Span span) {
     if (moduleName.empty()) {
-      if (const auto* c = lookupCtor(name)) return *c;
+      if (const auto* c = lookupCtor(name)) return {c->decl, c->index};
       fail(span, "unknown constructor '" + name + "'");
     }
     ModRef r = resolveModulePath(moduleName, span);
@@ -1241,20 +1301,32 @@ class ModuleChecker {
           if (hadRec) env[e.name] = *savedRec;
           else env.erase(e.name);
         }
-        // Same rule as top-level bindings: a var-carrying partial
-        // application resolves against the annotation.
-        bool ok;
-        if (containsAnyVar(boundT)) {
-          Subst subst;
-          ok = unify(boundT, e.declType, subst);
+        if (!e.declType) {
+          // Local inference: an unannotated `let ... in` takes the bound
+          // expression's synthesized type. A leftover free variable
+          // means nothing determined it, and the annotation is needed.
+          if (containsFreeVar(boundT))
+            fail(e.items[0]->span,
+                 "cannot infer the type of '" + e.name +
+                     "' (the bound expression leaves a type "
+                     "undetermined); annotate the binding");
+          e.declType = boundT;
         } else {
-          ok = typeEquals(boundT, e.declType);
+          // Same rule as top-level bindings: a var-carrying partial
+          // application resolves against the annotation.
+          bool ok;
+          if (containsAnyVar(boundT)) {
+            Subst subst;
+            ok = unify(boundT, e.declType, subst);
+          } else {
+            ok = typeEquals(boundT, e.declType);
+          }
+          if (!ok)
+            fail(e.items[0]->span,
+                 "local binding '" + e.name + "' has type " +
+                     typeName(boundT) + " but is annotated as " +
+                     typeName(e.declType));
         }
-        if (!ok)
-          fail(e.items[0]->span,
-               "local binding '" + e.name + "' has type " +
-                   typeName(boundT) + " but is annotated as " +
-                   typeName(e.declType));
         // Bind (shadowing whatever was visible), check the body, restore.
         auto prev = env.find(e.name);
         std::optional<TypePtr> saved;
@@ -1318,18 +1390,24 @@ class ModuleChecker {
         return instantiate(v->type);
       }
       // Not in scope. If the bundled Core library has it (in some
-      // submodule), say exactly how to reach it.
+      // submodule), say exactly how to reach it. The Dsp prelude is a
+      // view over the other submodules, so the hint prefers the
+      // canonical home.
       if (const CheckedModule* core = prog_.find("Core")) {
         std::string suffix = "." + e.name;
+        std::string found;
         for (auto& [stored, type] : core->defTypes) {
           if (stored.size() <= suffix.size() ||
               stored.compare(stored.size() - suffix.size(), suffix.size(),
                              suffix) != 0)
             continue;
-          std::string sub = stored.substr(0, stored.size() - suffix.size());
+          if (found.empty() || found.rfind("Dsp.", 0) == 0) found = stored;
+        }
+        if (!found.empty()) {
+          std::string sub = found.substr(0, found.size() - suffix.size());
           fail(e.span, "unknown name '" + e.name + "' (a Core primitive: "
                            "'open Core." + sub + "', or 'import Core' and "
-                           "write Core." + stored + ")");
+                           "write Core." + found + ")");
         }
       }
       fail(e.span, "unknown name '" + e.name + "'");
@@ -1378,10 +1456,14 @@ class ModuleChecker {
     try {
       ModRef r =
           resolveModulePath(def.moduleName, def.span, /*mentionTarget=*/true);
+      // A resolved open is a lint candidate: report it if nothing it
+      // binds is ever looked up through it.
+      allOpens_.push_back(&def);
       // Opening also (re)binds the opened module's own name at this
       // position: after `open Fx`, `Fx.x` means the module just opened,
       // whatever earlier binders said.
       std::vector<std::string> segs = splitPath(def.moduleName);
+      r.fromOpen = &def;
       frames_.back().modules[segs.back()] = r;
       const CheckedModule* host = &mod_;
       if (!r.moduleId.empty()) {
@@ -1398,16 +1480,17 @@ class ModuleChecker {
         for (auto& [name, type] : host->defTypes)
           if (name.rfind(pre, 0) == 0 &&
               name.find('.', pre.size()) == std::string::npos)
-            frame.values[name.substr(pre.size())] = {type, r.moduleId, name};
+            frame.values[name.substr(pre.size())] =
+                {type, r.moduleId, name, &def};
         for (auto& p : host->inlineModules)
           if (p.rfind(pre, 0) == 0 &&
               p.find('.', pre.size()) == std::string::npos)
-            frame.modules[p.substr(pre.size())] = {r.moduleId, p};
+            frame.modules[p.substr(pre.size())] = {r.moduleId, p, &def};
         for (auto& [name, decl] : host->typeDecls)
           if (name.rfind(pre, 0) == 0 &&
               name.find('.', pre.size()) == std::string::npos) {
-            frame.types[name.substr(pre.size())] = decl.get();
-            bindDeclCtors(frame, decl.get());
+            frame.types[name.substr(pre.size())] = {decl.get(), &def};
+            bindDeclCtors(frame, decl.get(), &def);
           }
         return;
       }
@@ -1415,18 +1498,18 @@ class ModuleChecker {
         // Dotted names belong to the module's inline modules; those come
         // along as module names below, not as bare values.
         if (name.find('.') != std::string::npos) continue;
-        frame.values[name] = {type, r.moduleId, name};
+        frame.values[name] = {type, r.moduleId, name, &def};
       }
       for (auto& p : host->inlineModules)
         if (p.find('.') == std::string::npos)
-          frame.modules[p] = {r.moduleId, p};
+          frame.modules[p] = {r.moduleId, p, &def};
       for (auto& [name, decl] : host->typeDecls)
         if (name.find('.') == std::string::npos) {
-          frame.types[name] = decl.get();
-          bindDeclCtors(frame, decl.get());
+          frame.types[name] = {decl.get(), &def};
+          bindDeclCtors(frame, decl.get(), &def);
         }
       for (auto& [name, target] : host->exportedModules)
-        frame.modules[name] = {target, ""};
+        frame.modules[name] = {target, "", &def};
     } catch (const Abort&) {
       // Diagnostic recorded; later defs check against the scope so far.
     }
@@ -1502,6 +1585,7 @@ class ModuleChecker {
     for (auto it = frames_.rbegin(); !found && it != frames_.rend(); ++it) {
       auto m = it->modules.find(segs[0]);
       if (m != it->modules.end()) {
+        markOpenUsed(m->second.fromOpen);
         cur = m->second;
         found = true;
       }
@@ -1886,10 +1970,16 @@ class ModuleChecker {
         (is(l, K::Scalar) && is(r, K::Vector)))
       return tVector();
     if (isSignalType(l) && isSignalType(r)) {
-      if (!typeEquals(l->items[0], r->items[0]))
-        fail(e.span, "cannot combine " + typeName(l) + " with " + typeName(r) +
-                         " (element types differ)");
-      return l;
+      if (typeEquals(l->items[0], r->items[0])) return l;
+      // The mono broadcast row: a Scalar Signal lifts across the other
+      // side's channels, mirroring the Scalar broadcast row and am's
+      // mono-modulator rule - `bus * envelope` works on any bus. The
+      // Scalar side never decides the element type, so a rigid 'a Signal
+      // stays 'a Signal.
+      if (r->items[0]->kind == K::Scalar) return l;
+      if (l->items[0]->kind == K::Scalar) return r;
+      fail(e.span, "cannot combine " + typeName(l) + " with " + typeName(r) +
+                       " (element types differ)");
     }
     if (isSignalType(l) && is(r, K::Scalar)) return l;
     if (is(l, K::Scalar) && isSignalType(r)) return r;
@@ -2352,6 +2442,11 @@ Program checkProject(const std::vector<std::string>& rootFiles,
   // Rigid type-variable ids are unique across the whole program (see
   // ModuleChecker's constructor comment).
   int typeVarSeq = 0;
+  // Unused-open warnings apply to the files the caller named, never to
+  // what they import.
+  std::set<std::string> warnKeys;
+  if (ctx && ctx->warnUnusedOpens)
+    for (auto& f : rootFiles) warnKeys.insert(canonicalSourceKey(f));
   for (auto& name : order) {
     Loaded& l = byName.at(name);
     CheckedModule cm;
@@ -2361,7 +2456,10 @@ Program checkProject(const std::vector<std::string>& rootFiles,
     cm.libName = l.libName;
     cm.external = l.external;
     prog.modules.push_back(std::move(cm));
-    ModuleChecker(prog.modules.back(), prog, diags, typeVarSeq).run();
+    bool warn =
+        !warnKeys.empty() &&
+        warnKeys.count(canonicalSourceKey(prog.modules.back().parsed.path));
+    ModuleChecker(prog.modules.back(), prog, diags, typeVarSeq, warn).run();
   }
   return prog;
 }

@@ -3370,9 +3370,13 @@ let _ = render "rec" 48000.0 (sample out 0s 10ms) ;;
 }
 
 TEST(build_unbounded_recursion_is_diagnosed) {
+  // Non-tail runaway recursion trips the depth guard. (A *tail*-position
+  // runaway no longer grows the stack - tail calls are eliminated - and
+  // is caught by the tail loop's own, much larger iteration brake; that
+  // path is too slow to exercise in a unit test.)
   TempDir tp;
   tp.write("song.synth", R"(
-let rec loop n:Int : Int = loop (n + 1) ;;
+let rec loop n:Int : Int = 1 + loop (n + 1) ;;
 let x : Int = loop 0 ;;
 )");
   tp.write("build.json", projectManifest("loop-demo", {"song.synth"}));
@@ -3383,6 +3387,21 @@ let x : Int = loop 0 ;;
     if (d.message.find("recursion limit") != std::string::npos)
       found = true;
   CHECK(found);
+}
+
+TEST(build_tail_recursion_runs_at_constant_depth) {
+  // Tail-call elimination: an accumulator recursion far past the 4096
+  // frame guard evaluates fine - depth no longer scales with length.
+  TempDir tp;
+  tp.write("song.synth", R"(
+let rec count n:Int ~acc:Int : Int =
+  if n <= 0 then acc else count (n - 1) ~acc:(acc + 1) ;;
+let x : Int = count 50000 ~acc:0 ;;
+)");
+  tp.write("build.json", projectManifest("tail-demo", {"song.synth"}));
+  BuildResult r = buildProject(tp.dir.string());
+  for (auto& d : r.diags.items) std::cerr << d.message << "\n";
+  CHECK(r.ok);
 }
 
 TEST(build_deep_recursion_within_limit) {
@@ -3507,4 +3526,510 @@ let _ = render "w" 48000.0 (sample (place cut 50ms) 0s 200ms) ;;
   std::string b = slurp(direct.dir / "_build" / "artifacts" / "w.wav");
   CHECK(!a.empty());
   CHECK(a == b);
+}
+
+// --- The core-library review round: value pins for the new surface ---------
+
+namespace {
+// The claims fixture: `ok` folds every claim into one Bool, and the
+// artifact matches the 440 Hz reference only if all of them hold.
+void checkClaims(const std::string& prelude, const std::string& claims) {
+  TempDir derived, expected;
+  std::string src = prelude + "\nlet ok : Bool =\n" + claims + R"( ;;
+let _ = Core.Osc.sine (if ok then 440.0 else 1.0)
+  |> Core.Arrange.sample ~from:0s ~to:100ms
+  |> Core.Render.render ~name:"out" ~rate:8000.0 ;;
+)";
+  derived.write("c.synth", src);
+  derived.write("build.json", projectManifest("claims", {"c.synth"}));
+  expected.write("c.synth", R"(
+open Core
+let _ = Core.Osc.sine 440.0
+  |> Core.Arrange.sample ~from:0s ~to:100ms
+  |> Core.Render.render ~name:"out" ~rate:8000.0 ;;
+)");
+  expected.write("build.json", projectManifest("claims", {"c.synth"}));
+  BuildResult r = buildProject(derived.dir.string());
+  for (auto& d : r.diags.items) std::cerr << d.message << "\n";
+  CHECK(r.ok);
+  CHECK(buildProject(expected.dir.string()).ok);
+  std::string a = slurp(derived.dir / "_build" / "artifacts" / "out.wav");
+  std::string b = slurp(expected.dir / "_build" / "artifacts" / "out.wav");
+  CHECK(!a.empty());
+  CHECK(a == b);
+}
+
+// Two projects whose renders must be byte-identical.
+void checkSameBytes(const std::string& srcA, const std::string& srcB,
+                    const char* artifact) {
+  TempDir a, b;
+  a.write("x.synth", srcA);
+  a.write("build.json", projectManifest("same", {"x.synth"}));
+  b.write("x.synth", srcB);
+  b.write("build.json", projectManifest("same", {"x.synth"}));
+  BuildResult ra = buildProject(a.dir.string());
+  for (auto& d : ra.diags.items) std::cerr << d.message << "\n";
+  CHECK(ra.ok);
+  BuildResult rb = buildProject(b.dir.string());
+  for (auto& d : rb.diags.items) std::cerr << d.message << "\n";
+  CHECK(rb.ok);
+  std::string wa = slurp(a.dir / "_build" / "artifacts" / artifact);
+  std::string wb = slurp(b.dir / "_build" / "artifacts" / artifact);
+  CHECK(!wa.empty());
+  CHECK(wa == wb);
+}
+}  // namespace
+
+TEST(build_math_hash_is_jitter_in_the_value_domain) {
+  // hash and jitter share one splitmix64: a jittered step equals the
+  // step plus the hash-derived delta computed on the Scalar side, bit
+  // for bit. hash is uniform in [0, 1) and varies with the index.
+  checkClaims(R"(
+open Core open Core.Math open Core.Time
+let u0 : Scalar = hash ~seed:5.0 ~i:0 ;;
+let u1 : Scalar = hash ~seed:5.0 ~i:1 ;;
+let got : Timestamp =
+  List.nth ~xs:(jitter ~seed:5.0 ~spread:(to_sec 0.1) ~steps:[1s]) ~i:0
+           ~default:0s ;;
+)",
+              R"(got == to_sec (1.0 + (u0 * 2.0 - 1.0) * 0.1)
+  && u0 >= 0.0 && u0 < 1.0 && u1 >= 0.0 && u1 < 1.0
+  && u0 != u1
+  && hash ~seed:5.0 ~i:0 == u0
+  && hash ~seed:6.0 ~i:0 != u0)");
+}
+
+TEST(build_time_div_rem_values) {
+  checkClaims(R"(
+open Core open Core.Time
+)",
+              R"(div ~num:1s ~den:250ms == 4
+  && div ~num:(to_sec 0.9) ~den:250ms == 3
+  && rem ~num:(to_sec 0.9) ~den:250ms == to_sec (0.9 - 0.25 * 3.0)
+  && div ~num:0s ~den:1s == 0
+  && rem ~num:1s ~den:250ms == 0s)");
+}
+
+TEST(build_time_div_by_zero_is_a_diagnostic) {
+  TempDir tp;
+  tp.write("t.synth", R"(
+open Core open Core.Time
+let n : Int = div ~num:1s ~den:0s ;;
+)");
+  tp.write("build.json", projectManifest("divzero", {"t.synth"}));
+  BuildResult r = buildProject(tp.dir.string());
+  CHECK(!r.ok);
+  bool found = false;
+  for (auto& d : r.diags.items)
+    if (d.message.find("division by 0s") != std::string::npos) found = true;
+  CHECK(found);
+}
+
+TEST(build_tempo_additions_match_literals) {
+  // per_bar is meter-correct (compound included), bars/bar_beats are
+  // the derivations they replace, marks equals the hand-summed section
+  // starts, and swung_grid is exactly grid |> swing.
+  checkClaims(R"(
+open Core open Core.Tempo
+let t : Tempo = common ~bpm:120.0 ;;
+let c68 : Tempo = { bpm = 120.0; meter = { beats = 6; unit = 8 } } ;;
+let lm : Timestamp list = marks ~t:t ~bars:[8; 8; 12] ;;
+let sg : Timestamp list =
+  swung_grid ~t:t ~from:0s ~step:Eighth ~count:8 ~amount:0.33 ;;
+let byhand : Timestamp list =
+  grid ~t:t ~from:0s ~step:Eighth ~count:8
+    |> swing ~amount:0.33 ~step:(value ~t:t ~v:Eighth) ;;
+let nth_t xs:Timestamp list i:Int : Timestamp =
+  List.nth ~xs:xs ~i:i ~default:99s ;;
+)",
+              R"(per_bar ~t:t ~v:Sixteenth == 16
+  && per_bar ~t:t ~v:Quarter == 4
+  && per_bar ~t:c68 ~v:(Dotted Quarter) == 2
+  && bars ~t:t ~n:2.5 == bar ~t:t * 2.5
+  && bar_beats ~t:t ~n:8 == 32.0
+  && List.length ~xs:lm == 4
+  && nth_t lm 0 == 0s
+  && nth_t lm 1 == at ~t:t ~bar:8 ~beat:0.0
+  && nth_t lm 2 == at ~t:t ~bar:16 ~beat:0.0
+  && nth_t lm 3 == at ~t:t ~bar:28 ~beat:0.0
+  && nth_t sg 1 == nth_t byhand 1
+  && nth_t sg 2 == nth_t byhand 2
+  && nth_t sg 7 == nth_t byhand 7)");
+}
+
+TEST(build_groove_pattern_matches_place_multi) {
+  const char* derived = R"(
+open Core open Core.Osc open Core.Fx open Core.Arrange open Core.Render open Core.Time
+let hit : Scalar Sample = sample (sine 440.0 * exp_decay 20.0) 0s 100ms ;;
+let steps : Timestamp list = time_steps ~start:0s ~step:250ms ~count:4 ;;
+let a : Scalar Signal = Groove.pattern ~hit:hit ~steps:steps ;;
+let b : Scalar Signal =
+  Groove.humanized ~hit:hit ~steps:steps ~seed:3.0 ~spread:10ms ;;
+let _ = a + b |> sample ~from:0s ~to:2s |> render ~name:"out" ~rate:8000.0 ;;
+)";
+  const char* literal = R"(
+open Core open Core.Osc open Core.Fx open Core.Arrange open Core.Render open Core.Time
+let hit : Scalar Sample = sample (sine 440.0 * exp_decay 20.0) 0s 100ms ;;
+let steps : Timestamp list = time_steps ~start:0s ~step:250ms ~count:4 ;;
+let a : Scalar Signal = place_multi hit steps ;;
+let b : Scalar Signal =
+  place_multi hit (jitter ~seed:3.0 ~spread:10ms ~steps:steps) ;;
+let _ = a + b |> sample ~from:0s ~to:2s |> render ~name:"out" ~rate:8000.0 ;;
+)";
+  checkSameBytes(derived, literal, "out.wav");
+}
+
+TEST(build_groove_mask_and_euclid_select_the_right_steps) {
+  checkClaims(R"(
+open Core open Core.Time
+let g8 : Timestamp list = time_steps ~start:0s ~step:100ms ~count:8 ;;
+let g16 : Timestamp list = time_steps ~start:0s ~step:125ms ~count:16 ;;
+let row : Timestamp list =
+  Groove.mask ~keep:[true; false; false; true] ~steps:g8 ;;
+let e : Timestamp list = Groove.euclid ~hits:5 ~steps:g16 ;;
+let nth_t xs:Timestamp list i:Int : Timestamp =
+  List.nth ~xs:xs ~i:i ~default:99s ;;
+)",
+              R"(List.length ~xs:row == 4
+  && nth_t row 0 == nth_t g8 0
+  && nth_t row 1 == nth_t g8 3
+  && nth_t row 2 == nth_t g8 4
+  && nth_t row 3 == nth_t g8 7
+  && List.length ~xs:e == 5
+  && nth_t e 0 == nth_t g16 0
+  && nth_t e 1 == nth_t g16 4
+  && nth_t e 2 == nth_t g16 7
+  && nth_t e 3 == nth_t g16 10
+  && nth_t e 4 == nth_t g16 13
+  && List.length ~xs:(Groove.euclid ~hits:0 ~steps:g8) == 0
+  && List.length ~xs:(Groove.euclid ~hits:9 ~steps:g8) == 8
+  && List.length ~xs:(Groove.mask ~keep:[] ~steps:g8) == 8)");
+}
+
+TEST(build_scale_open_enums_and_prog_values) {
+  checkClaims(R"(
+open Core open Core.Pitch open Core.Scale
+let hm : Scale = { tonic = { pc = C; oct = 4 };
+                   quality = CustomQ [0; 2; 4; 5; 7; 8; 11] } ;;
+let th13 : Note list =
+  tones ~c:{ root = { pc = C; oct = 3 };
+             quality = Shape [0; 4; 7; 10; 14; 17; 21] } ;;
+let mm7 : Note list =
+  tones ~c:{ root = { pc = C; oct = 3 }; quality = MinMaj7 } ;;
+let p : Prog = { key = hm; degrees = [0; 5; 3; 4] } ;;
+let s n:Note : Int = step ~note:n ;;
+let nth_n xs:Note list i:Int : Note =
+  List.nth ~xs:xs ~i:i ~default:(of_step ~step:0) ;;
+let c4 : Int = s { pc = C; oct = 4 } ;;
+)",
+              R"(s (degree ~s:hm ~n:5) == c4 + 8
+  && s (degree ~s:hm ~n:7) == c4 + 12
+  && s (degree ~s:hm ~n:(-1)) == c4 - 1
+  && List.length ~xs:th13 == 7
+  && s (nth_n th13 6) - s (nth_n th13 0) == 21
+  && s (nth_n mm7 3) - s (nth_n mm7 0) == 11
+  && prog_len ~p:p == 4
+  && s (prog_root ~p:p ~i:5) == s (prog_root ~p:p ~i:1)
+  && s (prog_root ~p:p ~i:1) == s (degree ~s:hm ~n:5)
+  && List.length ~xs:(prog_chord ~p:p ~i:2) == 3
+  && List.length ~xs:(prog_stack ~p:p ~i:0 ~count:4) == 4
+  && s (wrap_to ~note:{ pc = A; oct = 6 } ~low:{ pc = C; oct = 3 }) == 45
+  && s (wrap_to ~note:{ pc = C; oct = 1 } ~low:{ pc = C; oct = 3 }) == 36)");
+}
+
+TEST(build_score_rhythm_dynamics_and_feel_values) {
+  checkClaims(R"(
+open Core open Core.Pitch open Core.Tempo open Core.Score
+let t : Tempo = common ~bpm:120.0 ;;
+let d : Phrase = hits ~n:4 ~len:0.5 ;;
+let pat : Phrase = rhythm ~lens:[1.0; 0.5; 2.0] ;;
+let accented : Phrase = vels ~p:d ~vs:[1.0; 0.5] ;;
+let rising : Phrase = crescendo ~p:d ~from:Piano ~to:Fff ;;
+let loose : Phrase = humanize ~p:d ~seed:9.0 ~spread:0.05 ;;
+let shuffled : Phrase = shuffle ~p:d ~grid:0.5 ~amount:0.2 ;;
+let blue : Event list =
+  realize_with ~tempo:t ~pitch:(fun n:Note -> 220.0)
+               ~p:(bend ~p:pat ~f:(fun i:Int -> 1200.0)) ;;
+let plain : Event list =
+  realize_with ~tempo:t ~pitch:(fun n:Note -> 220.0) ~p:pat ;;
+let dflt : Step = { note = of_step ~step:0; at = 99.0; len = 0.0;
+                    vel = 0.0; bend = 0.0 } ;;
+let stp p:Phrase i:Int : Step = List.nth ~xs:p.steps ~i:i ~default:dflt ;;
+let edflt : Event = { freq = 0.0; at = 99s; dur = 0s; vel = 0.0 } ;;
+let ev es:Event list i:Int : Event =
+  List.nth ~xs:es ~i:i ~default:edflt ;;
+let u1 : Scalar = Core.Math.hash ~seed:9.0 ~i:1 ;;
+)",
+              R"(span ~p:d == 2.0
+  && Pitch.step ~note:(stp d 0).note == 0
+  && (stp pat 2).at == 1.5 && (stp pat 2).len == 2.0
+  && (stp accented 0).vel == 1.0 && (stp accented 1).vel == 0.5
+  && (stp accented 2).vel == 1.0
+  && (stp rising 0).vel == amp ~l:Piano
+  && (stp rising 3).vel == amp ~l:Fff
+  && (stp loose 1).at == 0.5 + (u1 * 2.0 - 1.0) * 0.05
+  && (stp shuffled 0).at == 0.0
+  && (stp shuffled 1).at == 0.5 + 0.5 * 0.2
+  && (stp shuffled 2).at == 1.0
+  && (stp shuffled 3).at == 1.5 + 0.5 * 0.2
+  && (ev blue 0).freq == 440.0
+  && (ev plain 0).freq == 220.0
+  && (ev plain 1).at == beats ~t:t ~n:1.0
+  && (ev plain 2).dur == beats ~t:t ~n:2.0)");
+}
+
+TEST(build_realize_stays_sugar_for_realize_with) {
+  const char* derived = R"(
+open Core open Core.Osc open Core.Fx open Core.Arrange open Core.Render
+open Core.Pitch open Core.Score
+let t : Tempo.Tempo = Tempo.common ~bpm:100.0 ;;
+let tune : Tuning = et12 ~ref_hz:440.0 ;;
+let p : Phrase = melody ~notes:[{ pc = A; oct = 4 }; { pc = E; oct = 4 }]
+                        ~len:1.0 ;;
+let voice freq:Scalar dur:Timestamp vel:Scalar : Scalar Sample =
+  sine freq * vel |> sample ~from:0s ~to:dur ;;
+let _ = play ~voice:voice ~events:(realize ~tempo:t ~tuning:tune ~p:p)
+  |> sample ~from:0s ~to:2s |> render ~name:"out" ~rate:8000.0 ;;
+)";
+  const char* explicitly = R"(
+open Core open Core.Osc open Core.Fx open Core.Arrange open Core.Render
+open Core.Pitch open Core.Score
+let t : Tempo.Tempo = Tempo.common ~bpm:100.0 ;;
+let tune : Tuning = et12 ~ref_hz:440.0 ;;
+let p : Phrase = melody ~notes:[{ pc = A; oct = 4 }; { pc = E; oct = 4 }]
+                        ~len:1.0 ;;
+let voice freq:Scalar dur:Timestamp vel:Scalar : Scalar Sample =
+  sine freq * vel |> sample ~from:0s ~to:dur ;;
+let _ = play ~voice:voice
+             ~events:(realize_with ~tempo:t ~pitch:(hz ~t:tune) ~p:p)
+  |> sample ~from:0s ~to:2s |> render ~name:"out" ~rate:8000.0 ;;
+)";
+  checkSameBytes(derived, explicitly, "out.wav");
+}
+
+TEST(build_fx_sugar_matches_hand_rolled) {
+  const char* derived = R"(
+open Core open Core.Osc open Core.Fx open Core.Arrange open Core.Render
+let x : Scalar Signal = sine 330.0 * exp_decay 4.0 ;;
+let e : Scalar Signal = echoes ~by:100ms ~gain:0.5 ~n:2 ~input:x ;;
+let v : Scalar Sample =
+  gated ~attack:3ms ~decay:110ms ~sustain:0.5 ~release:60ms ~hold:400ms
+        ~input:(sine 220.0) ;;
+let _ = e + place v 1s
+  |> sample ~from:0s ~to:2s |> render ~name:"out" ~rate:8000.0 ;;
+)";
+  const char* literal = R"(
+open Core open Core.Osc open Core.Fx open Core.Arrange open Core.Render
+let x : Scalar Signal = sine 330.0 * exp_decay 4.0 ;;
+let e : Scalar Signal =
+  mix_all [x;
+           delay ~by:100ms ~signal:x * 0.5;
+           delay ~by:200ms ~signal:x * 0.25] ;;
+let v : Scalar Sample =
+  sine 220.0 * adsr ~attack:3ms ~decay:110ms ~sustain:0.5 ~release:60ms
+                    ~hold:400ms
+    |> sample ~from:0s ~to:460ms ;;
+let _ = e + place v 1s
+  |> sample ~from:0s ~to:2s |> render ~name:"out" ~rate:8000.0 ;;
+)";
+  checkSameBytes(derived, literal, "out.wav");
+}
+
+TEST(build_mix_matches_hand_rolled) {
+  const char* derived = R"(
+open Core open Core.Osc open Core.Fx open Core.Arrange open Core.Render open Core.Time
+let a : Scalar Signal = sine 220.0 * exp_decay 1.0 ;;
+let b : Scalar Signal = sine 331.0 * exp_decay 2.0 ;;
+let wide : Vector Signal = Mix.pan ~pos:0.4 ~input:a ;;
+let bus : Vector Signal =
+  Mix.mix ~parts:[(Mix.db (-6.0), wide);
+                  (0.25, Mix.pan ~pos:(-0.5) ~input:b)] ;;
+let out : Vector Signal =
+  Mix.duck ~ats:[0s; 500ms] ~depth:0.6 ~dip:60ms ~recover:200ms
+           ~input:(Mix.gain_db ~x:(-2.0) ~input:bus) ;;
+let _ = out |> sample ~from:0s ~to:1s |> render ~name:"out" ~rate:8000.0 ;;
+)";
+  const char* literal = R"(
+open Core open Core.Osc open Core.Fx open Core.Arrange open Core.Render open Core.Time
+open Core.Math
+let a : Scalar Signal = sine 220.0 * exp_decay 1.0 ;;
+let b : Scalar Signal = sine 331.0 * exp_decay 2.0 ;;
+let wide : Vector Signal =
+  channels [a * sqrt ((1.0 - 0.4) * 0.5); a * sqrt ((1.0 + 0.4) * 0.5)] ;;
+let narrow : Vector Signal =
+  channels [b * sqrt ((1.0 - (-0.5)) * 0.5);
+            b * sqrt ((1.0 + (-0.5)) * 0.5)] ;;
+let bus : Vector Signal =
+  mix_all [wide * Score.db ~x:(-6.0); narrow * 0.25] ;;
+let dips : Scalar Signal =
+  place_multi (adsr ~attack:0s ~decay:0s ~sustain:1.0 ~release:200ms
+                    ~hold:60ms
+                 |> sample ~from:0s ~to:260ms)
+              [0s; 500ms] ;;
+let out : Vector Signal =
+  bus * Score.db ~x:(-2.0) * (1.0 - dips * 0.6) ;;
+let _ = out |> sample ~from:0s ~to:1s |> render ~name:"out" ~rate:8000.0 ;;
+)";
+  checkSameBytes(derived, literal, "out.wav");
+}
+
+TEST(build_modulated_filters_end_to_end) {
+  // A constant cutoff signal reproduces the fixed filter bit for bit;
+  // the resonant/follow/feedback/select round renders and is audible.
+  const char* modded = R"(
+open Core open Core.Osc open Core.Fx open Core.Sig open Core.Arrange open Core.Render
+let x : Scalar Signal = saw 110.0 ;;
+let _ = lowpass_mod ~cutoff:(constant 800.0) ~input:x
+  |> sample ~from:0s ~to:500ms |> render ~name:"out" ~rate:8000.0 ;;
+)";
+  const char* fixed = R"(
+open Core open Core.Osc open Core.Fx open Core.Sig open Core.Arrange open Core.Render
+let x : Scalar Signal = saw 110.0 ;;
+let _ = lowpass ~cutoff:800.0 ~input:x
+  |> sample ~from:0s ~to:500ms |> render ~name:"out" ~rate:8000.0 ;;
+)";
+  checkSameBytes(modded, fixed, "out.wav");
+
+  TempDir tp;
+  tp.write("s.synth", R"(
+open Core open Core.Osc open Core.Fx open Core.Sig open Core.Arrange
+open Core.Render
+let riser : Scalar Signal =
+  resonant ~cutoff:(constant 100.0 + time * 900.0) ~q:4.0
+           ~input:(saw 55.0) ;;
+let env : Scalar Signal = follow ~attack:5ms ~release:50ms ~input:riser ;;
+let gated2 : Scalar Signal =
+  select ~gate:env ~threshold:0.05 ~above:riser ~below:(constant 0.0) ;;
+let dub : Scalar Signal = feedback ~by:150ms ~gain:0.5 ~input:gated2 ;;
+let _ = render "out" 8000.0 (sample dub 0s 1s) ;;
+)");
+  tp.write("build.json", projectManifest("fxr", {"s.synth"}));
+  BuildResult r = buildProject(tp.dir.string());
+  for (auto& d : r.diags.items) std::cerr << d.message << "\n";
+  CHECK(r.ok);
+  WavData w = readWav((tp.dir / "_build" / "artifacts" / "out.wav").string());
+  double peak = 0;
+  for (auto s : w.channels[0]) peak = std::max(peak, std::fabs(s));
+  CHECK(peak > 0.01);
+}
+
+TEST(build_new_fx_validation_diagnostics) {
+  auto expectError = [](const char* src, const char* needle) {
+    TempDir tp;
+    tp.write("s.synth", src);
+    tp.write("build.json", projectManifest("bad", {"s.synth"}));
+    BuildResult r = buildProject(tp.dir.string());
+    CHECK(!r.ok);
+    bool found = false;
+    for (auto& d : r.diags.items)
+      if (d.message.find(needle) != std::string::npos) found = true;
+    if (!found)
+      for (auto& d : r.diags.items) std::cerr << d.message << "\n";
+    CHECK(found);
+  };
+  expectError(R"(
+open Core open Core.Osc open Core.Fx
+let x : Scalar Signal = feedback ~by:100ms ~gain:1.0 ~input:(sine 440.0) ;;
+)",
+              "feedback");
+  expectError(R"(
+open Core open Core.Osc open Core.Fx open Core.Sig
+let x : Scalar Signal =
+  resonant ~cutoff:(constant 500.0) ~q:0.0 ~input:(sine 440.0) ;;
+)",
+              "resonant");
+  expectError(R"(
+open Core open Core.Osc open Core.Fx open Core.Arrange
+let x : Scalar Signal =
+  follow ~attack:5ms ~release:50ms
+         ~input:(channels [sine 220.0; sine 330.0] * 1.0) ;;
+)",
+              "follow");
+  expectError(R"(
+open Core open Core.Osc open Core.Arrange
+let x : Scalar Signal =
+  channel ~n:5 ~input:(channels [sine 220.0; sine 330.0]) ;;
+)",
+              "channel");
+}
+
+TEST(build_str_iter_renders_computed_names) {
+  TempDir tp;
+  tp.write("s.synth", R"(
+open Core open Core.Osc open Core.Fx open Core.Arrange open Core.Render
+let section i:Int : Scalar Sample =
+  sine (220.0 + Core.Math.to_scalar i * 110.0) * exp_decay 8.0
+    |> sample ~from:0s ~to:200ms ;;
+let _ = List.iter
+  ~f:(fun i:Int ->
+        render ~name:(Str.cat ~a:"section-" ~b:(Str.of_int ~n:i))
+               ~rate:8000.0 ~sample:(section i))
+  ~xs:(List.range ~from:0 ~count:3) ;;
+)");
+  tp.write("build.json", projectManifest("sections", {"s.synth"}));
+  BuildResult r = buildProject(tp.dir.string());
+  for (auto& d : r.diags.items) std::cerr << d.message << "\n";
+  CHECK(r.ok);
+  CHECK(r.targets.size() == 3);
+  for (int i = 0; i < 3; i++) {
+    std::string name = "section-" + std::to_string(i) + ".wav";
+    CHECK(!slurp(tp.dir / "_build" / "artifacts" / name).empty());
+  }
+}
+
+TEST(build_dsp_prelude_matches_classic_opens) {
+  const char* viaDsp = R"(
+open Core
+open Core.Dsp
+let pluck freq:Scalar : Scalar Signal = sine freq * exp_decay 6.0 ;;
+let win : Scalar Sample = sample (pluck 440.0) 0s 800ms ;;
+let _ = mix_all [place win 0s; place win 500ms]
+  |> sample ~from:0s ~to:2s |> render ~name:"out" ~rate:8000.0 ;;
+)";
+  const char* classic = R"(
+open Core open Core.Osc open Core.Fx open Core.Arrange open Core.Render open Core.Io open Core.Time open Core.Sig open Core.Math
+let pluck freq:Scalar : Scalar Signal = sine freq * exp_decay 6.0 ;;
+let win : Scalar Sample = sample (pluck 440.0) 0s 800ms ;;
+let _ = mix_all [place win 0s; place win 500ms]
+  |> sample ~from:0s ~to:2s |> render ~name:"out" ~rate:8000.0 ;;
+)";
+  checkSameBytes(viaDsp, classic, "out.wav");
+}
+
+TEST(build_local_inference_matches_annotated) {
+  const char* inferred = R"(
+open Core open Core.Osc open Core.Fx open Core.Arrange open Core.Render
+let freq = 220.0 * 2.0 ;;
+let pluck f:Scalar = sine f * exp_decay 6.0 ;;
+let song =
+  let win = sample (pluck freq) 0s 800ms in
+  mix_all [place win 0s; place win 500ms] ;;
+let _ = render "out" 8000.0 (sample song 0s 2s) ;;
+)";
+  const char* annotated = R"(
+open Core open Core.Osc open Core.Fx open Core.Arrange open Core.Render
+let freq : Scalar = 220.0 * 2.0 ;;
+let pluck f:Scalar : Scalar Signal = sine f * exp_decay 6.0 ;;
+let song : Scalar Signal =
+  let win : Scalar Sample = sample (pluck freq) 0s 800ms in
+  mix_all [place win 0s; place win 500ms] ;;
+let _ = render "out" 8000.0 (sample song 0s 2s) ;;
+)";
+  checkSameBytes(inferred, annotated, "out.wav");
+}
+
+TEST(build_broadcast_row_fades_a_stereo_bus) {
+  const char* broadcast = R"(
+open Core open Core.Osc open Core.Fx open Core.Arrange open Core.Render
+let bus : Vector Signal = channels [sine 220.0; sine 331.0] ;;
+let out : Vector Signal = bus * exp_decay 2.0 ;;
+let _ = out |> sample ~from:0s ~to:1s |> render ~name:"out" ~rate:8000.0 ;;
+)";
+  const char* perChannel = R"(
+open Core open Core.Osc open Core.Fx open Core.Arrange open Core.Render
+let env : Scalar Signal = exp_decay 2.0 ;;
+let out : Vector Signal = channels [sine 220.0 * env; sine 331.0 * env] ;;
+let _ = out |> sample ~from:0s ~to:1s |> render ~name:"out" ~rate:8000.0 ;;
+)";
+  checkSameBytes(broadcast, perChannel, "out.wav");
 }

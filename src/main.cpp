@@ -130,7 +130,7 @@ int cmdLint(const std::vector<std::string>& files) {
   synth::DiagnosticBag diags = synth::lintFiles(files);
   printDiags(diags);
   if (diags.hasErrors()) return 1;
-  std::cout << "no problems found\n";
+  if (diags.items.empty()) std::cout << "no problems found\n";
   return 0;
 }
 

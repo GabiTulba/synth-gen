@@ -40,6 +40,34 @@ SYNTH_EXTERNAL(highpass) {
                                      args[1].asSignal()));
   return true;
 }
+SYNTH_EXTERNAL(lowpass_mod) {
+  *result = Value::signal(makeModFilter(FilterKind::Lowpass,
+                                        args[0].toSignal(),
+                                        args[1].asSignal()));
+  return true;
+}
+SYNTH_EXTERNAL(highpass_mod) {
+  *result = Value::signal(makeModFilter(FilterKind::Highpass,
+                                        args[0].toSignal(),
+                                        args[1].asSignal()));
+  return true;
+}
+SYNTH_EXTERNAL(resonant) {
+  *result = Value::signal(makeResonant(args[0].toSignal(),
+                                       args[1].asScalar(),
+                                       args[2].asSignal()));
+  return true;
+}
+SYNTH_EXTERNAL(follow) {
+  *result = Value::signal(
+      makeFollow(args[0].asTime(), args[1].asTime(), args[2].asSignal()));
+  return true;
+}
+SYNTH_EXTERNAL(feedback) {
+  *result = Value::signal(makeFeedbackDelay(
+      args[0].asTime(), args[1].asScalar(), args[2].asSignal()));
+  return true;
+}
 SYNTH_EXTERNAL(hard_clip) {
   *result = Value::signal(
       makeClip(ClipKind::Hard, args[0].asScalar(), args[1].asSignal()));

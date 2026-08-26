@@ -31,6 +31,13 @@ SYNTH_EXTERNAL(signal) {
   return true;
 }
 
+SYNTH_EXTERNAL(select) {
+  *result = Value::signal(makeSelect(args[0].toSignal(), args[1].asScalar(),
+                                     args[2].asSignal(),
+                                     args[3].asSignal()));
+  return true;
+}
+
 SYNTH_EXTERNAL(signal_multi) {
   std::vector<SigPtr> chans;
   for (auto& f : args[0].asList())

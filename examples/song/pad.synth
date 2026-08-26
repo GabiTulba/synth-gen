@@ -1,7 +1,12 @@
 (* Background synth pad: two detuned saws per chord tone (the shared
    Voices.Pads tone), lowpassed, under a slow chord envelope. The detune
    amount is a parameter so the two stereo sides can run different
-   widths - that difference is what makes the pad feel wide. *)
+   widths - that difference is what makes the pad feel wide.
+
+   The progression is a Score phrase: four chords of the key, eight
+   beats each, laid end to end by `seq`. Nothing here is a frequency, a
+   Timestamp or a chord name - `Harmony` supplies the notes and
+   `realize` turns beats into time. *)
 
 open Core
 open Core.Osc
@@ -14,41 +19,41 @@ open Core.Sig
 open Core.Math
 
 import Timing
+import Harmony
 import Voices
 module P = Voices.Pads
 
-open Core.Tempo
 open Core.Pitch
+open Core.Score
 
-(* `note A 2` is the A two octaves below middle C, in 12-TET at A=440. *)
-let note pc:PitchClass oct:Int : Scalar = a440 ~note:{ pc = pc; oct = oct } ;;
-
-let chord ~a:Scalar ~b:Scalar ~c:Scalar ~d:Scalar ~detune:Scalar
-    : Scalar Signal =
+(* One chord tone, and a voice in the sense `play` means: it is handed
+   the note's own written length, so the envelope's plateau and the
+   sample window follow the score instead of a hardcoded 3300 ms.
+   `~detune` is filled first, which leaves exactly the
+   (freq, duration, velocity) function `play` wants. *)
+let tone ~detune:Scalar freq:Scalar dur:Timestamp vel:Scalar
+    : Scalar Sample =
   let env : Scalar Signal =
     adsr ~attack:250ms ~decay:500ms ~sustain:0.8 ~release:700ms
-         ~hold:3300ms in
-  let stack : Scalar Signal =
-    (P.detuned ~freq:a ~detune:detune + P.detuned ~freq:b ~detune:detune
-     + P.detuned ~freq:c ~detune:detune
-     + P.detuned ~freq:d ~detune:detune) * 0.25 in
-  (stack |> lowpass ~cutoff:1100.0) * env
+         ~hold:(dur - 700ms) in
+  (P.detuned ~freq:freq ~detune:detune |> lowpass ~cutoff:1100.0)
+    * env * vel * 0.25
+    |> sample ~from:0s ~to:dur
 ;;
 
-(* Am -> F -> C -> G, two bars per chord. `two_bars` is a local function
-   that captures the enclosing detune and cuts each chord to the grid
-   Timing defines, so only the chord tones vary per call. *)
+(* Am -> F -> C -> G, two bars each: four chord phrases end to end.
+   Each is the triad the key gives on that degree plus its octave - four
+   parts from three chord tones, which is what Scale.voicing is for. *)
+let phrase : Phrase =
+  seq ~ps:(List.init ~n:4
+             ~f:(fun i:Int ->
+                   chord ~notes:(Harmony.parts ~i:i
+                                   ~low:{ pc = F; oct = 2 } ~count:4)
+                         ~at:0.0 ~len:(Timing.span 2)))
+;;
+
 let progression detune:Scalar : Scalar Signal =
-  let two_bars ~a:Scalar ~b:Scalar ~c:Scalar ~d:Scalar : Scalar Sample =
-    chord ~a:a ~b:b ~c:c ~d:d ~detune:detune
-      |> sample ~from:0s ~to:(Timing.at ~bar:2 ~beat:0.0) in
-  let am : Scalar Sample =
-    two_bars ~a:(note A 2) ~b:(note E 3) ~c:(note A 3) ~d:(note C 4) in
-  let f : Scalar Sample =
-    two_bars ~a:(note F 2) ~b:(note C 3) ~c:(note F 3) ~d:(note A 3) in
-  let c : Scalar Sample =
-    two_bars ~a:(note C 3) ~b:(note G 3) ~c:(note C 4) ~d:(note E 4) in
-  let g : Scalar Sample =
-    two_bars ~a:(note G 2) ~b:(note D 3) ~c:(note G 3) ~d:(note B 3) in
-  P.place4 ~t:Timing.tempo am f c g
+  phrase
+    |> realize ~tempo:Timing.tempo ~tuning:Harmony.tuning
+    |> play ~voice:(tone ~detune:detune)
 ;;

@@ -5,6 +5,7 @@
   "sources": [
     "song.synth",
     "timing.synth",
+    "harmony.synth",
     "drums.synth",
     "pad.synth",
     "keys.synth",

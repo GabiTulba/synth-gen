@@ -1,27 +1,40 @@
-(* Darksynth: ~120 s at 120 BPM (beat 500ms, bar 2s), A minor with the
-   harmonic-minor E. Three drops.
+(* Darksynth: thirty two-bar chord segments at 120 BPM in 4/4 (beat
+   500ms, bar 2s, segment 4s, so ~120 s), A harmonic minor. Three drops.
 
-   0-16s    INTRO      blinking alarm pluck over pad + held bass; a
-                       gentle riser announces the mild drums entrance
-   16-32s   BUILD      four-floor kick, hats, bass eighths, snare roll,
-                       riser from 28s; everything cuts at 31.5s (the gap)
-   32-48s   DROP 1     the drums drop: full kit + octave-pumping grind
-                       bass, deliberately no guitar - held back
-   48-64s   BREAKDOWN  pad + held bass; two far-off bell tolls
-                       foreshadow the end; engine Doppler at 54s, kick
-                       re-enters 56s, riser from 60s
-   64-88s   DROP 2     the full wall: sixteenth grind bursts, guitar
-                       chugs + lead runs, sixteenth hats
-   88-96s   TOLLING    bells toll the chord roots over held bass and
-                       rattling chains; an engine Doppler at 89s, kick
-                       re-enters 92s, riser from 91.5s
-   96-112s  DROP 3     the biggest wall: sixteenth grind at both ends,
-                       chugs + lead runs, chain accents on the offbeats,
-                       a bell marking every chord turn; the last bar
-                       gallops on a double-time kick
-   112-120s OUTRO      the long quiet fall: half-gain pad, soft held
-                       bass, dying bell tolls and chain echoes; a last
-                       engine Doppler crosses the field *)
+   Every section below is one of `Timing`'s landmarks, and every
+   position in this file is an offset from one in segments, bars or
+   beats - there is not a second written down anywhere. The wall clock
+   is only here to say what it sounds like.
+
+   segment  landmark     wall clock
+    0-3     intro        0-16s    blinking alarm pluck over pad + held
+                                  bass; a gentle riser announces the
+                                  mild drums entrance
+    4-7     build        16-32s   four-floor kick, hats, bass eighths,
+                                  snare roll, riser into the drop;
+                                  everything cuts a beat short (the gap)
+    8-11    drop1        32-48s   the drums drop: full kit +
+                                  octave-pumping grind bass,
+                                  deliberately no guitar - held back
+   12-15    breakdown    48-64s   pad + held bass; two far-off bell
+                                  tolls foreshadow the end; engine
+                                  Doppler, then the kick re-enters two
+                                  segments in
+   16-21    drop2        64-88s   the full wall: sixteenth grind bursts,
+                                  guitar chugs + lead runs, sixteenth
+                                  hats
+   22-23    tolling      88-96s   bells toll the chord roots over held
+                                  bass and rattling chains; an engine
+                                  Doppler, kick back a segment later
+   24-27    drop3        96-112s  the biggest wall: sixteenth grind at
+                                  both ends, chugs + lead runs, chain
+                                  accents on the offbeats, a bell
+                                  marking every chord turn; the last bar
+                                  gallops on a double-time kick
+   28-29    outro        112-120s the long quiet fall: half-gain pad,
+                                  soft held bass, dying bell tolls and
+                                  chain echoes; a last engine Doppler
+                                  crosses the field *)
 
 open Core
 open Core.Osc
@@ -40,64 +53,106 @@ import Guitar
 import Fx
 
 import Timing
+import Harmony
 import Voices
 module Seq = Voices.Seq
 
 open Core.Tempo
 open Core.Pitch
+open Core.Scale
 
-(* `note A 1` is the bass A, in 12-TET at A=440: the pitches below name
-   themselves instead of hiding in a frequency. *)
-let note pc:PitchClass oct:Int : Scalar = a440 ~note:{ pc = pc; oct = oct } ;;
+(* ---------- where things are ---------- *)
+(* `on Timing.drop2 1` is the second chord segment of drop 2. Every
+   start below is written this way - a landmark plus a segment, a bar
+   (`dur Whole`) or a beat - so nothing here has to be recomputed when
+   the tempo changes. *)
+let on section:Timestamp n:Int : Timestamp = section + Timing.seg n ;;
+
+(* ---------- what things play ---------- *)
+(* Every pitch in the arrangement is a position in `Harmony.cycle` -
+   0 = i (Am), 1 = VI (F), 2 = iv (Dm), 3 = V (E) - read at the register
+   its part lives in. No frequency is written out below, and the four
+   parts cannot drift out of agreement with each other or with the
+   pad.
+
+   Each `low` is the floor the root folds up to, and it is what shapes
+   the line: from E1 the roots descend A1 - F1 - D2 - E1 rather than
+   climbing as the degrees rise. *)
+let bass_note i:Int : Scalar =
+  Harmony.root_hz ~i:i ~low:{ pc = E; oct = 1 } ;;
+let chug_note i:Int : Scalar =
+  Harmony.root_hz ~i:i ~low:{ pc = D; oct = 2 } ;;
+let bell_note i:Int : Scalar =
+  Harmony.root_hz ~i:i ~low:{ pc = D; oct = 3 } ;;
+
+(* The lead runs are melodic rather than harmonic, so they are written
+   as degrees of the key around A3: 0 is the tonic, and negative degrees
+   descend. Degree 6 is the raised seventh - the G# - for free. *)
+let lead_note d:Int : Scalar =
+  hz ~t:Harmony.tuning
+     ~note:(degree ~s:(Harmony.octave ~oct:3) ~n:d) ;;
 
 (* ---------- drums ---------- *)
 (* Each line binds a local function for its groove: the hit, grid and
-   spread are written once, and the mix reads as the arrangement. *)
+   spread are written once, the mix reads as the arrangement, and every
+   `count` is a number of bars times the hits a bar holds. *)
 let kick_line : Scalar Signal =
-  let four_floor ~start:Timestamp ~count:Int ~seed:Scalar : Scalar Signal =
+  let four_floor ~start:Timestamp ~bars:Int ~seed:Scalar : Scalar Signal =
     Seq.humanized Drums.kick_hit ~start:start ~step:(Timing.dur Quarter)
-      ~count:count ~seed:seed ~spread:3ms in
-  mix_all [four_floor ~start:16s ~count:31 ~seed:41.0;
-           four_floor ~start:32s ~count:32 ~seed:42.0;
-           four_floor ~start:56s ~count:15 ~seed:43.0;
-           four_floor ~start:64s ~count:48 ~seed:44.0;
-           four_floor ~start:92s ~count:7 ~seed:45.0;
-           four_floor ~start:96s ~count:32 ~seed:46.0;
-           (* the last bar gallops at double time *)
-           Seq.humanized Drums.kick_hit ~start:(108s + Timing.dur Eighth)
-             ~step:(Timing.dur Eighth) ~count:15 ~seed:47.0 ~spread:3ms]
+      ~count:(bars * Timing.quarters) ~seed:seed ~spread:3ms in
+  (* The build and the two shorter re-entries stop a beat short of what
+     follows them - that silence is the gap the next section lands in. *)
+  let gapped ~start:Timestamp ~bars:Int ~seed:Scalar : Scalar Signal =
+    Seq.humanized Drums.kick_hit ~start:start ~step:(Timing.dur Quarter)
+      ~count:(bars * Timing.quarters - 1) ~seed:seed ~spread:3ms in
+  mix_all [gapped ~start:Timing.build ~bars:8 ~seed:41.0;
+           four_floor ~start:Timing.drop1 ~bars:8 ~seed:42.0;
+           gapped ~start:(on Timing.breakdown 2) ~bars:4 ~seed:43.0;
+           four_floor ~start:Timing.drop2 ~bars:12 ~seed:44.0;
+           gapped ~start:(on Timing.tolling 1) ~bars:2 ~seed:45.0;
+           four_floor ~start:Timing.drop3 ~bars:8 ~seed:46.0;
+           (* the last bar gallops at double time, on the offbeats *)
+           Seq.humanized Drums.kick_hit
+             ~start:(on Timing.drop3 3 + Timing.dur Eighth)
+             ~step:(Timing.dur Eighth)
+             ~count:(2 * Timing.eighths - 1) ~seed:47.0 ~spread:3ms]
 ;;
 
 let snare_line : Scalar Signal =
-  let roll ~start:Timestamp ~seed:Scalar : Scalar Signal =
-    Seq.humanized Drums.snare_hit ~start:start ~step:(Timing.dur Eighth)
+  (* A roll fills the bar before the section it announces, six eighths
+     of it; a backbeat is two to the bar, landing on beat 2 - a quarter
+     after the drop hit. *)
+  let roll ~before:Timestamp ~seed:Scalar : Scalar Signal =
+    Seq.humanized Drums.snare_hit
+      ~start:(before - Timing.dur Whole) ~step:(Timing.dur Eighth)
       ~count:6 ~seed:seed ~spread:4ms in
-  let backbeat ~start:Timestamp ~count:Int ~seed:Scalar : Scalar Signal =
-    Seq.humanized Drums.snare_hit ~start:start ~step:(Timing.dur Half)
-      ~count:count ~seed:seed ~spread:5ms in
-  (* The backbeat lands on beat 2 of the drop, a quarter after the hit. *)
-  let two : Timestamp = Timing.dur Quarter in
-  mix_all [roll ~start:30s ~seed:31.0;
-           backbeat ~start:(32s + two) ~count:16 ~seed:32.0;
-           roll ~start:62s ~seed:33.0;
-           backbeat ~start:(64s + two) ~count:24 ~seed:34.0;
-           roll ~start:94s ~seed:35.0;
-           backbeat ~start:(96s + two) ~count:16 ~seed:36.0]
+  let backbeat ~start:Timestamp ~bars:Int ~seed:Scalar : Scalar Signal =
+    Seq.humanized Drums.snare_hit
+      ~start:(start + Timing.dur Quarter) ~step:(Timing.dur Half)
+      ~count:(bars * Timing.halves) ~seed:seed ~spread:5ms in
+  mix_all [roll ~before:Timing.drop1 ~seed:31.0;
+           backbeat ~start:Timing.drop1 ~bars:8 ~seed:32.0;
+           roll ~before:Timing.drop2 ~seed:33.0;
+           backbeat ~start:Timing.drop2 ~bars:12 ~seed:34.0;
+           roll ~before:Timing.drop3 ~seed:35.0;
+           backbeat ~start:Timing.drop3 ~bars:8 ~seed:36.0]
 ;;
 
 let hat_line : Scalar Signal =
-  let run ~start:Timestamp ~step:Timestamp ~count:Int ~seed:Scalar
-      : Scalar Signal =
-    Seq.humanized Drums.hat_hit ~start:start ~step:step ~count:count
-      ~seed:seed ~spread:8ms in
-  let off : Timestamp = Timing.dur Eighth in
-  mix_all [run ~start:16s ~step:(Timing.dur Eighth) ~count:62 ~seed:21.0;
-           run ~start:(32s + off) ~step:(Timing.dur Quarter) ~count:32
-               ~seed:22.0;
-           run ~start:(64s + off) ~step:(Timing.dur Eighth) ~count:94
-               ~seed:23.0;
-           run ~start:(96s + off) ~step:(Timing.dur Eighth) ~count:62
-               ~seed:24.0]
+  (* Every run but drop 1's is eighths, and every run but the build's
+     starts on the offbeat - so the hats never coincide with the kick
+     that opens the section. *)
+  let eighths ~start:Timestamp ~bars:Int ~seed:Scalar : Scalar Signal =
+    Seq.humanized Drums.hat_hit ~start:start ~step:(Timing.dur Eighth)
+      ~count:(bars * Timing.eighths - 2) ~seed:seed ~spread:8ms in
+  let quarters ~start:Timestamp ~bars:Int ~seed:Scalar : Scalar Signal =
+    Seq.humanized Drums.hat_hit ~start:start ~step:(Timing.dur Quarter)
+      ~count:(bars * Timing.quarters) ~seed:seed ~spread:8ms in
+  let off ~at:Timestamp : Timestamp = at + Timing.dur Eighth in
+  mix_all [eighths ~start:Timing.build ~bars:8 ~seed:21.0;
+           quarters ~start:(off ~at:Timing.drop1) ~bars:8 ~seed:22.0;
+           eighths ~start:(off ~at:Timing.drop2) ~bars:12 ~seed:23.0;
+           eighths ~start:(off ~at:Timing.drop3) ~bars:8 ~seed:24.0]
 ;;
 
 let drum_line : Scalar Signal =
@@ -106,194 +161,240 @@ let drum_line : Scalar Signal =
 
 (* ---------- alarm: blinking pluck through the intro ---------- *)
 (* A strong blink on the second, a weaker one on the offbeat, and a
-   touch of slap delay. *)
+   touch of slap delay. Seven bars of it, two to the bar. *)
 let alarm_line : Scalar Signal =
   let blink at:Timestamp : Scalar Signal =
-    Seq.pattern Fx.alarm_hit ~start:at ~step:(Timing.dur Half) ~count:14 in
+    Seq.pattern Fx.alarm_hit ~start:at ~step:(Timing.dur Half)
+                ~count:(7 * Timing.halves) in
   let dry : Scalar Signal =
-    blink 0s + blink (Timing.dur Quarter) * 0.45 in
+    blink Timing.intro + blink (Timing.dur Quarter) * 0.45 in
   dry + (dry |> delay ~by:(Timing.dur Eighth)) * 0.3
 ;;
 
 (* ---------- bass (roots: A1, F1, D2, E1) ---------- *)
-(* The grooves are local functions of the line that uses them. `eighths`
+(* Every groove takes a section landmark and a segment inside it, and
+   reads both its position and its chord off that one index: the cycle
+   repeats every four segments, so segment n carries chord n. `eighths`
    drives the build. The drops run the hard-clipped grind voice: the
-   first chord segment right after each drop hit runs `sixteenths` - the
-   most aggressive bar of the song - and the remaining segments `pump`:
-   root on the beat, octave on the offbeat, which keeps the low end
-   moving instead of looping. *)
+   segment right after each drop hit runs `sixteenths` - the most
+   aggressive bars of the song - and the rest `pump`: root on the beat,
+   octave on the offbeat, which keeps the low end moving instead of
+   looping. *)
 let bass_line : Scalar Signal =
-  let eighths ~freq:Scalar ~start:Timestamp ~count:Int ~seed:Scalar
+  let hz_of n:Int : Scalar = bass_note (Scale.wrap_rem ~n:n ~k:4) in
+  (* One held note per bar of the segment. *)
+  let held ~from:Timestamp ~n:Int : Scalar Signal =
+    place_multi (Bass.held (hz_of n))
+                (time_steps ~start:(on from n) ~step:(Timing.dur Whole)
+                            ~count:2) in
+  (* `less` trims the tail, so a section can stop short of what follows
+     it without the count being recomputed by hand. *)
+  let eighths ~from:Timestamp ~n:Int ~less:Int ~seed:Scalar
       : Scalar Signal =
-    Seq.humanized (Bass.pulse freq) ~start:start ~step:(Timing.dur Eighth)
-      ~count:count ~seed:seed ~spread:5ms in
-  let sixteenths ~freq:Scalar ~start:Timestamp ~seed:Scalar
-      : Scalar Signal =
-    Seq.humanized (Bass.grind freq) ~start:start
-      ~step:(Timing.dur Sixteenth) ~count:32 ~seed:seed ~spread:4ms in
-  (* Root on the beat, octave on the offbeat - so the offbeat is
-     derived, not another literal to keep in step with the first. *)
-  let pump ~freq:Scalar ~start:Timestamp ~seed:Scalar : Scalar Signal =
-    Seq.humanized (Bass.grind freq) ~start:start ~step:(Timing.dur Quarter)
-      ~count:8 ~seed:seed ~spread:5ms
-    + Seq.humanized (Bass.grind (freq * 2.0))
-        ~start:(start + Timing.dur Eighth) ~step:(Timing.dur Quarter)
-        ~count:8 ~seed:(seed + 0.5) ~spread:5ms in
+    Seq.humanized (Bass.pulse (hz_of n)) ~start:(on from n)
+      ~step:(Timing.dur Eighth) ~count:(2 * Timing.eighths - less)
+      ~seed:seed ~spread:5ms in
+  let sixteenths ~from:Timestamp ~n:Int ~seed:Scalar : Scalar Signal =
+    Seq.humanized (Bass.grind (hz_of n)) ~start:(on from n)
+      ~step:(Timing.dur Sixteenth) ~count:(2 * Timing.sixteenths)
+      ~seed:seed ~spread:4ms in
+  (* The octave is derived from the root and the offbeat from the beat,
+     so neither is a literal that has to keep in step with the other. *)
+  let pump ~from:Timestamp ~n:Int ~seed:Scalar : Scalar Signal =
+    let quarters ~at:Timestamp ~freq:Scalar ~seed:Scalar : Scalar Signal =
+      Seq.humanized (Bass.grind freq) ~start:at ~step:(Timing.dur Quarter)
+        ~count:(2 * Timing.quarters) ~seed:seed ~spread:5ms in
+    quarters ~at:(on from n) ~freq:(hz_of n) ~seed:seed
+    + quarters ~at:(on from n + Timing.dur Eighth) ~freq:(hz_of n * 2.0)
+               ~seed:(seed + 0.5) in
+  (* A section that walks all four chords of the cycle in order. *)
+  let cycle ~f:(Int -> Scalar Signal) : Scalar Signal =
+    mix_all (List.init ~n:4 ~f:f) in
+
   let intro : Scalar Signal =
-    mix_all [place_multi (Bass.held (note A 1)) [0s; 2s];
-             place_multi (Bass.held (note F 1)) [4s; 6s];
-             place_multi (Bass.held (note D 2)) [8s; 10s];
-             place_multi (Bass.held (note E 1)) [12s; 14s]] in
+    cycle ~f:(fun n:Int -> held ~from:Timing.intro ~n:n) in
   let build : Scalar Signal =
-    mix_all [eighths ~freq:(note A 1) ~start:16s ~count:16 ~seed:1.0;
-             eighths ~freq:(note F 1) ~start:20s ~count:16 ~seed:2.0;
-             eighths ~freq:(note D 2) ~start:24s ~count:16 ~seed:3.0;
-             eighths ~freq:(note E 1) ~start:28s ~count:14 ~seed:4.0] in
+    cycle ~f:(fun n:Int ->
+                eighths ~from:Timing.build ~n:n
+                        (* the last segment stops two eighths short:
+                           that silence is the gap the drop lands in *)
+                        ~less:(if n < 3 then 0 else 2)
+                        ~seed:(1.0 + Math.to_scalar n)) in
   let drop1 : Scalar Signal =
-    mix_all [pump ~freq:(note A 1) ~start:32s ~seed:5.0;
-             pump ~freq:(note F 1) ~start:36s ~seed:6.0;
-             pump ~freq:(note D 2) ~start:40s ~seed:7.0;
-             pump ~freq:(note E 1) ~start:44s ~seed:8.0] in
+    cycle ~f:(fun n:Int ->
+                pump ~from:Timing.drop1 ~n:n
+                     ~seed:(5.0 + Math.to_scalar n)) in
   let breakdown : Scalar Signal =
-    mix_all [place_multi (Bass.held (note A 1)) [48s; 50s];
-             place_multi (Bass.held (note F 1)) [52s; 54s];
-             place_multi (Bass.held (note D 2)) [56s; 58s];
-             place_multi (Bass.held (note E 1)) [60s; 62s]] in
+    cycle ~f:(fun n:Int -> held ~from:Timing.breakdown ~n:n) in
+  (* Six segments - the cycle plus its first two again - and the two
+     ends of the drop are the sixteenth bursts. *)
   let drop2 : Scalar Signal =
-    mix_all [sixteenths ~freq:(note A 1) ~start:64s ~seed:9.0;
-             pump ~freq:(note F 1) ~start:68s ~seed:10.0;
-             pump ~freq:(note D 2) ~start:72s ~seed:11.0;
-             pump ~freq:(note E 1) ~start:76s ~seed:12.0;
-             pump ~freq:(note A 1) ~start:80s ~seed:13.0;
-             sixteenths ~freq:(note F 1) ~start:84s ~seed:14.0] in
+    let seed n:Int : Scalar = 9.0 + Math.to_scalar n in
+    mix_all [sixteenths ~from:Timing.drop2 ~n:0 ~seed:(seed 0);
+             pump ~from:Timing.drop2 ~n:1 ~seed:(seed 1);
+             pump ~from:Timing.drop2 ~n:2 ~seed:(seed 2);
+             pump ~from:Timing.drop2 ~n:3 ~seed:(seed 3);
+             pump ~from:Timing.drop2 ~n:4 ~seed:(seed 4);
+             sixteenths ~from:Timing.drop2 ~n:5 ~seed:(seed 5)] in
+  (* Two segments only, and the second turns early: F for a bar, then
+     the V that hands the drop back. *)
   let tolling : Scalar Signal =
-    mix_all [place_multi (Bass.held (note A 1)) [88s; 90s];
-             Bass.held (note F 1) |> place ~at:92s;
-             Bass.held (note E 1) |> place ~at:94s] in
+    mix_all [held ~from:Timing.tolling ~n:0;
+             Bass.held (hz_of 1) |> place ~at:(on Timing.tolling 1);
+             Bass.held (hz_of 3)
+               |> place ~at:(on Timing.tolling 1 + Timing.dur Whole)] in
   let drop3 : Scalar Signal =
-    mix_all [sixteenths ~freq:(note A 1) ~start:96s ~seed:15.0;
-             pump ~freq:(note F 1) ~start:100s ~seed:16.0;
-             pump ~freq:(note D 2) ~start:104s ~seed:17.0;
-             sixteenths ~freq:(note E 1) ~start:108s ~seed:18.0] in
+    let seed n:Int : Scalar = 15.0 + Math.to_scalar n in
+    mix_all [sixteenths ~from:Timing.drop3 ~n:0 ~seed:(seed 0);
+             pump ~from:Timing.drop3 ~n:1 ~seed:(seed 1);
+             pump ~from:Timing.drop3 ~n:2 ~seed:(seed 2);
+             sixteenths ~from:Timing.drop3 ~n:3 ~seed:(seed 3)] in
   let outro : Scalar Signal =
-    place_multi (Bass.held (note A 1)) [112s; 114s; 116s] in
+    place_multi (Bass.held (hz_of 0))
+                (time_steps ~start:Timing.outro ~step:(Timing.dur Whole)
+                            ~count:3) in
   intro * 0.8 + build + drop1 + breakdown * 0.8 + drop2
     + tolling * 0.8 + drop3 + outro * 0.55
 ;;
 
-(* ---------- pads: the 16 s cycle tiles the whole song ---------- *)
+(* ---------- pads: the four-chord cycle tiles the whole song ---------- *)
+(* Eight cycles back to back, one every four segments - which is what
+   makes the pad the grid every other part is cut against. The last one,
+   over the outro, runs at half gain. *)
 let pad_line detune:Scalar : Scalar Signal =
   let one_cycle : Scalar Sample =
-    Pads.cycle detune |> sample ~from:0s ~to:16s in
-  place_multi one_cycle [0s; 16s; 32s; 48s; 64s; 80s; 96s]
-  + (one_cycle |> place ~at:112s) * 0.5
+    Pads.cycle detune |> sample ~from:0s ~to:(Timing.seg 4) in
+  place_multi one_cycle
+              (time_steps ~start:Timing.intro ~step:(Timing.seg 4)
+                          ~count:7)
+  + (one_cycle |> place ~at:Timing.outro) * 0.5
 ;;
 
 (* ---------- distorted guitar (drops only) ---------- *)
 (* Guitar is a drop-2 weapon: drop 1 stays drums-and-bass so the second
-   drop lands harder. `chugs` is a local function: twelve palm-muted
-   eighths (three beats), leaving the segment tail to the lead run. *)
+   drop lands harder. A chug run is twelve palm-muted eighths - the
+   segment's sixteen less the four the lead run answers over - and, like
+   the bass, it reads its chord off the segment index. *)
 let chug_part : Scalar Signal =
-  let chugs ~freq:Scalar ~start:Timestamp ~seed:Scalar : Scalar Signal =
-    Seq.humanized (Guitar.chug freq) ~start:start ~step:(Timing.dur Eighth)
-      ~count:12 ~seed:seed ~spread:7ms in
-  mix_all [chugs ~freq:(note A 2) ~start:64s ~seed:61.0;
-           chugs ~freq:(note F 2) ~start:68s ~seed:62.0;
-           chugs ~freq:(note D 2) ~start:72s ~seed:63.0;
-           chugs ~freq:(note E 2) ~start:76s ~seed:64.0;
-           chugs ~freq:(note A 2) ~start:80s ~seed:65.0;
-           chugs ~freq:(note F 2) ~start:84s ~seed:66.0;
-           chugs ~freq:(note A 2) ~start:96s ~seed:67.0;
-           chugs ~freq:(note F 2) ~start:100s ~seed:68.0;
-           chugs ~freq:(note D 2) ~start:104s ~seed:69.0;
-           chugs ~freq:(note E 2) ~start:108s ~seed:70.0]
+  let chugs ~from:Timestamp ~n:Int ~seed:Scalar : Scalar Signal =
+    Seq.humanized (Guitar.chug (chug_note (Scale.wrap_rem ~n:n ~k:4)))
+      ~start:(on from n) ~step:(Timing.dur Eighth)
+      ~count:(2 * Timing.eighths - 4) ~seed:seed ~spread:7ms in
+  let across ~from:Timestamp ~segs:Int ~seed:Scalar : Scalar Signal =
+    mix_all (List.init ~n:segs
+               ~f:(fun n:Int ->
+                     chugs ~from:from ~n:n
+                           ~seed:(seed + Math.to_scalar n))) in
+  across ~from:Timing.drop2 ~segs:6 ~seed:61.0
+  + across ~from:Timing.drop3 ~segs:4 ~seed:67.0
 ;;
 
 (* Lead runs: four syncopated notes at the tail of each chord segment
-   (n1 . n2 . n3 . n2), answering the bass instead of two static hits.
+   (d1 . d2 . d3 . d2), answering the bass instead of two static hits.
    Drop 1 runs rise; drop 2 flips the contour downward for variation.
-   `run` is a local function of the only part that plays them. *)
+   `run` is a local function of the only part that plays them, and it
+   takes scale degrees - so a run is a shape in the key rather than
+   three frequencies that have to be checked against the chord. *)
 let stab_part : Scalar Signal =
   (* Every run sits at the tail of its two-bar segment, on the same
-     beats: n1 on 5, n2 on 6 and 7, n3 on the offbeat between them. So
+     beats: d1 on 5, d2 on 6 and 7, d3 on the offbeat between them. So
      the run takes the segment it belongs to and works out its own
      timing, instead of four literals per line that have to agree. *)
-  let run ~n1:Scalar ~n2:Scalar ~n3:Scalar ~from:Timestamp ~seed:Scalar
+  let run ~d1:Int ~d2:Int ~d3:Int ~from:Timestamp ~n:Int ~seed:Scalar
       : Scalar Signal =
-    let on n:Scalar : Timestamp = from + Timing.dur Quarter * n in
-    place_multi (Guitar.stab n1) ([on 5.0] |> jitter ~seed:seed ~spread:6ms)
-    + place_multi (Guitar.stab n2)
-        ([on 6.0; on 7.0] |> jitter ~seed:(seed + 0.3) ~spread:6ms)
-    + place_multi (Guitar.stab n3)
-        ([on 6.5] |> jitter ~seed:(seed + 0.7) ~spread:6ms) in
-  mix_all [run ~n1:(note E 4) ~n2:(note C 4) ~n3:(note A 3)
-               ~from:64s ~seed:71.0;
-           run ~n1:(note F 4) ~n2:(note C 4) ~n3:(note A 3)
-               ~from:68s ~seed:72.0;
-           run ~n1:(note D 4) ~n2:(note A 3) ~n3:(note F 3)
-               ~from:72s ~seed:73.0;
-           run ~n1:(note B 3) ~n2:(note Gs 3) ~n3:(note E 3)
-               ~from:76s ~seed:74.0;
-           run ~n1:(note A 3) ~n2:(note C 4) ~n3:(note E 4)
-               ~from:80s ~seed:75.0;
-           run ~n1:(note F 4) ~n2:(note C 4) ~n3:(note A 3)
-               ~from:84s ~seed:76.0;
-           run ~n1:(note E 4) ~n2:(note C 4) ~n3:(note A 3)
-               ~from:96s ~seed:77.0;
-           run ~n1:(note F 4) ~n2:(note C 4) ~n3:(note A 3)
-               ~from:100s ~seed:78.0;
-           run ~n1:(note D 4) ~n2:(note A 3) ~n3:(note F 3)
-               ~from:104s ~seed:79.0;
-           run ~n1:(note B 3) ~n2:(note E 4) ~n3:(note A 4)
-               ~from:108s ~seed:80.0]
+    let beat b:Scalar : Timestamp = on from n + Timing.beats b in
+    let stab d:Int : Scalar Sample = Guitar.stab (lead_note d) in
+    place_multi (stab d1) ([beat 5.0] |> jitter ~seed:seed ~spread:6ms)
+    + place_multi (stab d2)
+        ([beat 6.0; beat 7.0] |> jitter ~seed:(seed + 0.3) ~spread:6ms)
+    + place_multi (stab d3)
+        ([beat 6.5] |> jitter ~seed:(seed + 0.7) ~spread:6ms) in
+  let d2 : Timestamp = Timing.drop2 in
+  let d3 : Timestamp = Timing.drop3 in
+  mix_all [run ~d1:4 ~d2:2 ~d3:0 ~from:d2 ~n:0 ~seed:71.0;
+           run ~d1:5 ~d2:2 ~d3:0 ~from:d2 ~n:1 ~seed:72.0;
+           run ~d1:3 ~d2:0 ~d3:(-2) ~from:d2 ~n:2 ~seed:73.0;
+           run ~d1:1 ~d2:(-1) ~d3:(-3) ~from:d2 ~n:3 ~seed:74.0;
+           run ~d1:0 ~d2:2 ~d3:4 ~from:d2 ~n:4 ~seed:75.0;
+           run ~d1:5 ~d2:2 ~d3:0 ~from:d2 ~n:5 ~seed:76.0;
+           run ~d1:4 ~d2:2 ~d3:0 ~from:d3 ~n:0 ~seed:77.0;
+           run ~d1:5 ~d2:2 ~d3:0 ~from:d3 ~n:1 ~seed:78.0;
+           run ~d1:3 ~d2:0 ~d3:(-2) ~from:d3 ~n:2 ~seed:79.0;
+           run ~d1:1 ~d2:4 ~d3:7 ~from:d3 ~n:3 ~seed:80.0]
 ;;
 
 (* ---------- bells: far-off tolls that close in ---------- *)
 (* Foreshadowed quietly in the first breakdown, tolling the chord roots
-   through 88-96s, marking every chord turn under drop 3, then dying
-   away through the outro (the last, lowest toll rings past the end). *)
+   a bar apart through the tolling section, marking every chord turn
+   under drop 3, then dying away through the outro (the last, lowest
+   toll rings past the end). *)
 let bell_part : Scalar Signal =
   let toll freq:Scalar ~at:Timestamp : Scalar Signal =
     Fx.bell_hit freq |> place ~at:at in
+  (* The four chord roots in order, one every `step` - which is a bar
+     when the bells are close together and a whole segment when they
+     mark the turns. *)
+  let peal ~from:Timestamp ~step:Timestamp : Scalar Signal =
+    mix_all (List.init ~n:4
+               ~f:(fun i:Int ->
+                     toll (bell_note i)
+                          ~at:(from + step * Math.to_scalar i))) in
   let foreshadow : Scalar Signal =
-    toll (note A 3) ~at:48s + toll (note E 3) ~at:56s in
+    toll (bell_note 0) ~at:Timing.breakdown
+    + toll (bell_note 3) ~at:(on Timing.breakdown 2) in
   let tolling : Scalar Signal =
-    mix_all [toll (note A 3) ~at:88s; toll (note F 3) ~at:90s;
-             toll (note D 3) ~at:92s; toll (note E 3) ~at:94s] in
+    peal ~from:Timing.tolling ~step:(Timing.dur Whole) in
   let drop3 : Scalar Signal =
-    mix_all [toll (note A 3) ~at:96s; toll (note F 3) ~at:100s;
-             toll (note D 3) ~at:104s; toll (note E 3) ~at:108s] in
+    peal ~from:Timing.drop3 ~step:(Timing.seg 1) in
   let outro : Scalar Signal =
-    toll (note A 3) ~at:112s
-    + toll (note A 3) ~at:116s * 0.6
-    + toll (note A 2) ~at:118s * 0.45 in
+    (* the last toll drops an octave, to the register the chugs sat in *)
+    toll (bell_note 0) ~at:Timing.outro
+    + toll (bell_note 0) ~at:(on Timing.outro 1) * 0.6
+    + toll (chug_note 0)
+           ~at:(on Timing.outro 1 + Timing.dur Whole) * 0.45 in
   foreshadow * 0.5 + tolling * 0.75 + drop3 * 0.55 + outro * 0.7
 ;;
 
 (* ---------- chains: industrial rattle ---------- *)
-(* Loose shakes through the tolling section, offbeat accents locked to
-   the bar grid under drop 3, then a single dying shake echoing away in
-   the outro. *)
+(* Loose shakes through the tolling section - written as the beats they
+   fall on, which is the only way an irregular gesture still follows the
+   tempo - offbeat accents one to the bar under drop 3, then a single
+   dying shake echoing away in the outro. *)
 let chain_part : Scalar Signal =
   let tolling : Scalar Signal =
-    place_multi Fx.chain_shake [89s; 91s; 93500ms; 95s] in
+    place_multi Fx.chain_shake
+                (List.map ~f:(fun b:Scalar ->
+                                Timing.tolling + Timing.beats b)
+                          ~xs:[2.0; 6.0; 11.0; 14.0]) in
   let drop3 : Scalar Signal =
-    Seq.pattern Fx.chain_shake ~start:(96s + Timing.dur Eighth)
+    Seq.pattern Fx.chain_shake
+                ~start:(Timing.drop3 + Timing.dur Eighth)
                 ~step:(Timing.dur Whole) ~count:8 in
   let outro : Scalar Signal =
-    let dying : Scalar Signal = Fx.chain_shake |> place ~at:112500ms in
-    dying + (dying |> delay ~by:700ms) * 0.5
-          + (dying |> delay ~by:1400ms) * 0.25 in
+    let echo : Timestamp = 700ms in
+    let dying : Scalar Signal =
+      Fx.chain_shake |> place ~at:(Timing.outro + Timing.beats 1.0) in
+    dying + (dying |> delay ~by:echo) * 0.5
+          + (dying |> delay ~by:(echo * 2.0)) * 0.25 in
   tolling * 0.5 + drop3 * 0.7 + outro * 0.4
 ;;
 
 (* ---------- fx ---------- *)
-(* The first riser is gentler - the drums entrance it announces is the
-   mildest arrival of the song. *)
 let fx_line : Scalar Signal =
-  (Fx.riser |> place ~at:11500ms) * 0.55
-  + place_multi Fx.riser [27500ms; 59500ms; 91500ms]
-  + place_multi Fx.impact [32s; 64s; 88s; 96s; 112s]
+  (* A riser ends a quarter before the arrival it announces, so it is
+     placed by working back from the landmark and from its own length -
+     a Sample is a record, so `to - from` is how long it runs. *)
+  let riser_before at:Timestamp : Timestamp =
+    at - Timing.dur Quarter - (Fx.riser.to - Fx.riser.from) in
+  (* The first riser is gentler - the drums entrance it announces is the
+     mildest arrival of the song. *)
+  (Fx.riser |> place ~at:(riser_before Timing.build)) * 0.55
+  + place_multi Fx.riser
+      (List.map ~f:riser_before
+                ~xs:[Timing.drop1; Timing.drop2; Timing.drop3])
+  + place_multi Fx.impact
+      [Timing.drop1; Timing.drop2; Timing.tolling; Timing.drop3;
+       Timing.outro]
 ;;
 
 (* ---------- stereo buses & master ---------- *)
@@ -316,9 +417,12 @@ let fx_bus : Vector Signal =
               + chain_part * 0.42;
             fx_line * 0.5 + alarm_line * 0.28 + bell_part * 0.42
               + chain_part * 0.3]
-  + (Fx.doppler_whoosh |> place ~at:54s) * 0.55
-  + (Fx.doppler_whoosh |> place ~at:89s) * 0.6
-  + (Fx.doppler_whoosh |> place ~at:117500ms) * 0.4 ;;
+  + (Fx.doppler_whoosh
+       |> place ~at:(Timing.breakdown + Timing.beats 12.0)) * 0.55
+  + (Fx.doppler_whoosh
+       |> place ~at:(Timing.tolling + Timing.beats 2.0)) * 0.6
+  + (Fx.doppler_whoosh
+       |> place ~at:(Timing.outro + Timing.beats 11.0)) * 0.4 ;;
 
 let master : Vector Signal =
   pad_bus + drum_bus + bass_bus + guitar_bus + fx_bus
@@ -326,26 +430,26 @@ let master : Vector Signal =
 ;;
 
 let _ =
-  master |> sample ~from:0s ~to:120s
+  master |> sample ~from:0s ~to:Timing.ending
          |> render ~name:"darksynth" ~rate:48000.0 ;;
 
 let _ =
   render_stems ~name:"darksynth" ~rate:48000.0
-    ~stems:[("drums", drum_bus |> sample ~from:0s ~to:120s);
-            ("bass", bass_bus |> sample ~from:0s ~to:120s);
-            ("pads", pad_bus |> sample ~from:0s ~to:120s);
-            ("guitar", guitar_bus |> sample ~from:0s ~to:120s);
-            ("fx", fx_bus |> sample ~from:0s ~to:120s)]
+    ~stems:[("drums", drum_bus |> sample ~from:0s ~to:Timing.ending);
+            ("bass", bass_bus |> sample ~from:0s ~to:Timing.ending);
+            ("pads", pad_bus |> sample ~from:0s ~to:Timing.ending);
+            ("guitar", guitar_bus |> sample ~from:0s ~to:Timing.ending);
+            ("fx", fx_bus |> sample ~from:0s ~to:Timing.ending)]
 ;;
 
 (* The overview image renders at a low rate: waveform lanes don't need
    audio resolution, and it keeps the build quick. *)
 let _ =
   render_vis_stems ~name:"darksynth-stems-wave" ~rate:8000.0
-    ~stems:[("master", master |> sample ~from:0s ~to:120s);
-            ("drums", drum_bus |> sample ~from:0s ~to:120s);
-            ("bass", bass_bus |> sample ~from:0s ~to:120s);
-            ("pads", pad_bus |> sample ~from:0s ~to:120s);
-            ("guitar", guitar_bus |> sample ~from:0s ~to:120s);
-            ("fx", fx_bus |> sample ~from:0s ~to:120s)]
+    ~stems:[("master", master |> sample ~from:0s ~to:Timing.ending);
+            ("drums", drum_bus |> sample ~from:0s ~to:Timing.ending);
+            ("bass", bass_bus |> sample ~from:0s ~to:Timing.ending);
+            ("pads", pad_bus |> sample ~from:0s ~to:Timing.ending);
+            ("guitar", guitar_bus |> sample ~from:0s ~to:Timing.ending);
+            ("fx", fx_bus |> sample ~from:0s ~to:Timing.ending)]
 ;;

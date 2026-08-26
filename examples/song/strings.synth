@@ -1,6 +1,7 @@
-(* Guitar for the song: a bright pluck sample and an eighth-note
-   arpeggio pattern (root . fifth . octave . fifth) built on the shared
-   Voices.Seq grid helper. *)
+(* Guitar for the song: a bright pluck and a two-bar arpeggio - root,
+   fifth, octave, fifth - over the chords the key gives. `arpeggio`
+   cycles a note list at a fixed step, so the pattern is written once
+   and each chord supplies its own notes. *)
 
 open Core
 open Core.Osc
@@ -13,45 +14,43 @@ open Core.Sig
 open Core.Math
 
 import Timing
-import Voices
-module Seq = Voices.Seq
+import Harmony
 
-open Core.Tempo
 open Core.Pitch
+open Core.Score
 
-let pluck freq:Scalar : Scalar Sample =
+(* A pluck rings for its own decay rather than for as long as it is
+   held, so the written length only sets where the window ends. *)
+let pluck freq:Scalar dur:Timestamp vel:Scalar : Scalar Sample =
   let body : Scalar Signal =
     (sine freq * 0.7 + saw freq * 0.3) * exp_decay 6.0 in
   let pick : Scalar Signal = noise 3000.0 * exp_decay 80.0 * 0.1 in
-  (body + pick) * 0.8
-    |> sample ~from:0s ~to:600ms
+  (body + pick) * 0.8 * vel
+    |> sample ~from:0s ~to:(dur + 350ms)
 ;;
 
-(* One two-bar arpeggio: the root and octave land on the half-note
-   cycle, the fifth fills every quarter in between. *)
-let arp ~root:Note ~fifth:Note ~oct:Note
-        ~root_t:Timestamp ~fifth_t:Timestamp ~oct_t:Timestamp
-    : Scalar Signal =
-  let voice n:Note : Scalar Sample = pluck (a440 ~note:n) in
-  mix_all [Seq.pattern (voice root) ~start:root_t
-                       ~step:(Timing.dur Half) ~count:4;
-           Seq.pattern (voice fifth) ~start:fifth_t
-                       ~step:(Timing.dur Quarter) ~count:8;
-           Seq.pattern (voice oct) ~start:oct_t
-                       ~step:(Timing.dur Half) ~count:4]
+(* Root . fifth . octave . fifth, as intervals above whichever root the
+   chord hands over - so the shape moves with the harmony instead of
+   being three note lists that have to agree. *)
+let figure ~root:Note : Note list =
+  let fifth : Note = shift ~note:root ~by:7 in
+  [root; fifth; shift ~note:root ~by:12; fifth]
 ;;
 
-(* Enters with the C chord at bar 4: C arpeggio, then G arpeggio at bar
-   6. Each voice enters half a beat after the one before it. *)
+(* Enters with the C chord at bar 4, then the G chord at bar 6: sixteen
+   eighths to the two-bar segment, `seq` laying the second after the
+   first. Both roots fold into the octave above G3, which is what keeps
+   the C above the G rather than an octave below it. *)
+let phrase : Phrase =
+  let segment i:Int : Phrase =
+    arpeggio ~notes:(figure ~root:(Harmony.root ~i:i
+                                     ~low:{ pc = G; oct = 3 }))
+             ~step:0.5 ~count:16 in
+  seq ~ps:[segment 2; segment 3] |> move ~beats:(Timing.span 4)
+;;
+
 let riff : Scalar Signal =
-  arp ~root:{ pc = C; oct = 4 } ~fifth:{ pc = G; oct = 4 }
-      ~oct:{ pc = C; oct = 5 }
-      ~root_t:(Timing.at ~bar:4 ~beat:0.0)
-      ~fifth_t:(Timing.at ~bar:4 ~beat:0.5)
-      ~oct_t:(Timing.at ~bar:4 ~beat:1.0)
-  + arp ~root:{ pc = G; oct = 3 } ~fifth:{ pc = D; oct = 4 }
-        ~oct:{ pc = G; oct = 4 }
-        ~root_t:(Timing.at ~bar:6 ~beat:0.0)
-        ~fifth_t:(Timing.at ~bar:6 ~beat:0.5)
-        ~oct_t:(Timing.at ~bar:6 ~beat:1.0)
+  phrase
+    |> realize ~tempo:Timing.tempo ~tuning:Harmony.tuning
+    |> play ~voice:pluck
 ;;

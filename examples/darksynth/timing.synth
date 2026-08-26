@@ -1,12 +1,14 @@
-(* The song's clock, in one place: 120 BPM in 4/4, so a beat is 500ms
-   and a bar 2s. Every groove takes its step from `dur`, so the whole
-   arrangement follows the tempo rather than a set of precomputed
-   durations.
+(* The song's clock *and* its map, in one place: 120 BPM in 4/4, so a
+   beat is 500ms and a bar 2s. Every groove takes its step from `dur`,
+   every position from `seg` or `beats`, and every hit count from the
+   per-bar counts below - so the whole arrangement follows the tempo
+   rather than a set of precomputed seconds.
 
-   The section landmarks stay written in seconds - the arrangement is
-   documented as a timeline at the top of song.synth, and 32s reads
-   better there than "bar 16". What Tempo buys this song is note values
-   and the offsets derived from them. *)
+   The section landmarks live here too, and they are the reason none of
+   the arrangement is written in seconds any more. Each section begins
+   on a chord segment - two bars, the length of one chord of the cycle -
+   so the timeline documented at the top of song.synth is a count of
+   chords, and re-tempoing the track is still the one-line edit below. *)
 
 open Core
 open Core.Osc
@@ -21,7 +23,37 @@ open Core.Tempo
 
 let tempo : Tempo = common ~bpm:120.0 ;;
 
+(* --- durations and offsets ------------------------------------------ *)
+
 let dur v:Value : Timestamp = value ~t:tempo ~v:v ;;
-(* Two bars: the length of one chord segment, and the unit the whole
-   arrangement is cut into. *)
-let segment : Timestamp = bar ~t:tempo * 2.0 ;;
+(* `n` beats in, fractions included - what a gesture that lands between
+   note values is written with. *)
+let beats n:Scalar : Timestamp = Tempo.beats ~t:tempo ~n:n ;;
+(* `n` chord segments in. A segment is two bars: one chord of the cycle,
+   and the unit the whole arrangement is cut into. *)
+let seg n:Int : Timestamp = bar ~t:tempo * (2.0 * Math.to_scalar n) ;;
+(* `n` bars measured in *beats*, which is the unit a Score phrase
+   positions itself in: `Score.chord ~len:(span 2)` is one segment. *)
+let span n:Int : Scalar = Math.to_scalar (n * tempo.meter.beats) ;;
+
+(* Hits per bar, which is where the grids' `count` arguments come from.
+   In 4/4 a bar is `meter.beats` quarter notes and the finer values
+   double from there; a compound meter would count differently. *)
+let quarters : Int = tempo.meter.beats ;;
+let halves : Int = quarters / 2 ;;
+let eighths : Int = quarters * 2 ;;
+let sixteenths : Int = quarters * 4 ;;
+
+(* --- the arrangement's landmarks ------------------------------------ *)
+(* Segment numbers, not seconds: BUILD is four chords in, DROP 1 eight,
+   and the track ends after thirty. *)
+
+let intro : Timestamp = seg 0 ;;
+let build : Timestamp = seg 4 ;;
+let drop1 : Timestamp = seg 8 ;;
+let breakdown : Timestamp = seg 12 ;;
+let drop2 : Timestamp = seg 16 ;;
+let tolling : Timestamp = seg 22 ;;
+let drop3 : Timestamp = seg 24 ;;
+let outro : Timestamp = seg 28 ;;
+let ending : Timestamp = seg 30 ;;

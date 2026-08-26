@@ -21,31 +21,51 @@ open Core.Sig
 open Core.Math
 
 import Timing
+import Harmony
 import Drums
 import Pad
 import Keys
 import Strings
 
-open Core.Tempo
+open Core.Pitch
+open Core.Score
 
-(* Every grid names its note value and its bar, so the whole kit follows
-   the tempo in Timing rather than a set of precomputed steps: quarter
-   kicks from bar 1, the snare backbeat a beat later, eighth hats from
-   bar 2. *)
+(* The groove is written as one bar and looped, the way it is counted:
+   kick on every beat, snare on the backbeat, eighth hats with the
+   downbeat accented. `Score.strike` reads a phrase's rhythm and its
+   velocities and ignores the note - percussion has no pitch - so one
+   throwaway note stands in for every hit. *)
+let hit : Note = Harmony.key.tonic ;;
+
+let kick_bar : Phrase = melody ~notes:(List.repeat ~n:4 ~x:hit) ~len:1.0 ;;
+
+(* A `Rest` advances the cursor without sounding, so the backbeat reads
+   as the two-and-four it is rather than as an offset grid. *)
+let snare_bar : Phrase =
+  line ~items:[Rest 1.0; Play (hit, 1.0); Rest 1.0; Play (hit, 1.0)] ;;
+
+(* Two quarter-note lines, the second displaced half a beat and two
+   dynamic levels - 8 dB - softer: `layer` keeps each at its own
+   positions, and the accent is what an even eighth grid could not
+   say. *)
+let hat_bar : Phrase =
+  let four ~l:Level : Phrase =
+    line ~items:(List.repeat ~n:4 ~x:(Play (hit, 1.0)))
+      |> staccato ~ratio:0.5
+      |> velocity ~f:(fun v:Scalar -> v * amp ~l:l) in
+  layer ~ps:[four ~l:Fff; four ~l:Forte |> move ~beats:0.5] ;;
+
+(* Kick and snare run from bar 1, the hats join a bar later. *)
 let drums : Scalar Signal =
-  let kicks : Scalar Signal =
-    place_multi Drums.kick_hit
-                (Timing.grid ~from:(Timing.at ~bar:1 ~beat:0.0)
-                             ~step:Quarter ~count:28) in
-  let snares : Scalar Signal =
-    place_multi Drums.snare_hit
-                (Timing.grid ~from:(Timing.at ~bar:1 ~beat:1.0)
-                             ~step:Half ~count:14) in
-  let hats : Scalar Signal =
-    place_multi Drums.hat_hit
-                (Timing.grid ~from:(Timing.at ~bar:2 ~beat:0.0)
-                             ~step:Eighth ~count:48) in
-  kicks + snares * 0.9 + hats * 0.5
+  let part ~p:Phrase ~from:Int ~bars:Int
+           ~voice:(Scalar -> Scalar Sample) : Scalar Signal =
+    loop ~p:p ~n:bars
+      |> move ~beats:(Timing.span from)
+      |> realize ~tempo:Timing.tempo ~tuning:Harmony.tuning
+      |> strike ~voice:voice in
+  part ~p:kick_bar ~from:1 ~bars:7 ~voice:Drums.kick
+  + part ~p:snare_bar ~from:1 ~bars:7 ~voice:Drums.snare * 0.9
+  + part ~p:hat_bar ~from:2 ~bars:6 ~voice:Drums.hat * 0.5
 ;;
 
 (* Per-instrument stereo buses, mixed exactly as they appear in the
@@ -56,9 +76,13 @@ let pad_bus : Vector Signal =
 let drum_bus : Vector Signal =
   channels [drums * 0.6; drums * 0.6] ;;
 let keys_bus : Vector Signal =
-  channels [Keys.melody * 0.6; Keys.melody * 0.45] ;;
+  channels [Keys.line * 0.6; Keys.line * 0.45] ;;
 let strings_bus : Vector Signal =
   channels [Strings.riff * 0.3; Strings.riff * 0.45] ;;
+
+(* The eight bars of material plus a beat of tail, so the pad's release
+   and the last piano note ring out instead of being cut. *)
+let ending : Timestamp = Timing.at ~bar:8 ~beat:1.0 ;;
 
 let master : Vector Signal =
   pad_bus + drum_bus + keys_bus + strings_bus
@@ -66,10 +90,10 @@ let master : Vector Signal =
 ;;
 
 let _ =
-  master |> sample ~from:0s ~to:16500ms
+  master |> sample ~from:0s ~to:ending
          |> render ~name:"song" ~rate:48000.0 ;;
 let _ =
-  master |> sample ~from:0s ~to:16500ms
+  master |> sample ~from:0s ~to:ending
          |> render_vis ~name:"song-wave" ~rate:48000.0 ;;
 
 (* Stems: one artifact per instrument bus (song-drums, song-pad,
@@ -77,18 +101,18 @@ let _ =
    soft_clip master reproduces the mix. *)
 let _ =
   render_stems ~name:"song" ~rate:48000.0
-    ~stems:[("drums", drum_bus |> sample ~from:0s ~to:16500ms);
-            ("pad", pad_bus |> sample ~from:0s ~to:16500ms);
-            ("piano", keys_bus |> sample ~from:0s ~to:16500ms);
-            ("guitar", strings_bus |> sample ~from:0s ~to:16500ms)]
+    ~stems:[("drums", drum_bus |> sample ~from:0s ~to:ending);
+            ("pad", pad_bus |> sample ~from:0s ~to:ending);
+            ("piano", keys_bus |> sample ~from:0s ~to:ending);
+            ("guitar", strings_bus |> sample ~from:0s ~to:ending)]
 ;;
 
 (* One image: the master over every composing bus, on a shared time axis. *)
 let _ =
   render_vis_stems ~name:"song-stems-wave" ~rate:48000.0
-    ~stems:[("master", master |> sample ~from:0s ~to:16500ms);
-            ("drums", drum_bus |> sample ~from:0s ~to:16500ms);
-            ("pad", pad_bus |> sample ~from:0s ~to:16500ms);
-            ("piano", keys_bus |> sample ~from:0s ~to:16500ms);
-            ("guitar", strings_bus |> sample ~from:0s ~to:16500ms)]
+    ~stems:[("master", master |> sample ~from:0s ~to:ending);
+            ("drums", drum_bus |> sample ~from:0s ~to:ending);
+            ("pad", pad_bus |> sample ~from:0s ~to:ending);
+            ("piano", keys_bus |> sample ~from:0s ~to:ending);
+            ("guitar", strings_bus |> sample ~from:0s ~to:ending)]
 ;;

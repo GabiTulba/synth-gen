@@ -12,9 +12,16 @@ namespace {
 // Elementwise math over Scalars, Vectors, and Signals.
 Value math1(const Value& v, SigUnaryOp op, const char* prim) {
   auto f = [op](double x) {
-    return op == SigUnaryOp::Exp    ? std::exp(x)
-           : op == SigUnaryOp::Sqrt ? std::sqrt(x)
-                                    : std::log(x);
+    switch (op) {
+      case SigUnaryOp::Exp: return std::exp(x);
+      case SigUnaryOp::Sqrt: return std::sqrt(x);
+      case SigUnaryOp::Sin: return std::sin(x);
+      case SigUnaryOp::Cos: return std::cos(x);
+      case SigUnaryOp::Tan: return std::tan(x);
+      case SigUnaryOp::Atan: return std::atan(x);
+      case SigUnaryOp::Abs: return std::fabs(x);
+      default: return std::log(x);
+    }
   };
   switch (v.kind) {
     case Value::Kind::Scalar: return Value::scalar(f(v.num));
@@ -55,6 +62,35 @@ SYNTH_EXTERNAL(sqrt) {
 }
 SYNTH_EXTERNAL(log) {
   *result = math1(args[0], SigUnaryOp::Log, "log");
+  return true;
+}
+SYNTH_EXTERNAL(sin) {
+  *result = math1(args[0], SigUnaryOp::Sin, "sin");
+  return true;
+}
+SYNTH_EXTERNAL(cos) {
+  *result = math1(args[0], SigUnaryOp::Cos, "cos");
+  return true;
+}
+SYNTH_EXTERNAL(tan) {
+  *result = math1(args[0], SigUnaryOp::Tan, "tan");
+  return true;
+}
+SYNTH_EXTERNAL(atan) {
+  *result = math1(args[0], SigUnaryOp::Atan, "atan");
+  return true;
+}
+SYNTH_EXTERNAL(abs) {
+  *result = math1(args[0], SigUnaryOp::Abs, "abs");
+  return true;
+}
+
+// Value-level randomness: jitter's splitmix64 exposed as a value - a
+// pure, platform-stable function of (seed, index) in [0, 1). Purity by
+// construction: same arguments, same bits, so renders stay cacheable.
+SYNTH_EXTERNAL(hash) {
+  *result =
+      Value::scalar(synth::core::hashUnit(args[0].asScalar(), args[1].asInt()));
   return true;
 }
 
@@ -122,5 +158,28 @@ SYNTH_EXTERNAL(to_min) {
 
 SYNTH_EXTERNAL(not) {
   *result = Value::boolean(!args[0].asBool());
+  return true;
+}
+
+// The missing quotient of two durations: `div` answers "how many of
+// these fit" (a dimensionless count, so an Int) and `rem` "what is
+// left" (still a duration). No unit ever decays - this is deliberately
+// not Timestamp/Timestamp -> Scalar. Floor convention, matching
+// wrap_div: the pair satisfies num == den * div + rem with 0 <= rem < den.
+SYNTH_EXTERNAL(div) {
+  double num = args[0].asTime();
+  double den = args[1].asTime();
+  if (den <= 0) throw std::runtime_error("Time.div: division by 0s");
+  *result = scalarToInt(num / den, std::floor(num / den), "Time.div");
+  return true;
+}
+
+SYNTH_EXTERNAL(rem) {
+  double num = args[0].asTime();
+  double den = args[1].asTime();
+  if (den <= 0) throw std::runtime_error("Time.rem: division by 0s");
+  double r = num - den * std::floor(num / den);
+  if (r < 0) r = 0;  // floating fuzz; a Timestamp is never negative
+  *result = Value::time(r);
   return true;
 }

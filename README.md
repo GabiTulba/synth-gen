@@ -58,8 +58,9 @@ let _ = render "demo" 48000.0 (sample song 0s 2s)
 ;;
 ```
 
-Fully annotated — with records, variants and `match`, and `let rec`
-for self-recursion — and `render` is the language's only effect.
+Annotated parameters with locally inferred return types — with
+records, variants and `match`, and `let rec` for self-recursion — and
+`render` is the language's only effect.
 Signals are lazy graphs; nothing is discretized until a render target is
 produced. See the [language tour](docs/language-tour.md) for the full
 feature walk-through.

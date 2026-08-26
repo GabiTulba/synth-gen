@@ -17,10 +17,13 @@ subgraphs are safe under concurrency and sharing a subtree is free.
 Time-remapping nodes create *private contexts*:
 
 - `sample s from to` cuts the window `[from, to)`; `place smp at` embeds
-  it back at `at`, silent elsewhere. Stateful primitives (filters, `fm`,
-  `delay`, `reverb`) evaluate from the epoch of their own timeline; a
+  it back at `at`, silent elsewhere. Stateful primitives (filters —
+  fixed, modulated and resonant — `fm`, `delay`, `feedback`, `follow`,
+  `reverb`) evaluate from the epoch of their own timeline; a
   placed sample's interior state warms up from t = 0 of its source,
-  preserving "signals are defined from t = 0" semantics.
+  preserving "signals are defined from t = 0" semantics. Feedback loops
+  (`feedback`, `reverb`) live entirely inside a node's per-render
+  state; the graph itself stays acyclic.
 - `resample input ~f` changes how fast the source is read
   (`out(t) = input(∫₀ᵗ f)`); the source runs in its own context from its
   own epoch, exactly like a placement.

@@ -10,9 +10,6 @@ them.
 
 ## Language
 
-- **Signal-level branching.** Comparisons and `if` are build-time only.
-  A sample-wise select/gate over signals would be a new signal-producing
-  primitive (e.g. threshold gates, envelope followers driving choices).
 - **Mutual recursion.** `let rec` covers self-recursion (and recursive
   type declarations cover `list`-like shapes), but a group of
   definitions cannot refer to each other: definitions still precede
@@ -26,10 +23,11 @@ them.
 - **Per-declaration visibility for types.** A published module exposes
   its type declarations like its values; abstract-on-export (hiding a
   record's fields outside its library) is unexplored.
-- **Type inference.** Every binding is fully annotated; polymorphism is
-  written out. Local inference (return types, `let ... in` annotations,
-  lambda parameters, `match` scrutinee-directed shortcuts) would remove
-  most annotation weight without changing the checked language.
+- **Type inference, continued.** Return types and `let ... in`
+  annotations are now locally inferred; still open are lambda
+  parameters, destructuring bindings, and `match` scrutinee-directed
+  shortcuts - each would remove more annotation weight without
+  changing the checked language.
 - **Per-definition visibility control.** A library's `lib.synth`
   publishes whole modules or re-exported values, but a published module
   exposes all of its definitions — there is no `private` below module
@@ -37,10 +35,11 @@ them.
 
 ## Engine & primitives
 
-- **Feedback / IIR delays.** `delay` is feedforward only; feedback
-  echoes, resonators, and IIR-style signal cycles need a language-level
-  story for cyclic graphs (today only primitives like `reverb` may hold
-  internal feedback state).
+- **User-defined signal cycles.** `Fx.feedback` now covers feedback
+  echoes (its loop lives in per-render state, like `reverb`'s), but
+  *general* IIR-style signal cycles - a user routing any signal back
+  into its own graph - still need a language-level story for cyclic
+  graphs.
 - **Reverse playback.** `resample` reads its source only forward — a
   negative rate clamps to zero rather than rewinding. Reverse (and
   scrubbing generally) requires a different read-head model.
@@ -58,32 +57,37 @@ The songwriting layer — `Core.Pitch`, `Core.Tempo`, `Core.Scale`,
 [§6](language-spec.md#6-primitive-signatures-v1-roster). What is left is
 work on top of it:
 
-- **A note-value *count*.** `Tempo.value` says how long a note value is,
-  as a `Timestamp`, and Timestamps do not divide
-  ([§3](language-spec.md#operators-pointwise-lifting--scalar-broadcasting))
-  — so there is no way to ask how many eighths fill eight bars, which is
-  exactly the number a grid's `~count` wants.
-  `examples/darksynth/timing.synth` derives its own
-  `quarters`/`halves`/`eighths`/`sixteenths` off `meter.beats`, correct
-  for simple meters only. A `Tempo.per_bar ~t ~v:Value : Int` is a few
-  lines over the same `frac` that `value` already walks, and it is the
-  one gap the example rewrite turned up.
 - **Tempo maps and rubato.** A `Tempo` is one fixed BPM. A tempo *curve*
   — accelerando, ritardando, a click that drifts — is expressible as a
   `Scalar -> Scalar` rate over the timeline, which is precisely what
   `resample` already consumes, so the primitive exists and only the
-  `Phrase`-level realization is missing. Keeping `Phrase` symbolic (in
-  beats) is what leaves the door open.
+  `Phrase`-level realization is missing. `realize`/`realize_with` are
+  the single beats→Timestamps bridge, so the intended shape is a
+  `realize_map ~tempos:(Scalar, Tempo.Tempo) list` (tempo changes at
+  beat positions, piecewise) with no change to `Phrase` or any
+  transform. Keeping `Phrase` symbolic (in beats) is what leaves the
+  door open.
+- **Portamento / glide.** A glide needs the *next* event's frequency
+  and a `Score` voice sees one note. The likely shape is an alternative
+  player — `play_legato` handing `(freq, next_freq, dur, vel)` for the
+  voice to sweep with `resample` or `fm` — deferred until the
+  modulated-filter idioms settle.
 - **`Note` is inherently 12-tone**, so `shift`/`flat`/`hz` suit
   12-division temperaments; `n /= 12` ladders work in `Int` steps
-  through `step_hz`. A spelling that generalizes to arbitrary `n` would
-  need a different note type, and it is not clear one is worth it.
+  through `step_hz` (and reach the score tier through
+  `Score.realize_with` with a `step_hz`-backed mapping). A spelling
+  that generalizes to arbitrary `n` would need a different note type,
+  and it is not clear one is worth it.
 - **Scale-degree spelling** (whether `Cs` and `Df` should be
   distinguishable) stays out until something needs to render notation.
-- **`Score.seq` nests rather than folds**, one call level per phrase, so
-  a sequence of thousands of phrases would reach the 4096-call recursion
-  limit. One level per *event* is well inside it, so no realistic score
-  reaches this today.
+- **Channel arity in types.** `Vector` erases channel count, so a
+  stereo pair and a 5-channel bus meet the checker identically and
+  diverge at graph build. A `Stereo`-style refinement (or a type-level
+  count) would catch pan/bus mistakes earlier, but it infects every
+  polymorphic signature in the library; the build-time channel check
+  plus `Mix`/`Arrange.channel` keeping stereo construction behind named
+  functions is probably the right cost line. Recorded so the option is
+  not lost.
 - **Notation stays out of scope.** `Phrase` is a lean note list with an
   algebra over it, not a notation model: ties, slurs, key signatures,
   repeat barlines, multi-staff layout and beaming are all absent. They

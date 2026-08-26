@@ -1,0 +1,71 @@
+(* The sampling workflow, end to end - the corner of Core no other
+   example exercised: import audio with Io (files are build inputs,
+   resolved next to this file), slice a window out of it, warp it with
+   resample, and place it on a tempo grid through Groove. The stereo
+   file comes back apart again through Arrange.channel - the inverse
+   `channels` never used to have - and everything meets in a Mix bus.
+
+   This file also demos the Dsp prelude: two opens replace the old
+   nine-line preamble, and Io/Groove/Tempo/Mix stay deliberately
+   qualified - those opens are meaningful decisions. *)
+
+open Core
+open Core.Dsp
+
+let t : Tempo.Tempo = Tempo.common ~bpm:100.0 ;;
+
+(* --- Import and slice -------------------------------------------------
+   The file occupies [0s, ~400ms) on its own timeline; the sample cuts
+   the attack. *)
+
+let src : Scalar Signal = Io.load_mono ~path:"pluck.wav" ;;
+let hit : Scalar Sample = sample src 0s 250ms ;;
+
+(* --- Warp -------------------------------------------------------------
+   resample reads the source at half speed: an octave down and twice as
+   long, so the window doubles too. *)
+
+let low : Scalar Sample =
+  sample (resample ~input:(place hit 0s) ~f:(fun x:Scalar -> 0.5))
+         0s 500ms ;;
+
+(* --- Place on the grid ------------------------------------------------
+   A Euclidean five-over-sixteen line of the raw hit, and the slowed
+   copy on half notes underneath. *)
+
+let line16 : Scalar Signal =
+  Groove.pattern
+    ~hit:hit
+    ~steps:(Groove.euclid
+              ~hits:5
+              ~steps:(Tempo.grid ~t:t ~from:0s ~step:Tempo.Sixteenth
+                                 ~count:16)) ;;
+let half_notes : Scalar Signal =
+  Groove.pattern ~hit:low
+                 ~steps:(Tempo.grid ~t:t ~from:0s ~step:Tempo.Half
+                                    ~count:4) ;;
+
+(* --- The stereo inverse ----------------------------------------------
+   load_multi imports the two-channel file; channel takes it apart, and
+   Mix.pan puts the mono sum back into the field where we want it. *)
+
+let wide : Vector Signal = Io.load_multi ~path:"strum.wav" ;;
+let left : Scalar Signal = channel ~n:0 ~input:wide ;;
+let right : Scalar Signal = channel ~n:1 ~input:wide ;;
+let strum : Scalar Signal = (left + right) * 0.5 ;;
+
+(* --- Buses ------------------------------------------------------------
+   Mono parts take a place in the field; the weighted mix reads its
+   gains as decibels, next to their parts. *)
+
+let line_bus : Vector Signal = Mix.pan ~pos:0.3 ~input:line16 ;;
+let half_bus : Vector Signal = Mix.pan ~pos:(-0.4) ~input:half_notes ;;
+let strum_bus : Vector Signal =
+  Mix.pan ~pos:(-0.1) ~input:(place (sample strum 0s 600ms) 2s) ;;
+let master : Vector Signal =
+  Mix.mix ~parts:[(Mix.db (-2.0), line_bus);
+                  (Mix.db (-4.0), half_bus);
+                  (Mix.db (-5.0), strum_bus)]
+    |> soft_clip ~threshold:0.9 ;;
+
+let _ = render "sampling" 48000.0 (sample master 0s 4s) ;;

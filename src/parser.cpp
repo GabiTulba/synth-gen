@@ -283,10 +283,10 @@ class Parser {
     if (at(Tok::Colon)) {
       advance();
       d.retTypeExpr = parseType();
-    } else if (d.name != "_") {
-      fail(peek().span, "missing return type annotation (every binding "
-                        "except 'let _' must be annotated)");
     }
+    // No annotation is fine: the return type is inferred from the body
+    // (local inference). `let rec` and external bodies still need one -
+    // the checker enforces those with a precise message.
     expect(Tok::Equals, "'='");
     // `external "file.cpp"` as the *entire* body binds the definition to
     // a C++ implementation. `external` is contextual (an ordinary
@@ -671,24 +671,29 @@ class Parser {
     if (isRec && params.empty())
       fail(name.span, "'let rec' needs at least one parameter (a "
                       "recursive constant could never terminate)");
-    expect(Tok::Colon,
-           params.empty()
-               ? "':' (local bindings are annotated: "
-                 "let name : Type = ... in ...)"
-               : "':' for the return type (local functions are annotated: "
-                 "let name params : Type = ... in ...)");
-    TypeExprPtr ty = parseType();
+    TypeExprPtr ty;
+    if (at(Tok::Colon)) {
+      advance();
+      ty = parseType();
+    } else if (isRec) {
+      // The recursive name must be in scope in its own body at a known
+      // type, so `let rec` keeps its annotation.
+      fail(peek().span, "':' for the return type ('let rec' bindings must "
+                        "be annotated: let rec name params : Type = ...)");
+    }
     expect(Tok::Equals, "'='");
     ExprPtr bound = parseExpr();
     if (!params.empty()) {
-      auto fn = std::make_shared<TypeExpr>(
-          TypeExpr::Kind::Fun, Span{params.front().span.lo, ty->span.hi});
-      for (auto& p : params) {
-        fn->items.push_back(p.typeExpr);
-        fn->labels.push_back(p.labeled ? p.name : "");
+      if (ty) {
+        auto fn = std::make_shared<TypeExpr>(
+            TypeExpr::Kind::Fun, Span{params.front().span.lo, ty->span.hi});
+        for (auto& p : params) {
+          fn->items.push_back(p.typeExpr);
+          fn->labels.push_back(p.labeled ? p.name : "");
+        }
+        fn->ret = std::move(ty);
+        ty = std::move(fn);
       }
-      fn->ret = std::move(ty);
-      ty = std::move(fn);
       auto lam = std::make_unique<Expr>(
           Expr::Kind::Lambda, Span{params.front().span.lo, bound->span.hi});
       lam->params = std::move(params);

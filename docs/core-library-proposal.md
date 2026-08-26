@@ -1,13 +1,30 @@
 # Core library review: refactorings, extensions, and language gaps
 
-**Status: proposal — nothing in this document is implemented.** It is the
-companion to [`roadmap.md`](roadmap.md): where the roadmap lists items
-already accepted as future work, this document is a full review of the
-`Core` library and its documentation against the way the examples
-actually use them, and it proposes changes. Each proposal is labeled —
-**A** (refactor what exists), **B** (extend the library, no engine
-changes), **C** (extend the library, engine work required), **D**
-(language-level gaps) — and the final section ranks them. Where a
+**Status: implemented.** Every proposal in this document has landed —
+A1–A4, B1–B10, C1–C6, D1–D3 — with the current state documented in
+[`core-library.md`](core-library.md) (including the release-notes name
+list) and the language spec; the roadmap entries this review subsumed
+have left [`roadmap.md`](roadmap.md), and the open questions it
+deliberately did not close (portamento's player shape, tempo maps'
+`realize_map`, channel arity in types) are recorded there. Small
+implementation notes against the text below: `Scale.prog_degree`
+shipped alongside the `prog_*` family as the wrapped lookup they
+compose from; the named `Dom13` omits the 11th (spell the full stack
+with `Shape`); `Fx.resonant` clamps its cutoff near rate/6 for
+stability; `Mix.vca` shipped directly as `input * gain` because D3
+landed in the same round; D2 shipped return-type and `let ... in`
+inference (`let rec`, externals and destructuring keep annotations);
+and D1's tail-call elimination is general (any tail call, not just
+self), with the depth guard now counting only nested calls. The
+document is kept as the review that motivated the round.
+
+It is the companion to [`roadmap.md`](roadmap.md): where the roadmap
+lists items already accepted as future work, this document is a full
+review of the `Core` library and its documentation against the way the
+examples actually use them, and it proposes changes. Each proposal is
+labeled — **A** (refactor what exists), **B** (extend the library, no
+engine changes), **C** (extend the library, engine work required),
+**D** (language-level gaps) — and the final section ranks them. Where a
 proposal overlaps a roadmap entry, it says so and adds the concrete
 design the roadmap left open.
 

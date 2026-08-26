@@ -2669,26 +2669,42 @@ TEST(checker_core_is_a_real_library_of_externals) {
   CHECK(core->typeDecls.count("Score.Event") == 1);
   CHECK(core->typeDecls.count("Score.Item") == 1);
   CHECK(core->typeDecls.count("Score.Level") == 1);
+  // ...the new-generation submodules are there too...
+  CHECK(core->defTypes.count("Groove.pattern") == 1);
+  CHECK(core->defTypes.count("Groove.euclid") == 1);
+  CHECK(core->defTypes.count("Mix.pan") == 1);
+  CHECK(core->defTypes.count("Mix.vca") == 1);
+  CHECK(core->defTypes.count("Str.cat") == 1);
+  CHECK(core->defTypes.count("Dsp.sine") == 1);
+  CHECK(core->typeDecls.count("Scale.Prog") == 1);
+  CHECK(core->defTypes.count("Math.hash") == 1);
+  CHECK(core->defTypes.count("Time.div") == 1);
   // ...nothing lives at the top level...
   for (auto& [name, type] : core->defTypes)
     CHECK(name.find('.') != std::string::npos);
-  // ...and every definition outside the SynthGraph-implemented modules
-  // (List, Pitch, Tempo, Scale, Score) is an external binding.
-  std::set<std::string> inSynthGraph = {"List", "Pitch", "Tempo", "Scale",
-                                       "Score"};
-  std::function<bool(const std::vector<TopDef>&)> allExternal =
-      [&](const std::vector<TopDef>& ds) {
+  // ...and outside the SynthGraph-implemented modules, the only
+  // non-external definitions are the documented handful of sugar the
+  // external modules carry beside their bindings.
+  std::set<std::string> inSynthGraph = {"List",  "Pitch", "Tempo", "Scale",
+                                        "Score", "Groove", "Mix",  "Dsp"};
+  std::set<std::string> sugar = {"Math.pi",   "Math.min",  "Math.max",
+                                 "Math.clamp", "Math.lerp", "Fx.gated",
+                                 "Fx.echoes"};
+  std::function<bool(const std::string&, const std::vector<TopDef>&)>
+      allExternal = [&](const std::string& prefix,
+                        const std::vector<TopDef>& ds) {
         for (auto& d : ds) {
           if (d.kind == TopDef::Kind::ModuleDef && !inSynthGraph.count(d.name) &&
-              !allExternal(d.defs))
+              !allExternal(prefix + d.name + ".", d.defs))
             return false;
           if (d.kind == TopDef::Kind::Let &&
-              d.body->kind != Expr::Kind::External)
+              d.body->kind != Expr::Kind::External &&
+              !sugar.count(prefix + d.name))
             return false;
         }
         return true;
       };
-  CHECK(allExternal(core->parsed.defs));
+  CHECK(allExternal("", core->parsed.defs));
   // Core also declares the ambient list type itself.
   CHECK(core->typeDecls.count("list") == 1);
 }
@@ -3481,4 +3497,429 @@ let f : Scalar =
   for (auto& d : d2.items)
     if (d.message.find("abstract") != std::string::npos) found = true;
   CHECK(found);
+}
+
+// --- The core-library review round: new rosters and language rules ---------
+
+TEST(checker_math_additions_roster) {
+  TempProject tp;
+  std::string f = tp.write("m.synth", R"(
+open Core open Core.Math
+let s : Scalar = sin pi + cos 0.0 + tan 0.1 + atan 1.0 + abs (-2.0) ;;
+let sig : Scalar Signal = Core.Sig.signal ~f:(fun t:Scalar -> sin (t * 2.0 * pi)) ;;
+let m1 : Scalar = min 1.0 2.0 ;;
+let m2 : Scalar = max 1.0 2.0 ;;
+let c : Scalar = clamp ~lo:0.0 ~hi:1.0 ~x:1.5 ;;
+let l : Scalar = lerp ~a:0.0 ~b:10.0 ~t:0.25 ;;
+let h : Scalar = hash ~seed:7.0 ~i:3 ;;
+)");
+  DiagnosticBag diags;
+  Program prog = checkProject({f}, diags);
+  for (auto& d : diags.items)
+    std::cerr << renderDiagnostic(d, userMod(prog).parsed.source);
+  CHECK(!diags.hasErrors());
+  const auto& types = userMod(prog).defTypes;
+  CHECK(typeName(types.at("sig")) == "Scalar Signal");
+  CHECK(typeName(types.at("h")) == "Scalar");
+}
+
+TEST(checker_math_addition_type_errors) {
+  TempProject tp;
+  // hash's index is an Int; a Scalar is rejected.
+  std::string f = tp.write("m.synth", R"(
+open Core open Core.Math
+let h : Scalar = hash ~seed:7.0 ~i:3.0 ;;
+)");
+  DiagnosticBag d1;
+  checkProject({f}, d1);
+  CHECK(d1.hasErrors());
+  // min/max are Scalar-only.
+  std::string g = tp.write("m2.synth", R"(
+open Core open Core.Math
+let m : Int = min 1 2 ;;
+)");
+  DiagnosticBag d2;
+  checkProject({g}, d2);
+  CHECK(d2.hasErrors());
+}
+
+TEST(checker_time_div_rem_roster) {
+  TempProject tp;
+  std::string f = tp.write("t.synth", R"(
+open Core open Core.Time
+let n : Int = div ~num:1s ~den:250ms ;;
+let left : Timestamp = rem ~num:1s ~den:250ms ;;
+)");
+  DiagnosticBag diags;
+  Program prog = checkProject({f}, diags);
+  CHECK(!diags.hasErrors());
+  CHECK(typeName(userMod(prog).defTypes.at("n")) == "Int");
+  CHECK(typeName(userMod(prog).defTypes.at("left")) == "Timestamp");
+  // Scalars do not divide as durations.
+  std::string g = tp.write("t2.synth", R"(
+open Core open Core.Time
+let n : Int = div ~num:1.0 ~den:0.5 ;;
+)");
+  DiagnosticBag d2;
+  checkProject({g}, d2);
+  CHECK(d2.hasErrors());
+}
+
+TEST(checker_new_fx_and_osc_roster) {
+  TempProject tp;
+  std::string f = tp.write("fx.synth", R"(
+open Core open Core.Osc open Core.Fx open Core.Sig open Core.Arrange
+let sweep : Scalar Signal =
+  lowpass_mod ~cutoff:(constant 400.0 + time * 800.0) ~input:(saw 110.0) ;;
+let hp : Vector Signal =
+  highpass_mod ~cutoff:(constant 100.0)
+               ~input:(channels [sine 100.0; sine 200.0]) ;;
+let acid : Scalar Signal =
+  resonant ~cutoff:(constant 700.0) ~q:6.0 ~input:(saw_bl 55.0) ;;
+let env : Scalar Signal =
+  follow ~attack:5ms ~release:80ms ~input:(square_bl 220.0) ;;
+let dub : Scalar Signal = feedback ~by:250ms ~gain:0.6 ~input:(sine 440.0) ;;
+let gate : Scalar Signal =
+  select ~gate:env ~threshold:0.2 ~above:(sine 440.0) ~below:(sine 220.0) ;;
+let v : Scalar Sample =
+  gated ~attack:3ms ~decay:110ms ~sustain:0.5 ~release:60ms ~hold:400ms
+        ~input:(sine 330.0) ;;
+let e : Scalar Signal = echoes ~by:200ms ~gain:0.5 ~n:3 ~input:(sine 440.0) ;;
+let mono : Scalar Signal = channel ~n:0 ~input:hp ;;
+)");
+  DiagnosticBag diags;
+  Program prog = checkProject({f}, diags);
+  for (auto& d : diags.items)
+    std::cerr << renderDiagnostic(d, userMod(prog).parsed.source);
+  CHECK(!diags.hasErrors());
+  const auto& types = userMod(prog).defTypes;
+  CHECK(typeName(types.at("hp")) == "Vector Signal");
+  CHECK(typeName(types.at("v")) == "Scalar Sample");
+  CHECK(typeName(types.at("mono")) == "Scalar Signal");
+}
+
+TEST(checker_new_fx_type_errors) {
+  TempProject tp;
+  // A fixed Scalar where the modulated filter wants a cutoff *signal*.
+  std::string f = tp.write("fx.synth", R"(
+open Core open Core.Osc open Core.Fx
+let s : Scalar Signal = lowpass_mod ~cutoff:400.0 ~input:(saw 110.0) ;;
+)");
+  DiagnosticBag d1;
+  checkProject({f}, d1);
+  CHECK(d1.hasErrors());
+  // channel takes a Vector Signal.
+  std::string g = tp.write("fx2.synth", R"(
+open Core open Core.Osc open Core.Arrange
+let s : Scalar Signal = channel ~n:0 ~input:(sine 440.0) ;;
+)");
+  DiagnosticBag d2;
+  checkProject({g}, d2);
+  CHECK(d2.hasErrors());
+}
+
+TEST(checker_signal_broadcast_row) {
+  TempProject tp;
+  std::string f = tp.write("b.synth", R"(
+open Core open Core.Osc open Core.Fx open Core.Arrange
+let bus : Vector Signal = channels [sine 220.0; sine 221.0] ;;
+let env : Scalar Signal = exp_decay 2.0 ;;
+let faded : Vector Signal = bus * env ;;
+let other : Vector Signal = env * bus ;;
+let summed : Vector Signal = bus + env ;;
+let ducked ~input:'a Signal ~gain:Scalar Signal : 'a Signal =
+  input * gain ;;
+let d : Vector Signal = ducked ~input:bus ~gain:env ;;
+)");
+  DiagnosticBag diags;
+  Program prog = checkProject({f}, diags);
+  for (auto& d : diags.items)
+    std::cerr << renderDiagnostic(d, userMod(prog).parsed.source);
+  CHECK(!diags.hasErrors());
+  CHECK(typeName(userMod(prog).defTypes.at("faded")) == "Vector Signal");
+  // Two rigid element types still do not combine.
+  std::string g = tp.write("b2.synth", R"(
+open Core
+let bad ~x:'a Signal ~y:'b Signal : 'a Signal = x * y ;;
+)");
+  DiagnosticBag d2;
+  checkProject({g}, d2);
+  CHECK(d2.hasErrors());
+}
+
+TEST(checker_groove_roster) {
+  TempProject tp;
+  std::string f = tp.write("g.synth", R"(
+open Core open Core.Osc open Core.Fx open Core.Arrange open Core.Time
+let hit : Scalar Sample = sample (sine 440.0 * exp_decay 20.0) 0s 100ms ;;
+let grid16 : Timestamp list = time_steps ~start:0s ~step:125ms ~count:16 ;;
+let straight : Scalar Signal = Groove.pattern ~hit:hit ~steps:grid16 ;;
+let loose : Scalar Signal =
+  Groove.humanized ~hit:hit ~steps:grid16 ~seed:7.0 ~spread:8ms ;;
+let row : Timestamp list =
+  Groove.mask ~keep:[true; false; false; true] ~steps:grid16 ;;
+let world : Timestamp list = Groove.euclid ~hits:5 ~steps:grid16 ;;
+)");
+  DiagnosticBag diags;
+  Program prog = checkProject({f}, diags);
+  for (auto& d : diags.items)
+    std::cerr << renderDiagnostic(d, userMod(prog).parsed.source);
+  CHECK(!diags.hasErrors());
+  CHECK(typeName(userMod(prog).defTypes.at("row")) == "Timestamp list");
+}
+
+TEST(checker_tempo_additions_roster) {
+  TempProject tp;
+  std::string f = tp.write("t.synth", R"(
+open Core open Core.Tempo
+let t : Tempo = common ~bpm:120.0 ;;
+let two : Timestamp = bars ~t:t ~n:2.0 ;;
+let sixteenths : Int = per_bar ~t:t ~v:Sixteenth ;;
+let bridge : Scalar = bar_beats ~t:t ~n:8 ;;
+let landmarks : Timestamp list = marks ~t:t ~bars:[8; 8; 12; 4] ;;
+let sg : Timestamp list =
+  swung_grid ~t:t ~from:0s ~step:Eighth ~count:16 ~amount:0.33 ;;
+)");
+  DiagnosticBag diags;
+  Program prog = checkProject({f}, diags);
+  for (auto& d : diags.items)
+    std::cerr << renderDiagnostic(d, userMod(prog).parsed.source);
+  CHECK(!diags.hasErrors());
+  CHECK(typeName(userMod(prog).defTypes.at("sixteenths")) == "Int");
+  CHECK(typeName(userMod(prog).defTypes.at("bridge")) == "Scalar");
+}
+
+TEST(checker_scale_open_enums_and_prog) {
+  TempProject tp;
+  std::string f = tp.write("s.synth", R"(
+open Core open Core.Pitch open Core.Scale
+let harm_major : Scale = { tonic = { pc = C; oct = 4 };
+                           quality = CustomQ [0; 2; 4; 5; 7; 8; 11] } ;;
+let d : Note = degree ~s:harm_major ~n:5 ;;
+let th : Note list = tones ~c:{ root = { pc = A; oct = 3 };
+                                quality = Shape [0; 4; 7; 10; 14; 17; 21] } ;;
+let ninth : Note list = tones ~c:{ root = { pc = D; oct = 3 };
+                                   quality = Min9 } ;;
+let p : Prog = { key = harm_major; degrees = [0; 5; 3; 4] } ;;
+let len : Int = prog_len ~p:p ;;
+let root7 : Note = prog_root ~p:p ~i:7 ;;
+let ch : Note list = prog_chord ~p:p ~i:2 ;;
+let st : Note list = prog_stack ~p:p ~i:1 ~count:4 ;;
+let folded : Note = wrap_to ~note:{ pc = A; oct = 6 }
+                            ~low:{ pc = C; oct = 3 } ;;
+)");
+  DiagnosticBag diags;
+  Program prog = checkProject({f}, diags);
+  for (auto& d : diags.items)
+    std::cerr << renderDiagnostic(d, userMod(prog).parsed.source);
+  CHECK(!diags.hasErrors());
+  const auto& types = userMod(prog).defTypes;
+  CHECK(typeName(types.at("len")) == "Int");
+  // The open enums stay checker-guided: an exhaustive match that
+  // forgets the payload case is an error naming it.
+  std::string g = tp.write("s2.synth", R"(
+open Core open Core.Scale
+let f q:Quality : Int =
+  match q with
+  | Major -> 0 | Minor -> 1 | Dorian -> 2 | Phrygian -> 3 | Lydian -> 4
+  | Mixolydian -> 5 | Locrian -> 6 | HarmMinor -> 7 | MelMinor -> 8
+  | PentMajor -> 9 | PentMinor -> 10 | Blues -> 11 | WholeTone -> 12
+  | Chromatic -> 13 ;;
+)");
+  DiagnosticBag d2;
+  checkProject({g}, d2);
+  CHECK(d2.hasErrors());
+  bool named = false;
+  for (auto& d : d2.items)
+    if (d.message.find("CustomQ") != std::string::npos) named = true;
+  CHECK(named);
+}
+
+TEST(checker_score_additions_roster) {
+  TempProject tp;
+  std::string f = tp.write("sc.synth", R"(
+open Core open Core.Osc open Core.Fx open Core.Arrange
+open Core.Pitch open Core.Score
+let drums : Phrase = hits ~n:8 ~len:0.5 ;;
+let pat : Phrase = rhythm ~lens:[1.0; 0.5; 0.5; 2.0] ;;
+let accented : Phrase = vels ~p:drums ~vs:[1.0; amp ~l:Forte] ;;
+let rising : Phrase = crescendo ~p:drums ~from:Piano ~to:Fff ;;
+let loose : Phrase = humanize ~p:drums ~seed:3.0 ~spread:0.02 ;;
+let shuffled : Phrase = shuffle ~p:drums ~grid:0.5 ~amount:0.33 ;;
+let blue : Phrase = bend ~p:pat ~f:(fun i:Int -> -25.0) ;;
+let t : Tempo.Tempo = Tempo.common ~bpm:100.0 ;;
+let evs : Event list =
+  realize_with ~tempo:t ~pitch:(fun n:Note -> 110.0) ~p:pat ;;
+let evs2 : Event list =
+  realize ~tempo:t ~tuning:(et12 ~ref_hz:440.0) ~p:pat ;;
+let stepbend : Scalar =
+  match pat.steps with
+  | Nil -> 0.0
+  | Cons (s, rest) -> s.bend ;;
+)");
+  DiagnosticBag diags;
+  Program prog = checkProject({f}, diags);
+  for (auto& d : diags.items)
+    std::cerr << renderDiagnostic(d, userMod(prog).parsed.source);
+  CHECK(!diags.hasErrors());
+  CHECK(typeName(userMod(prog).defTypes.at("evs")) ==
+        typeName(userMod(prog).defTypes.at("evs2")));
+}
+
+TEST(checker_mix_roster) {
+  TempProject tp;
+  std::string f = tp.write("mx.synth", R"(
+open Core open Core.Osc open Core.Fx open Core.Arrange open Core.Time
+let l : Scalar Signal = sine 220.0 ;;
+let r : Scalar Signal = sine 331.0 ;;
+let wide : Vector Signal = Mix.pan ~pos:0.3 ~input:l ;;
+let auto : Vector Signal =
+  Mix.pan_sig ~pos:(Core.Sig.signal ~f:(fun t:Scalar -> t - 1.0))
+              ~input:l ;;
+let master : Vector Signal =
+  Mix.mix ~parts:[(Mix.db (-6.0), wide); (0.5, auto)] ;;
+let quieter : Vector Signal = Mix.gain_db ~x:(-3.0) ~input:master ;;
+let faded : Vector Signal = Mix.vca ~gain:(exp_decay 1.0) ~input:master ;;
+let pumped : Vector Signal =
+  Mix.duck ~ats:(time_steps ~start:0s ~step:500ms ~count:8) ~depth:0.6
+           ~dip:60ms ~recover:200ms ~input:master ;;
+)");
+  DiagnosticBag diags;
+  Program prog = checkProject({f}, diags);
+  for (auto& d : diags.items)
+    std::cerr << renderDiagnostic(d, userMod(prog).parsed.source);
+  CHECK(!diags.hasErrors());
+  CHECK(typeName(userMod(prog).defTypes.at("pumped")) == "Vector Signal");
+}
+
+TEST(checker_str_and_iter_roster) {
+  TempProject tp;
+  std::string f = tp.write("st.synth", R"(
+open Core open Core.Osc open Core.Fx open Core.Arrange open Core.Render
+let name i:Int : String = Str.cat ~a:"section-" ~b:(Str.of_int ~n:i) ;;
+let _ = List.iter
+  ~f:(fun i:Int ->
+        render ~name:(name i) ~rate:8000.0
+               ~sample:(sample (sine 220.0) 0s 10ms))
+  ~xs:(List.range ~from:0 ~count:2) ;;
+)");
+  DiagnosticBag diags;
+  Program prog = checkProject({f}, diags);
+  for (auto& d : diags.items)
+    std::cerr << renderDiagnostic(d, userMod(prog).parsed.source);
+  CHECK(!diags.hasErrors());
+  // iter's f must produce unit.
+  std::string g = tp.write("st2.synth", R"(
+open Core
+let x : unit = List.iter ~f:(fun i:Int -> 1.0) ~xs:[1; 2] ;;
+)");
+  DiagnosticBag d2;
+  checkProject({g}, d2);
+  CHECK(d2.hasErrors());
+}
+
+TEST(checker_list_additions_roster) {
+  TempProject tp;
+  std::string f = tp.write("l.synth", R"(
+open Core
+let ixs : Scalar list =
+  List.mapi ~f:(fun i:Int x:Scalar -> Core.Math.to_scalar i * x)
+            ~xs:[1.0; 2.0; 3.0] ;;
+let front : Int list = List.take ~n:2 ~xs:[1; 2; 3; 4] ;;
+let back : Int list = List.drop ~n:2 ~xs:[1; 2; 3; 4] ;;
+let running : Int list =
+  List.scan ~f:(fun acc:Int x:Int -> acc + x) ~init:0 ~xs:[8; 8; 12] ;;
+)");
+  DiagnosticBag diags;
+  Program prog = checkProject({f}, diags);
+  for (auto& d : diags.items)
+    std::cerr << renderDiagnostic(d, userMod(prog).parsed.source);
+  CHECK(!diags.hasErrors());
+  CHECK(typeName(userMod(prog).defTypes.at("running")) == "Int list");
+}
+
+TEST(checker_dsp_prelude) {
+  TempProject tp;
+  std::string f = tp.write("d.synth", R"(
+open Core
+open Core.Dsp
+let pluck freq:Scalar : Scalar Signal = sine freq * exp_decay 6.0 ;;
+let low : Scalar Signal = lowpass ~cutoff:800.0 (saw_bl 110.0) ;;
+let win : Scalar Sample = sample (pluck 440.0) 0s 800ms ;;
+let both : Scalar Signal = mix_all [place win 0s; place win 500ms] ;;
+let n : Scalar = to_scalar (round 2.5) + pi ;;
+let _ = render "dsp-demo" 8000.0 (sample both 0s 1s) ;;
+)");
+  DiagnosticBag diags;
+  Program prog = checkProject({f}, diags);
+  for (auto& d : diags.items)
+    std::cerr << renderDiagnostic(d, userMod(prog).parsed.source);
+  CHECK(!diags.hasErrors());
+}
+
+TEST(checker_local_inference) {
+  TempProject tp;
+  // Return types and let-in annotations may be omitted; the checker
+  // synthesizes them from the body.
+  std::string f = tp.write("i.synth", R"(
+open Core open Core.Osc open Core.Fx
+let freq = 220.0 * 2.0 ;;
+let tone f:Scalar = sine f * exp_decay 4.0 ;;
+let voiced =
+  let gain = 0.5 in
+  let scaled g:Scalar = tone freq * g in
+  scaled gain ;;
+)");
+  DiagnosticBag diags;
+  Program prog = checkProject({f}, diags);
+  for (auto& d : diags.items)
+    std::cerr << renderDiagnostic(d, userMod(prog).parsed.source);
+  CHECK(!diags.hasErrors());
+  const auto& types = userMod(prog).defTypes;
+  CHECK(typeName(types.at("freq")) == "Scalar");
+  CHECK(typeName(types.at("voiced")) == "Scalar Signal");
+  CHECK(types.at("tone")->kind == Type::Kind::Fun);
+  // An undetermined body still demands the annotation...
+  std::string g = tp.write("i2.synth", "let xs = [] ;;\n");
+  DiagnosticBag d2;
+  checkProject({g}, d2);
+  CHECK(d2.hasErrors());
+  bool asked = false;
+  for (auto& d : d2.items)
+    if (d.message.find("annotate") != std::string::npos) asked = true;
+  CHECK(asked);
+  // ...and so does let rec (the recursive name needs a known type).
+  std::string h = tp.write(
+      "i3.synth", "let rec f n:Int = if n <= 0 then 0 else f (n - 1) ;;\n");
+  DiagnosticBag d3;
+  checkProject({h}, d3);
+  CHECK(d3.hasErrors());
+}
+
+TEST(checker_lint_warns_on_unused_open) {
+  TempProject tp;
+  std::string f = tp.write("w.synth", R"(
+open Core
+open Core.Osc
+open Core.Io
+let s : Scalar Signal = sine 440.0 ;;
+)");
+  ModuleLoadContext ctx;
+  ctx.warnUnusedOpens = true;
+  DiagnosticBag diags;
+  checkProject({f}, diags, &ctx);
+  CHECK(!diags.hasErrors());
+  bool warnedIo = false, warnedOsc = false, warnedCore = false;
+  for (auto& d : diags.items) {
+    if (d.severity != Severity::Warning) continue;
+    if (d.message.find("'Core.Io'") != std::string::npos) warnedIo = true;
+    if (d.message.find("'Core.Osc'") != std::string::npos) warnedOsc = true;
+    if (d.message.find("'Core'") == 0) warnedCore = true;
+  }
+  CHECK(warnedIo);
+  CHECK(!warnedOsc);
+  // Without the flag (ordinary builds) no warnings appear.
+  DiagnosticBag quiet;
+  checkProject({f}, quiet);
+  CHECK(quiet.items.empty());
 }

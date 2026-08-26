@@ -30,19 +30,24 @@ SYNTH_EXTERNAL(jitter) {
   std::int64_t i = 0;
   for (auto& x : args[2].asList()) {
     double t = x.asTime();
-    // splitmix64 over (seed bits, index): integer-only, so the
-    // deltas are bit-identical on every platform.
-    std::uint64_t h;
-    std::memcpy(&h, &seed, sizeof h);
-    h ^= (std::uint64_t)i * 0x9E3779B97F4A7C15ull;
-    h ^= h >> 30; h *= 0xBF58476D1CE4E5B9ull;
-    h ^= h >> 27; h *= 0x94D049BB133111EBull;
-    h ^= h >> 31;
-    double unit = (double)(h >> 11) / 9007199254740992.0;  // [0,1)
+    // Math.hash applied in the time domain: same seed, same index, same
+    // bits (see util.hpp's hashUnit).
+    double unit = synth::core::hashUnit(seed, i);
     double t2 = t + (unit * 2.0 - 1.0) * spread;
     out.push_back(Value::time(std::max(0.0, t2)));
     i++;
   }
   *result = Value::list(std::move(out));
+  return true;
+}
+
+// Iterate an effectful function over a list. This lives in C++ rather
+// than lib.synth because it is the one List function that cannot be
+// written in the language: `unit` has no literal, so a synth-side
+// iterator would have nothing to return in its Nil arm. C++ can mint
+// the unit value; that is the whole implementation.
+SYNTH_EXTERNAL(iter) {
+  for (auto& x : args[1].asList()) ctx.apply(args[0], {x});
+  *result = Value::unit();
   return true;
 }

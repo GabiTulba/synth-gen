@@ -18,6 +18,14 @@ root (a `build.json` with `build` rules, if any), discovers libraries
 under it, and resolves `import`/`open` through the same code paths as
 the build — so a file lints exactly as it would build.
 
+Lint additionally **warns on unused opens**: an `open` that binds
+nothing the file actually uses (no value, type, constructor, or module
+name resolved through it) is reported as a warning on the files you
+named — imports stay quiet, and builds never emit it. This is what
+keeps the historical nine-line `open` preamble from being cargo-culted
+forward; most sound-design files now want just
+`open Core open Core.Dsp`.
+
 ## The language server (`synthc lsp`)
 
 `src/lsp.*` implements an LSP server (JSON-RPC over stdio) over the

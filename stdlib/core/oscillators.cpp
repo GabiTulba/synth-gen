@@ -17,6 +17,14 @@ SYNTH_EXTERNAL(square) {
   *result = Value::signal(makeOsc(OscKind::Square, args[0].asScalar()));
   return true;
 }
+SYNTH_EXTERNAL(saw_bl) {
+  *result = Value::signal(makeOsc(OscKind::SawBl, args[0].asScalar()));
+  return true;
+}
+SYNTH_EXTERNAL(square_bl) {
+  *result = Value::signal(makeOsc(OscKind::SquareBl, args[0].asScalar()));
+  return true;
+}
 SYNTH_EXTERNAL(noise) {
   *result = Value::signal(makeNoise(args[0].asScalar()));
   return true;

@@ -1007,7 +1007,9 @@ DiagnosticBag lintFiles(const std::vector<std::string>& files) {
         .push_back(f);
   for (auto& [root, group] : byRoot) {
     if (root.empty()) {
-      checkProject(group, diags);
+      ModuleLoadContext ctx;
+      ctx.warnUnusedOpens = true;
+      checkProject(group, diags, &ctx);
       continue;
     }
     LibraryRegistry reg = discoverLibraries(root, diags);
@@ -1027,6 +1029,7 @@ DiagnosticBag lintFiles(const std::vector<std::string>& files) {
     for (auto& [libName, libGroup] : byLib) {
       ModuleLoadContext ctx;
       ctx.registry = &reg;
+      ctx.warnUnusedOpens = true;
       for (auto& [name, li] : reg.byName) ctx.deps.push_back(name);
       if (!libName.empty()) ctx.currentLib = reg.find(libName);
       checkProject(libGroup, diags, &ctx);

@@ -65,6 +65,21 @@ Block pull(RenderCtx& ctx, const SigPtr& n, int64_t start, int frames) {
   return b;
 }
 
+// PolyBLEP residual: the two-sample polynomial correction subtracted at
+// (or added around) a waveform discontinuity to suppress aliasing.
+// `t` is the phase in [0, 1), `dt` the per-sample phase increment.
+double polyBlep(double t, double dt) {
+  if (t < dt) {
+    t /= dt;
+    return t + t - t * t - 1.0;
+  }
+  if (t > 1.0 - dt) {
+    t = (t - 1.0) / dt;
+    return t * t + t + t + 1.0;
+  }
+  return 0.0;
+}
+
 }  // namespace
 
 NodeState& RenderCtx::stateFor(const SigNode& node) {
@@ -149,6 +164,10 @@ struct OscNode final : SigNode {
   int channels() const override { return 1; }
   bool computeBlock(RenderCtx& ctx, NodeState&, int64_t start, int frames,
                     double* out) const override {
+    // The bandlimited kinds correct their discontinuities with PolyBLEP
+    // residuals; dt is the per-sample phase increment (clamped so the
+    // correction windows stay disjoint near Nyquist).
+    double dt = std::min(std::fabs(freq) / ctx.rate, 0.49);
     for (int f = 0; f < frames; f++) {
       double t = (double)(start + f) / ctx.rate;
       double phase = freq * t;
@@ -157,6 +176,19 @@ struct OscNode final : SigNode {
         case OscKind::Sine: out[f] = std::sin(2.0 * kPi * phase); break;
         case OscKind::Saw: out[f] = 2.0 * frac - 1.0; break;
         case OscKind::Square: out[f] = frac < 0.5 ? 1.0 : -1.0; break;
+        case OscKind::SawBl:
+          out[f] = 2.0 * frac - 1.0 - (dt > 0 ? polyBlep(frac, dt) : 0.0);
+          break;
+        case OscKind::SquareBl: {
+          double v = frac < 0.5 ? 1.0 : -1.0;
+          if (dt > 0) {
+            double frac2 = frac + 0.5;
+            frac2 -= std::floor(frac2);
+            v += polyBlep(frac, dt) - polyBlep(frac2, dt);
+          }
+          out[f] = v;
+          break;
+        }
       }
     }
     return false;
@@ -556,6 +588,306 @@ struct FilterNode final : SigNode {
   }
 };
 
+// One-pole filter with a signal-rate cutoff: the coefficient is
+// recomputed per frame from the cutoff signal, everything else matches
+// FilterNode (stateful from the epoch, silence-skips before first sound).
+struct ModFilterNode final : SigNode {
+  FilterKind kind;
+  SigPtr cutoff;
+  SigPtr input;
+  ModFilterNode(FilterKind k, SigPtr c, SigPtr in)
+      : kind(k), cutoff(std::move(c)), input(std::move(in)) {
+    int mc = cutoff->channels();
+    if (mc != 1 && mc != -1)
+      throw EngineError(
+          (kind == FilterKind::Lowpass ? std::string("lowpass_mod")
+                                       : std::string("highpass_mod")) +
+          ": the cutoff must be a mono signal");
+    contentHash = hashMix(hashMix(hashMix(hashTag(19), (uint64_t)kind),
+                                  cutoff->contentHash),
+                          input->contentHash);
+  }
+  int channels() const override { return input->channels(); }
+  bool stateful() const override { return true; }
+  std::unique_ptr<NodeState> makeState() const override {
+    return std::make_unique<FilterState>();
+  }
+  bool computeBlock(RenderCtx& ctx, NodeState& st0, int64_t start, int frames,
+                    double* out) const override {
+    auto& st = static_cast<FilterState&>(st0);
+    // The cutoff is pulled unconditionally so a stateful cutoff subtree
+    // keeps advancing in lockstep even through silent input blocks.
+    Block c = pull(ctx, cutoff, start, frames);
+    Block in = pull(ctx, input, start, frames);
+    if (in.silent() && !st.everLoud) {
+      st.primed = true;
+      return true;
+    }
+    if (!in.silent()) st.everLoud = true;
+    int cc = concreteChannels();
+    for (int f = 0; f < frames; f++) {
+      double fc = c.at(f, 0);
+      if (fc < 0) fc = 0;
+      double alpha = 1.0 - std::exp(-2.0 * kPi * fc / ctx.rate);
+      if (alpha > 1.0) alpha = 1.0;
+      for (int i = 0; i < cc; i++) {
+        double x = in.at(f, i);
+        if (!st.primed) st.lp[i] = kind == FilterKind::Lowpass ? x : 0.0;
+        st.lp[i] += alpha * (x - st.lp[i]);
+        out[f * cc + i] = kind == FilterKind::Lowpass ? st.lp[i] : x - st.lp[i];
+      }
+      st.primed = true;
+    }
+    return false;
+  }
+  void forEachChild(
+      const std::function<void(const SigPtr&)>& fn) const override {
+    fn(cutoff);
+    fn(input);
+  }
+};
+
+// Two-pole Chamberlin state-variable lowpass with resonance. The cutoff
+// signal is clamped to a stable fraction of the render rate; damping is
+// 1/q. Once excited the filter rings, so blocks are only skipped before
+// the first non-silent input.
+struct ResonantState final : NodeState {
+  double low[kMaxChannels] = {};
+  double band[kMaxChannels] = {};
+  bool everLoud = false;
+};
+
+struct ResonantNode final : SigNode {
+  SigPtr cutoff;
+  double q;
+  SigPtr input;
+  ResonantNode(SigPtr c, double q_, SigPtr in)
+      : cutoff(std::move(c)), q(q_), input(std::move(in)) {
+    int mc = cutoff->channels();
+    if (mc != 1 && mc != -1)
+      throw EngineError("resonant: the cutoff must be a mono signal");
+    if (!(q > 0))
+      throw EngineError("resonant: q must be positive");
+    contentHash = hashMix(hashDouble(hashMix(hashTag(20),
+                                             cutoff->contentHash),
+                                     q),
+                          input->contentHash);
+  }
+  int channels() const override { return input->channels(); }
+  bool stateful() const override { return true; }
+  std::unique_ptr<NodeState> makeState() const override {
+    return std::make_unique<ResonantState>();
+  }
+  bool computeBlock(RenderCtx& ctx, NodeState& st0, int64_t start, int frames,
+                    double* out) const override {
+    auto& st = static_cast<ResonantState&>(st0);
+    Block c = pull(ctx, cutoff, start, frames);
+    Block in = pull(ctx, input, start, frames);
+    if (in.silent() && !st.everLoud) return true;
+    if (!in.silent()) st.everLoud = true;
+    int cc = concreteChannels();
+    double damp = 1.0 / q;
+    if (damp > 2.0) damp = 2.0;
+    for (int f = 0; f < frames; f++) {
+      double fc = c.at(f, 0);
+      if (fc < 0) fc = 0;
+      // The Chamberlin form is stable for fc below about rate/6 (g <= 1
+      // with any damping); the clamp keeps a sweep that overshoots the
+      // render rate a filter rather than a runaway.
+      double fmax = ctx.rate / 6.0;
+      if (fc > fmax) fc = fmax;
+      double g = 2.0 * std::sin(kPi * fc / ctx.rate);
+      for (int i = 0; i < cc; i++) {
+        double x = in.at(f, i);
+        st.low[i] += g * st.band[i];
+        double high = x - st.low[i] - damp * st.band[i];
+        st.band[i] += g * high;
+        out[f * cc + i] = st.low[i];
+      }
+    }
+    return false;
+  }
+  void forEachChild(
+      const std::function<void(const SigPtr&)>& fn) const override {
+    fn(cutoff);
+    fn(input);
+  }
+};
+
+// Envelope follower: |x| into a one-pole smoother whose coefficient
+// depends on whether the envelope is rising (attack) or falling
+// (release). Zero times snap instantly.
+struct FollowState final : NodeState {
+  double env = 0;
+  bool everLoud = false;
+};
+
+struct FollowNode final : SigNode {
+  double attack, release;
+  SigPtr input;
+  FollowNode(double a, double r, SigPtr in)
+      : attack(a), release(r), input(std::move(in)) {
+    if (attack < 0 || release < 0)
+      throw EngineError("follow: attack and release must be non-negative");
+    int ic = input->channels();
+    if (ic != 1 && ic != -1)
+      throw EngineError("follow: the input must be a mono signal "
+                        "(follow a bus after mixing it down)");
+    contentHash = hashMix(hashDouble(hashDouble(hashTag(21), attack),
+                                     release),
+                          input->contentHash);
+  }
+  int channels() const override { return 1; }
+  bool stateful() const override { return true; }
+  std::unique_ptr<NodeState> makeState() const override {
+    return std::make_unique<FollowState>();
+  }
+  bool computeBlock(RenderCtx& ctx, NodeState& st0, int64_t start, int frames,
+                    double* out) const override {
+    auto& st = static_cast<FollowState&>(st0);
+    Block in = pull(ctx, input, start, frames);
+    if (in.silent() && !st.everLoud) return true;
+    if (!in.silent()) st.everLoud = true;
+    double aA = attack > 0 ? std::exp(-1.0 / (attack * ctx.rate)) : 0.0;
+    double aR = release > 0 ? std::exp(-1.0 / (release * ctx.rate)) : 0.0;
+    for (int f = 0; f < frames; f++) {
+      double x = std::fabs(in.at(f, 0));
+      double a = x > st.env ? aA : aR;
+      st.env = a * st.env + (1.0 - a) * x;
+      out[f] = st.env;
+    }
+    return false;
+  }
+  void forEachChild(
+      const std::function<void(const SigPtr&)>& fn) const override {
+    fn(input);
+  }
+};
+
+// Sample-wise select: the signal-level choice `if` deliberately does not
+// make. All three children are pulled every block so stateful subtrees
+// stay in lockstep whichever side is chosen.
+struct SelectNode final : SigNode {
+  SigPtr gate;
+  double threshold;
+  SigPtr above, below;
+  int ch;
+  SelectNode(SigPtr g, double t, SigPtr a, SigPtr b)
+      : gate(std::move(g)), threshold(t), above(std::move(a)),
+        below(std::move(b)),
+        ch(mergeChannels(above->channels(), below->channels(), "select")) {
+    int gc = gate->channels();
+    if (gc != 1 && gc != -1)
+      throw EngineError("select: the gate must be a mono signal");
+    contentHash = hashMix(
+        hashMix(hashDouble(hashMix(hashTag(22), gate->contentHash),
+                           threshold),
+                above->contentHash),
+        below->contentHash);
+  }
+  int channels() const override { return ch; }
+  bool computeBlock(RenderCtx& ctx, NodeState&, int64_t start, int frames,
+                    double* out) const override {
+    Block g = pull(ctx, gate, start, frames);
+    Block a = pull(ctx, above, start, frames);
+    Block b = pull(ctx, below, start, frames);
+    if (a.silent() && b.silent()) return true;
+    int cc = concreteChannels();
+    for (int f = 0; f < frames; f++) {
+      const Block& src = g.at(f, 0) >= threshold ? a : b;
+      for (int i = 0; i < cc; i++) out[f * cc + i] = src.at(f, i);
+    }
+    return false;
+  }
+  void forEachChild(
+      const std::function<void(const SigPtr&)>& fn) const override {
+    fn(gate);
+    fn(above);
+    fn(below);
+  }
+};
+
+// Feedback delay: out(t) = in(t) + gain * out(t - by). The ring buffer
+// holds the *output*, so the tail regenerates geometrically; |gain| < 1
+// keeps it bounded. Like reverb, the feedback lives in per-render state
+// and the language-level graph stays acyclic.
+struct FeedbackDelayState final : NodeState {
+  std::vector<double> ring;  // shiftFrames * channelCount doubles, zeroed
+  bool everLoud = false;
+};
+
+struct FeedbackDelayNode final : SigNode {
+  double by, gain;
+  SigPtr input;
+  FeedbackDelayNode(double b, double g, SigPtr in)
+      : by(b), gain(g), input(std::move(in)) {
+    if (by <= 0) throw EngineError("feedback: delay time must be positive");
+    if (!(std::fabs(gain) < 1.0))
+      throw EngineError("feedback: |gain| must be < 1 (the tail would "
+                        "never decay)");
+    contentHash = hashMix(hashDouble(hashDouble(hashTag(23), by), gain),
+                          input->contentHash);
+  }
+  int channels() const override { return input->channels(); }
+  bool stateful() const override { return true; }
+  std::unique_ptr<NodeState> makeState() const override {
+    return std::make_unique<FeedbackDelayState>();
+  }
+  bool computeBlock(RenderCtx& ctx, NodeState& st0, int64_t start, int frames,
+                    double* out) const override {
+    auto& st = static_cast<FeedbackDelayState&>(st0);
+    Block in = pull(ctx, input, start, frames);
+    if (in.silent() && !st.everLoud) return true;
+    if (!in.silent()) st.everLoud = true;
+    int64_t shift = std::max<int64_t>(1, llround(by * ctx.rate));
+    int cc = concreteChannels();
+    if (st.ring.empty()) st.ring.assign((size_t)(shift * cc), 0.0);
+    for (int f = 0; f < frames; f++) {
+      int64_t n = start + f;
+      size_t slot = (size_t)((n % shift) * cc);
+      for (int i = 0; i < cc; i++) {
+        double v = in.at(f, i) + gain * st.ring[slot + (size_t)i];
+        out[f * cc + i] = v;
+        st.ring[slot + (size_t)i] = v;
+      }
+    }
+    return false;
+  }
+  void forEachChild(
+      const std::function<void(const SigPtr&)>& fn) const override {
+    fn(input);
+  }
+};
+
+// Channel extraction: one channel of a multichannel signal as mono - the
+// inverse `channels` never had.
+struct ChannelNode final : SigNode {
+  int index;
+  SigPtr input;
+  ChannelNode(int n, SigPtr in) : index(n), input(std::move(in)) {
+    if (index < 0) throw EngineError("channel: negative channel index");
+    int ic = input->channels();
+    if (ic >= 0 && index >= ic)
+      throw EngineError("channel: index " + std::to_string(index) +
+                        " out of range for a " + std::to_string(ic) +
+                        "-channel signal");
+    contentHash =
+        hashMix(hashMix(hashTag(24), (uint64_t)index), input->contentHash);
+  }
+  int channels() const override { return 1; }
+  bool computeBlock(RenderCtx& ctx, NodeState&, int64_t start, int frames,
+                    double* out) const override {
+    Block in = pull(ctx, input, start, frames);
+    if (in.silent()) return true;
+    for (int f = 0; f < frames; f++) out[f] = in.at(f, index);
+    return false;
+  }
+  void forEachChild(
+      const std::function<void(const SigPtr&)>& fn) const override {
+    fn(input);
+  }
+};
+
 // --- Distortion ------------------------------------------------------------
 
 struct ClipNode final : SigNode {
@@ -627,15 +959,15 @@ struct FusedNode final : SigNode {
     enum class K : uint8_t {
       Input, Const,             // operands
       Add, Sub, Mul, Div, Pow,  // binary
-      Exp, Sqrt, Log            // unary
+      Exp, Sqrt, Log,           // unary
+      Sin, Cos, Tan, Atan, Abs  // unary (trig rows; appended so existing
+                                // program hashes stay stable)
     };
     K k = K::Const;
     int input = 0;     // K::Input: index into `inputs`
     double value = 0;  // K::Const
   };
-  static bool isUnary(Op::K k) {
-    return k == Op::K::Exp || k == Op::K::Sqrt || k == Op::K::Log;
-  }
+  static bool isUnary(Op::K k) { return k >= Op::K::Exp; }
   std::vector<SigPtr> inputs;
   std::vector<Op> program;  // postfix, ends with an operator
   int ch = -1;
@@ -677,11 +1009,16 @@ struct FusedNode final : SigNode {
           break;
         case Op::K::Exp:
         case Op::K::Log:
-          // exp(0) == 1, log(0) == -inf: never silent.
+        case Op::K::Cos:
+          // exp(0) == 1, log(0) == -inf, cos(0) == 1: never silent.
           zs[zp - 1] = 0;
           break;
         case Op::K::Sqrt:
-          break;  // sqrt(0) == 0: silence is preserved
+        case Op::K::Sin:
+        case Op::K::Tan:
+        case Op::K::Atan:
+        case Op::K::Abs:
+          break;  // f(0) == 0: silence is preserved
       }
     }
     if (zs[0]) return true;
@@ -728,13 +1065,25 @@ struct FusedNode final : SigNode {
         }
         case Op::K::Exp:
         case Op::K::Sqrt:
-        case Op::K::Log: {
+        case Op::K::Log:
+        case Op::K::Sin:
+        case Op::K::Cos:
+        case Op::K::Tan:
+        case Op::K::Atan:
+        case Op::K::Abs: {
           Slot a = stack[sp - 1];
           Slot res;
           auto f1 = [&](double v) {
-            return op.k == Op::K::Exp    ? std::exp(v)
-                   : op.k == Op::K::Sqrt ? std::sqrt(v)
-                                         : std::log(v);
+            switch (op.k) {
+              case Op::K::Exp: return std::exp(v);
+              case Op::K::Sqrt: return std::sqrt(v);
+              case Op::K::Sin: return std::sin(v);
+              case Op::K::Cos: return std::cos(v);
+              case Op::K::Tan: return std::tan(v);
+              case Op::K::Atan: return std::atan(v);
+              case Op::K::Abs: return std::fabs(v);
+              default: return std::log(v);
+            }
           };
           if (a.isScalar) {
             res.isScalar = true;
@@ -758,6 +1107,21 @@ struct FusedNode final : SigNode {
                   break;
                 case Op::K::Sqrt:
                   for (size_t n = 0; n < slab; n++) dst[n] = std::sqrt(a.p[n]);
+                  break;
+                case Op::K::Sin:
+                  for (size_t n = 0; n < slab; n++) dst[n] = std::sin(a.p[n]);
+                  break;
+                case Op::K::Cos:
+                  for (size_t n = 0; n < slab; n++) dst[n] = std::cos(a.p[n]);
+                  break;
+                case Op::K::Tan:
+                  for (size_t n = 0; n < slab; n++) dst[n] = std::tan(a.p[n]);
+                  break;
+                case Op::K::Atan:
+                  for (size_t n = 0; n < slab; n++) dst[n] = std::atan(a.p[n]);
+                  break;
+                case Op::K::Abs:
+                  for (size_t n = 0; n < slab; n++) dst[n] = std::fabs(a.p[n]);
                   break;
                 default:
                   for (size_t n = 0; n < slab; n++) dst[n] = std::log(a.p[n]);
@@ -1419,6 +1783,27 @@ SigPtr makeTime() { return std::make_shared<TimeNode>(); }
 SigPtr makeFilter(FilterKind kind, double cutoff, SigPtr input) {
   return std::make_shared<FilterNode>(kind, cutoff, std::move(input));
 }
+SigPtr makeModFilter(FilterKind kind, SigPtr cutoff, SigPtr input) {
+  return std::make_shared<ModFilterNode>(kind, std::move(cutoff),
+                                         std::move(input));
+}
+SigPtr makeResonant(SigPtr cutoff, double q, SigPtr input) {
+  return std::make_shared<ResonantNode>(std::move(cutoff), q,
+                                        std::move(input));
+}
+SigPtr makeFollow(double attack, double release, SigPtr input) {
+  return std::make_shared<FollowNode>(attack, release, std::move(input));
+}
+SigPtr makeSelect(SigPtr gate, double threshold, SigPtr above, SigPtr below) {
+  return std::make_shared<SelectNode>(std::move(gate), threshold,
+                                      std::move(above), std::move(below));
+}
+SigPtr makeFeedbackDelay(double by, double gain, SigPtr input) {
+  return std::make_shared<FeedbackDelayNode>(by, gain, std::move(input));
+}
+SigPtr makeChannel(int n, SigPtr input) {
+  return std::make_shared<ChannelNode>(n, std::move(input));
+}
 SigPtr makeClip(ClipKind kind, double threshold, SigPtr input) {
   return std::make_shared<ClipNode>(kind, threshold, std::move(input));
 }
@@ -1447,6 +1832,22 @@ void finalizeFused(FusedNode& node) {
 }
 }  // namespace
 
+namespace {
+// Channel merge for elementwise arithmetic: unlike a mix, arithmetic
+// broadcasts a mono operand across a multichannel one (the operator
+// table's `Scalar Signal (*) Vector Signal` row; FusedNode's perFrame
+// slots carry the mono side compactly). Broadcast-only (-1) operands
+// adapt as everywhere else; two concrete multichannel widths must match.
+int arithMerge(int a, int b) {
+  if (a == -1 || a == b) return b == -1 ? a : b;
+  if (b == -1) return a;
+  if (a == 1) return b;
+  if (b == 1) return a;
+  throw EngineError("signal arithmetic: channel count mismatch (" +
+                    std::to_string(a) + " vs " + std::to_string(b) + ")");
+}
+}  // namespace
+
 SigPtr makeBinOp(SigBinOp op, SigPtr l, SigPtr r) {
   FusedNode::Op::K k = FusedNode::Op::K::Add;
   switch (op) {
@@ -1457,7 +1858,7 @@ SigPtr makeBinOp(SigBinOp op, SigPtr l, SigPtr r) {
     case SigBinOp::Pow: k = FusedNode::Op::K::Pow; break;
   }
   auto node = std::make_shared<FusedNode>();
-  node->ch = mergeChannels(l->channels(), r->channels(), "signal arithmetic");
+  node->ch = arithMerge(l->channels(), r->channels());
   fusedAppendOperand(l, node->inputs, node->program);
   fusedAppendOperand(r, node->inputs, node->program);
   node->program.push_back({k, 0, 0});
@@ -1474,9 +1875,17 @@ SigPtr makeBinOp(SigBinOp op, SigPtr l, SigPtr r) {
   return node;
 }
 SigPtr makeUnaryOp(SigUnaryOp op, SigPtr x) {
-  FusedNode::Op::K k = op == SigUnaryOp::Exp    ? FusedNode::Op::K::Exp
-                       : op == SigUnaryOp::Sqrt ? FusedNode::Op::K::Sqrt
-                                                : FusedNode::Op::K::Log;
+  FusedNode::Op::K k = FusedNode::Op::K::Log;
+  switch (op) {
+    case SigUnaryOp::Exp: k = FusedNode::Op::K::Exp; break;
+    case SigUnaryOp::Sqrt: k = FusedNode::Op::K::Sqrt; break;
+    case SigUnaryOp::Log: k = FusedNode::Op::K::Log; break;
+    case SigUnaryOp::Sin: k = FusedNode::Op::K::Sin; break;
+    case SigUnaryOp::Cos: k = FusedNode::Op::K::Cos; break;
+    case SigUnaryOp::Tan: k = FusedNode::Op::K::Tan; break;
+    case SigUnaryOp::Atan: k = FusedNode::Op::K::Atan; break;
+    case SigUnaryOp::Abs: k = FusedNode::Op::K::Abs; break;
+  }
   auto node = std::make_shared<FusedNode>();
   node->ch = x->channels();
   fusedAppendOperand(x, node->inputs, node->program);

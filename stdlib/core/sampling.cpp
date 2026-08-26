@@ -18,6 +18,14 @@ SYNTH_EXTERNAL(channels) {
   *result = Value::signal(makeChannels(std::move(items)));
   return true;
 }
+SYNTH_EXTERNAL(channel) {
+  std::int64_t n = args[0].asInt();
+  if (n < 0 || n > 1000000)
+    throw std::runtime_error("channel: index " + std::to_string(n) +
+                             " out of range");
+  *result = Value::signal(makeChannel((int)n, args[1].asSignal()));
+  return true;
+}
 SYNTH_EXTERNAL(sample) {
   Sample s;
   s.signal = args[0].asSignal();

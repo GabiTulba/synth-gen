@@ -92,8 +92,9 @@ atom-type   ::= "Scalar" | "Int" | "Vector" | "Timestamp" | "String"
                                                      type-name: ('a, 'b) Pair)
 
 expr        ::= let-in | lambda | if-expr | match-expr | pipe
-let-in      ::= "let" [ "rec" ] Ident { param } ":" type "=" expr
-                "in" expr
+let-in      ::= "let" [ "rec" ] Ident { param } [ ":" type ] "=" expr
+                "in" expr                           (type required for
+                                                     "rec")
               | "let" (tuple-pattern | record-pattern) ":" type "="
                 expr "in" expr                      (destructuring; must
                                                      be irrefutable)
@@ -144,7 +145,9 @@ atom-base   ::= Number | Time | String
 Notes:
 
 - A `let` with parameters defines a function; without, a constant. The
-  return-type annotation is mandatory except for `let _`.
+  return-type annotation may be omitted — the checker infers it from
+  the body (see §3, local inference). `let rec` and `external` bodies
+  still require it, as do destructuring bindings.
 - Application binds tighter than operators: `sine 440.0 * 0.5` is
   `(sine 440.0) * 0.5`. `*`/`/` bind tighter than `+`/`-`; all are
   left-associative.
@@ -231,8 +234,16 @@ fraction policy (§6).
 
 Rules:
 
-- **Fully annotated, no inference.** Every parameter and every return
-  type is written; the checker verifies and never guesses.
+- **Annotated parameters, local return-type inference.** Every
+  parameter is written; return types (top-level and `let ... in`) may
+  be omitted, in which case the binding takes its body's *synthesized*
+  type — the checker still never guesses across definitions, and no
+  constraint flows backwards. A body that leaves a type undetermined
+  (an un-pinned partial application, an empty list) still demands the
+  annotation, with a diagnostic saying so. `let rec` keeps its
+  annotation (the recursive name is in scope in its own body at that
+  type), as do `external` bodies (the annotation IS the type),
+  destructuring bindings, and lambda parameters.
 - **Polymorphism is written, never inferred.** A signature may name type
   variables (`'a`, `'elem`); they are instantiated (by unification) at
   each use site, exactly as a primitive's are. All occurrences of one
@@ -240,11 +251,11 @@ Rules:
   lambda parameters, `let ... in` annotations — are the same variable,
   and the name is scoped to that definition, so the `'a` of the next
   definition is unrelated. See "Polymorphic definitions" below.
-  The math primitives (`exp`, `sqrt`, `log`, `pow`) use an unconstrained
-  `'a`, so the checker admits any argument type; passing anything but a
-  Scalar, Vector, or Scalar Signal is reported as a build (evaluation)
-  error. `time` is the one nullary primitive: it is a `Scalar Signal`
-  value, not a function.
+  The math primitives (`exp`, `sqrt`, `log`, `pow`, and the trig family
+  `sin`/`cos`/`tan`/`atan`/`abs`) use an unconstrained `'a`, so the
+  checker admits any argument type; passing anything but a Scalar,
+  Vector, or Signal is reported as a build (evaluation) error. `time`
+  and `Math.pi` are the nullary primitives: values, not functions.
 - **Definition before use; recursion is opt-in and self-only.** A
   definition may reference
   only parameters, *earlier* definitions of its module, imported modules'
@@ -270,11 +281,13 @@ Rules:
   `Osc` (oscillators & modulation), `Fx` (effects, filters,
   envelopes), `Arrange` (sample/place/mix), `Render` (the render
   effects), `Io` (audio import), `List`, `Time` (conversions &
-  Timestamp sequences), `Sig` (signal constructors), `Pitch` (notes, temperaments &
+  Timestamp sequences), `Sig` (signal constructors), `Groove` (the
+  sequencing tier), `Pitch` (notes, temperaments &
   cents), `Tempo` (meters, note values & the beat grid),
-  `Scale` (keys, degrees & chords),
-  `Score` (phrases, events, dynamics & `play`), and `Math`
-  (see §6 for the roster). Core is **not ambient**: like any library
+  `Scale` (keys, degrees, chords & progressions),
+  `Score` (phrases, events, dynamics & `play`), `Mix` (the stereo and
+  bus vocabulary), `Str` (computed names), `Math`, and the `Dsp`
+  prelude (see §6 for the roster). Core is **not ambient**: like any library
   it must be brought into scope — `import Core` for qualified access
   (`Core.Osc.sine`), `open Core` for module-qualified access
   (`Osc.sine`, `List.map`), or `open Core.Osc` for bare names
@@ -441,18 +454,23 @@ let rec sum xs:Scalar list : Scalar =
 
 - Works at the top level and for local functions
   (`let rec go i:Int : 'a list = ... in go 0`); requires at least one
-  parameter (a recursive constant could never terminate) and, like
-  every binding, a full annotation — which is why typing it needs no
-  inference.
+  parameter (a recursive constant could never terminate) and a full
+  annotation — the recursive name is in scope in its own body at that
+  declared type.
 - Inside the body the name binds like a parameter: its `'a` stays
   rigid, so a definition cannot call itself at a different type (no
   polymorphic recursion).
 - *Mutual* recursion (and recursive *signal* feedback) remains out of
   scope — see §7.
-- Evaluation is not tail-call optimized and guards the build against
-  runaway recursion: beyond 4096 nested calls the build fails with a
-  recursion-limit diagnostic. Recursion over musical-scale lists (one
-  level per element, thousands of elements) is well within the limit.
+- **Tail calls are eliminated.** A call in tail position — through
+  `let ... in` bodies, `if` branches and `match` arms — reuses the
+  current frame, so accumulator-shaped recursion (`List.fold`, and
+  every Core combinator, which are written in accumulator form) runs at
+  constant depth however long the list. Only genuinely *nested* (non-
+  tail) recursion counts against the runaway guard: beyond 4096 nested
+  calls the build fails with a recursion-limit diagnostic, and a tail
+  chain that never terminates trips its own (much larger) iteration
+  brake instead of hanging the build.
 
 ### Polymorphic definitions
 
@@ -507,6 +525,7 @@ For `+ - * /` with operand types L and R:
 | Vector | Scalar (either order) | Vector |
 | t Signal | t Signal | t Signal (pointwise) |
 | t Signal | Scalar (either order) | t Signal (broadcast) |
+| t Signal | Scalar Signal (either order) | t Signal (mono broadcast: the Scalar Signal lifts across the other side's channels, mirroring `am`'s mono-modulator rule — `bus * envelope` fades a stereo bus) |
 | Timestamp | Timestamp | Timestamp (`+` `-` only) |
 | Timestamp | Scalar | Timestamp (`*` either order, `/` with the Timestamp on the left) |
 
@@ -764,6 +783,8 @@ you need into scope explicitly: `import Core` (then `Core.Osc.sine`),
 val Osc.sine: freq:Scalar -> Scalar Signal
 val Osc.saw: freq:Scalar -> Scalar Signal
 val Osc.square: freq:Scalar -> Scalar Signal
+val Osc.saw_bl: freq:Scalar -> Scalar Signal         (* bandlimited (PolyBLEP) *)
+val Osc.square_bl: freq:Scalar -> Scalar Signal      (* bandlimited (PolyBLEP) *)
 val Osc.noise: freq:Scalar -> Scalar Signal          (* two-step FM; deterministic *)
 
 (* envelopes *)
@@ -771,9 +792,19 @@ val Fx.exp_decay: rate:Scalar -> Scalar Signal          (* e^(-rate*t) *)
 val Fx.adsr: attack:Timestamp -> decay:Timestamp -> sustain:Scalar
              -> release:Timestamp -> hold:Timestamp -> Scalar Signal
 
-(* filters *)
+(* filters; the modulated forms take the cutoff (Hz) as a mono signal *)
 val Fx.lowpass: cutoff:Scalar -> input:'a Signal -> 'a Signal
 val Fx.highpass: cutoff:Scalar -> input:'a Signal -> 'a Signal
+val Fx.lowpass_mod: cutoff:Scalar Signal -> input:'a Signal -> 'a Signal
+val Fx.highpass_mod: cutoff:Scalar Signal -> input:'a Signal -> 'a Signal
+val Fx.resonant: cutoff:Scalar Signal -> q:Scalar -> input:'a Signal
+               -> 'a Signal          (* 2-pole SVF lowpass; q rings *)
+
+(* signal-level control *)
+val Fx.follow: attack:Timestamp -> release:Timestamp
+             -> input:Scalar Signal -> Scalar Signal  (* envelope follower *)
+val Sig.select: gate:Scalar Signal -> threshold:Scalar -> above:'a Signal
+              -> below:'a Signal -> 'a Signal  (* sample-wise choice *)
 
 (* distortion *)
 val Fx.hard_clip: threshold:Scalar -> input:'a Signal -> 'a Signal  (* clamp at +/-threshold *)
@@ -786,13 +817,24 @@ val Osc.am: carrier:'a Signal -> modulator:Scalar Signal -> depth:Scalar -> 'a S
 
 (* time effects *)
 val Fx.delay: by:Timestamp -> signal:'a Signal -> 'a Signal
+val Fx.feedback: by:Timestamp -> gain:Scalar -> input:'a Signal
+               -> 'a Signal  (* out(t) = in(t) + gain*out(t-by); |gain| < 1 *)
 val Fx.resample: input:'a Signal -> f:(Scalar -> Scalar) -> 'a Signal  (* f is a playback-rate multiplier *)
 val Fx.reverb: decay:Timestamp -> damping:Scalar -> mix:Scalar
              -> input:'a Signal -> 'a Signal
 
+(* voice sugar (written in SynthGraph over the primitives above) *)
+val Fx.gated: attack:Timestamp -> decay:Timestamp -> sustain:Scalar
+            -> release:Timestamp -> hold:Timestamp -> input:Scalar Signal
+            -> Scalar Sample   (* input * adsr, cut to the envelope's end *)
+val Fx.echoes: by:Timestamp -> gain:Scalar -> n:Int -> input:'a Signal
+             -> 'a Signal      (* input + sum delay(by*i) * gain^i *)
+
 (* combination *)
 val Arrange.mix_all: signals:'a Signal list -> 'a Signal
 val Arrange.channels: chans:Scalar Signal list -> Vector Signal
+val Arrange.channel: n:Int -> input:Vector Signal -> Scalar Signal
+  (* the inverse of channels; the index is validated at graph build *)
 
 (* slicing & arrangement *)
 val Arrange.sample: signal:'a Signal -> from:Timestamp -> to:Timestamp -> 'a Sample
@@ -829,6 +871,19 @@ val Math.exp: x:'a -> 'a
 val Math.sqrt: x:'a -> 'a
 val Math.log: x:'a -> 'a             (* natural *)
 val Math.pow: x:'a -> y:Scalar -> 'a
+val Math.sin: x:'a -> 'a             (* radians; the same polymorphic rule *)
+val Math.cos: x:'a -> 'a
+val Math.tan: x:'a -> 'a
+val Math.atan: x:'a -> 'a
+val Math.abs: x:'a -> 'a
+val Math.pi: Scalar                  (* a plain constant *)
+val Math.min: a:Scalar -> b:Scalar -> Scalar
+val Math.max: a:Scalar -> b:Scalar -> Scalar
+val Math.clamp: lo:Scalar -> hi:Scalar -> x:Scalar -> Scalar
+val Math.lerp: a:Scalar -> b:Scalar -> t:Scalar -> Scalar
+val Math.hash: seed:Scalar -> i:Int -> Scalar
+  (* pure, platform-stable, uniform in [0, 1); jitter's splitmix64
+     exposed as a value - the library's one source of randomness *)
 
 (* Int <-> Scalar conversions: to_scalar is exact; the way back names
    its fraction policy. *)
@@ -850,6 +905,8 @@ val Pitch.step    : note:Note -> Int
 val Pitch.of_step : step:Int -> Note
 val Pitch.shift   : note:Note -> by:Int -> Note      (* by ladder steps *)
 val Pitch.flat    : note:Note -> Note
+val Pitch.wrap_to : note:Note -> low:Note -> Note
+  (* moved by whole octaves into [low, low + octave): the register fold *)
 
 (* temperaments; presets are functions, not constants *)
 val Pitch.et    : n:Int -> ref_hz:Scalar -> ref_step:Int -> Tuning
@@ -883,9 +940,14 @@ type Value = | Whole | Half | Quarter | Eighth | Sixteenth | ThirtySecond
 val Tempo.beat  : t:Tempo -> Timestamp              (* one `unit` note *)
 val Tempo.bar   : t:Tempo -> Timestamp              (* `beats` of them *)
 val Tempo.beats : t:Tempo -> n:Scalar -> Timestamp  (* fractional is fine *)
+val Tempo.bars  : t:Tempo -> n:Scalar -> Timestamp  (* n bars *)
 
 (* a whole note is `unit` beats, whatever the meter *)
 val Tempo.value : t:Tempo -> v:Value -> Timestamp
+val Tempo.per_bar : t:Tempo -> v:Value -> Int
+  (* how many of v fit in one bar - meter-correct, via Time.div *)
+val Tempo.bar_beats : t:Tempo -> n:Int -> Scalar
+  (* n bars in *beats*: the bridge Score.move/chord ~len need *)
 
 (* positions and grids *)
 val Tempo.at    : t:Tempo -> bar:Int -> beat:Scalar -> Timestamp
@@ -893,6 +955,11 @@ val Tempo.grid  : t:Tempo -> from:Timestamp -> step:Value -> count:Int
                     -> Timestamp list
 val Tempo.swing : amount:Scalar -> step:Timestamp -> steps:Timestamp list
                     -> Timestamp list
+val Tempo.swung_grid : t:Tempo -> from:Timestamp -> step:Value -> count:Int
+                         -> amount:Scalar -> Timestamp list
+  (* grid |> swing in one call, so the step is named once *)
+val Tempo.marks : t:Tempo -> bars:Int list -> Timestamp list
+  (* section lengths (bars) -> section starts: n+1 entries, ending last *)
 
 val Tempo.common : bpm:Scalar -> Tempo               (* 4/4; a function *)
 
@@ -906,10 +973,15 @@ val Tempo.common : bpm:Scalar -> Tempo               (* 4/4; a function *)
 type Quality = | Major | Minor | Dorian | Phrygian | Lydian | Mixolydian
                | Locrian | HarmMinor | MelMinor | PentMajor | PentMinor
                | Blues | WholeTone | Chromatic
+               | CustomQ of Int list         (* any semitone ladder *)
 type Scale = { tonic : Pitch.Note; quality : Quality }
 type ChordQuality = | Maj | Min | Dim | Aug | Maj7 | Min7 | Dom7
                     | HalfDim7 | Dim7 | Sus2 | Sus4 | Add9
+                    | Sixth | Min6 | Dom9 | Maj9 | Min9 | MinMaj7
+                    | Dom7b9 | Dom13
+                    | Shape of Int list      (* any chord shape *)
 type Chord = { root : Pitch.Note; quality : ChordQuality }
+type Prog = { key : Scale; degrees : Int list }   (* a degree cycle *)
 
 (* degrees of the key *)
 val Scale.offsets : q:Quality -> Int list        (* semitones from the tonic *)
@@ -923,6 +995,13 @@ val Scale.tones   : c:Chord -> Pitch.Note list
 val Scale.stack   : s:Scale -> from:Int -> count:Int -> Pitch.Note list
 val Scale.triad   : s:Scale -> degree:Int -> Pitch.Note list  (* stack of 3 *)
 val Scale.seventh : s:Scale -> degree:Int -> Pitch.Note list  (* stack of 4 *)
+
+(* progressions: a key plus a degree cycle, with wrapping lookup *)
+val Scale.prog_len    : p:Prog -> Int
+val Scale.prog_degree : p:Prog -> i:Int -> Int          (* wraps *)
+val Scale.prog_root   : p:Prog -> i:Int -> Pitch.Note
+val Scale.prog_chord  : p:Prog -> i:Int -> Pitch.Note list
+val Scale.prog_stack  : p:Prog -> i:Int -> count:Int -> Pitch.Note list
 
 (* voicing, and the one exit to frequencies *)
 val Scale.invert  : notes:Pitch.Note list -> n:Int -> Pitch.Note list
@@ -943,7 +1022,8 @@ val Scale.wrap_rem : n:Int -> k:Int -> Int
    module. Types are Score.Step / Score.Phrase / Score.Event /
    Score.Item / Score.Level when qualified. *)
 type Step   = { note : Pitch.Note; at : Scalar; len : Scalar;
-                vel : Scalar }                        (* beats *)
+                vel : Scalar; bend : Scalar }         (* beats; bend in
+                                                         cents, default 0 *)
 type Phrase = { steps : Step list }
 type Event  = { freq : Scalar; at : Timestamp; dur : Timestamp;
                 vel : Scalar }                        (* real time *)
@@ -963,6 +1043,8 @@ val Score.chord    : notes:Pitch.Note list -> at:Scalar -> len:Scalar
                        -> Phrase
 val Score.arpeggio : notes:Pitch.Note list -> step:Scalar -> count:Int
                        -> Phrase
+val Score.rhythm   : lens:Scalar list -> Phrase  (* unpitched, end to end *)
+val Score.hits     : n:Int -> len:Scalar -> Phrase
 
 (* the phrase algebra - every one a pure edit *)
 val Score.span      : p:Phrase -> Scalar              (* in beats *)
@@ -975,10 +1057,23 @@ val Score.in_key    : p:Phrase -> s:Scale.Scale -> Phrase
 val Score.staccato  : p:Phrase -> ratio:Scalar -> Phrase
 val Score.legato    : p:Phrase -> Phrase       (* stretch to next attack *)
 val Score.velocity  : p:Phrase -> f:(Scalar -> Scalar) -> Phrase
+val Score.vels      : p:Phrase -> vs:Scalar list -> Phrase
+  (* per-step dynamics: vs cycles, scaling each velocity *)
+val Score.crescendo : p:Phrase -> from:Level -> to:Level -> Phrase
+val Score.bend      : p:Phrase -> f:(Int -> Scalar) -> Phrase
+  (* per-note inflection in cents, applied at realization *)
+val Score.humanize  : p:Phrase -> seed:Scalar -> spread:Scalar -> Phrase
+  (* feel in beats, via Math.hash - composes with duration-aware voices *)
+val Score.shuffle   : p:Phrase -> grid:Scalar -> amount:Scalar -> Phrase
+  (* displaces steps on odd multiples of grid beats *)
 
-(* the bridge to audio; play and strike sum without normalization *)
+(* the bridge to audio; play and strike sum without normalization.
+   realize is sugar for realize_with ~pitch:(Pitch.hz ~t:tuning); any
+   Note -> Scalar mapping realizes a phrase. *)
 val Score.realize : tempo:Tempo.Tempo -> tuning:Pitch.Tuning -> p:Phrase
                       -> Event list
+val Score.realize_with : tempo:Tempo.Tempo -> pitch:(Pitch.Note -> Scalar)
+                           -> p:Phrase -> Event list
 val Score.play    : voice:(Scalar -> Timestamp -> Scalar -> 'a Sample)
                       -> events:Event list -> 'a Signal
 val Score.strike  : voice:(Scalar -> 'a Sample)   (* velocity only *)
@@ -987,7 +1082,10 @@ val Score.strike  : voice:(Scalar -> 'a Sample)   (* velocity only *)
 (* Core.List: list combinators & builders - written in SynthGraph
    (recursive functions over the Cons/Nil variant), not C++ *)
 val List.map    : f:('a -> 'b) -> xs:'a list -> 'b list
+val List.mapi   : f:(Int -> 'a -> 'b) -> xs:'a list -> 'b list
 val List.fold   : f:('a -> 'b -> 'a) -> init:'a -> xs:'b list -> 'a  (* folds left *)
+val List.scan   : f:('a -> 'b -> 'a) -> init:'a -> xs:'b list -> 'a list
+  (* running fold: n+1 entries, init first *)
 val List.init   : n:Int -> f:(Int -> 'a) -> 'a list   (* [f 0; ...; f (n-1)] *)
 val List.repeat : n:Int -> x:'a -> 'a list
 
@@ -1002,11 +1100,16 @@ val List.filter   : f:('a -> Bool) -> xs:'a list -> 'a list
 val List.concat   : xss:'a list list -> 'a list
 val List.flat_map : f:('a -> 'b list) -> xs:'a list -> 'b list
 val List.zip      : xs:'a list -> ys:'b list -> ('a, 'b) list  (* stops at the shorter *)
+val List.take     : n:Int -> xs:'a list -> 'a list
+val List.drop     : n:Int -> xs:'a list -> 'a list
 
 (* numeric *)
 val List.range   : from:Int -> count:Int -> Int list   (* [from; ...; from+count-1] *)
 val List.sum     : xs:Scalar list -> Scalar
 val List.maximum : xs:Scalar list -> least:Scalar -> Scalar  (* empty -> least *)
+val List.iter    : f:('a -> unit) -> xs:'a list -> unit
+  (* iterate renders over a list; implemented in C++ - `unit` has no
+     literal, so a synth-side iterator could not exist *)
 
 (* Core.Time: timestamp construction & sequences *)
 val Time.to_sec: x:Scalar -> Timestamp
@@ -1015,7 +1118,48 @@ val Time.to_min: x:Scalar -> Timestamp
 val Math.not: b:Bool -> Bool
 val Time.time_steps: start:Timestamp -> step:Timestamp -> count:Int -> Timestamp list
 val Time.jitter: seed:Scalar -> spread:Timestamp -> steps:(Timestamp list) -> Timestamp list
+
+(* the duration quotient: a count and a remainder, no unit ever decays.
+   Floor convention; num == den * div + rem, 0s <= rem < den; division
+   by 0s is a build error. *)
+val Time.div: num:Timestamp -> den:Timestamp -> Int
+val Time.rem: num:Timestamp -> den:Timestamp -> Timestamp
+
+(* Core.Groove: the sequencing tier - written in SynthGraph. Everything
+   takes the step *list*, so grids, swing, jitter, masks and euclid
+   compose freely. *)
+val Groove.pattern   : hit:'a Sample -> steps:Timestamp list -> 'a Signal
+val Groove.humanized : hit:'a Sample -> steps:Timestamp list
+                         -> seed:Scalar -> spread:Timestamp -> 'a Signal
+val Groove.mask      : keep:Bool list -> steps:Timestamp list
+                         -> Timestamp list    (* keep cycles *)
+val Groove.euclid    : hits:Int -> steps:Timestamp list -> Timestamp list
+                         (* Bjorklund selection over the given grid *)
+
+(* Core.Mix: the stereo and bus vocabulary - written in SynthGraph.
+   channels/mix_all stay in Arrange; this is the musical layer above. *)
+val Mix.pan     : pos:Scalar -> input:Scalar Signal -> Vector Signal
+                    (* -1 left .. +1 right; equal-power *)
+val Mix.pan_sig : pos:Scalar Signal -> input:Scalar Signal -> Vector Signal
+val Mix.mix     : parts:(Scalar, 'a Signal) list -> 'a Signal
+val Mix.db      : x:Scalar -> Scalar        (* re-export of Score.db *)
+val Mix.gain_db : x:Scalar -> input:'a Signal -> 'a Signal
+val Mix.vca     : gain:Scalar Signal -> input:'a Signal -> 'a Signal
+val Mix.duck    : ats:Timestamp list -> depth:Scalar -> dip:Timestamp
+                    -> recover:Timestamp -> input:'a Signal -> 'a Signal
+
+(* Core.Str: the minimum for computed render-target names *)
+val Str.cat    : a:String -> b:String -> String
+val Str.of_int : n:Int -> String
 ```
+
+`Core.Dsp` is a *view*: the sound-design working set (oscillators,
+envelopes, filters, clips, `mix_all`/`channels`/`channel`/`sample`/
+`place`/`place_multi`, the `Sig` constructors, `render`/`render_vis`,
+`to_sec`/`to_ms`/`to_min`, and the Math family) re-exported under bare
+names, so a working file's preamble is `open Core open Core.Dsp`. The
+submodules above stay the canonical homes; `Io`, the stems renders and
+`Pitch`/`Tempo`/`Scale`/`Score` are deliberately not in it.
 
 Counts and indices are Ints, so wholeness is guaranteed by the type
 system; `List.init`/`List.repeat` treat a negative computed count as
@@ -1076,22 +1220,25 @@ manage headroom deliberately.
 
 ## 7. Out of scope in v1
 
-Signal-level branching (comparisons and `if` are build-time only; a
-sample-wise select/gate over signals would be a new signal-producing
-primitive), *mutual* recursion and signal feedback
-(IIR-style signal cycles), literal patterns in `match` (use `if` for
-value tests), type *inference* (every binding is still
-annotated; polymorphism is written out, §3), per-definition visibility
-control (a library's `lib.synth` publishes whole modules or re-exported
-values, but a published module exposes all of its definitions —
-type declarations included), reverse
-playback (`resample` reads its source only forward, so a negative rate
-clamps to zero rather than rewinding), cache tuning knobs. See design
-doc §13. (Lambdas, general partial application, cross-directory
+*Mutual* recursion and user-defined signal feedback (IIR-style signal
+*cycles* — the `Fx.feedback` and `reverb` primitives hold their loops
+inside per-render state, and the language-level graph stays acyclic),
+literal patterns in `match` (use `if` for value tests), *global* type
+inference (parameters and polymorphism are still written out; return
+types and `let ... in` annotations are locally inferred, §3),
+per-definition visibility control (a library's `lib.synth` publishes
+whole modules or re-exported values, but a published module exposes all
+of its definitions — type declarations included), reverse playback
+(`resample` reads its source only forward, so a negative rate clamps to
+zero rather than rewinding), cache tuning knobs. See design doc §13.
+(Lambdas, general partial application, cross-directory
 imports/packaging — via libraries, `open` and module aliases —
 user-written polymorphism, inline modules, build-time Booleans with
-`if`/`else`, native extensions — `external` functions, §5 — and
+`if`/`else`, native extensions — `external` functions, §5 —
 user-defined types with pattern matching and self-recursion — `type`
 declarations, `match`, `let rec`, with `list` and `Signal`/`Sample`
-now ordinary Core declarations — were
-listed here originally and are now in the language; see §2, §3 and §4.)
+now ordinary Core declarations — and signal-level *choice* — comparisons
+and `if` stay build-time-only, but `Sig.select` and `Fx.follow` are
+the sample-wise select and the envelope follower as signal-producing
+primitives, §6 — were listed here originally and are now in the
+language; see §2, §3, §4 and §6.)

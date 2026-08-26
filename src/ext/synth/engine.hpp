@@ -14,11 +14,11 @@ namespace synth {
 struct SigNode;
 using SigPtr = std::shared_ptr<const SigNode>;
 
-enum class OscKind { Sine, Saw, Square };
+enum class OscKind { Sine, Saw, Square, SawBl, SquareBl };
 enum class FilterKind { Lowpass, Highpass };
 enum class ClipKind { Hard, Soft };
 enum class SigBinOp { Add, Sub, Mul, Div, Pow };
-enum class SigUnaryOp { Exp, Sqrt, Log };
+enum class SigUnaryOp { Exp, Sqrt, Log, Sin, Cos, Tan, Atan, Abs };
 
 SigPtr makeOsc(OscKind kind, double freq);
 // Deterministic pseudo-noise: two cascaded FM stages with golden-ratio
@@ -45,6 +45,30 @@ SigPtr makeAdsr(double attack, double decay, double sustain, double release,
 SigPtr makeConst(double value);  // broadcast scalar
 SigPtr makeTime();               // t in seconds (broadcast ramp)
 SigPtr makeFilter(FilterKind kind, double cutoff, SigPtr input);
+// One-pole filter with a signal-rate cutoff (Hz, sampled per frame). The
+// cutoff must be mono (or a broadcast constant); it applies to every
+// channel of the input, exactly like am's modulator rule.
+SigPtr makeModFilter(FilterKind kind, SigPtr cutoff, SigPtr input);
+// Two-pole state-variable lowpass with resonance. `cutoff` is a mono
+// signal in Hz; `q` is the resonance (0.5 ~ no resonance, higher rings).
+// Cutoffs are clamped to a stable fraction of the render rate.
+SigPtr makeResonant(SigPtr cutoff, double q, SigPtr input);
+// Envelope follower: full-wave rectification into an attack/release
+// one-pole smoother. The input must be mono; the output is a mono
+// control signal in [0, +inf).
+SigPtr makeFollow(double attack, double release, SigPtr input);
+// Sample-wise select: gate(t) >= threshold picks `above`, else `below`.
+// The gate must be mono; above/below merge channels like a mix.
+SigPtr makeSelect(SigPtr gate, double threshold, SigPtr above, SigPtr below);
+// Feedback delay: out(t) = in(t) + gain * out(t - by). The feedback loop
+// lives inside the node's per-render state (the language-level graph
+// stays acyclic, like reverb); |gain| < 1 and by > 0 are validated at
+// construction, and `by` is bounded below by one output frame.
+SigPtr makeFeedbackDelay(double by, double gain, SigPtr input);
+// Channel extraction: channel `n` (0-based) of a multichannel signal as
+// a mono signal - the inverse `channels` never had. The index is
+// validated against the input's static channel count at graph build.
+SigPtr makeChannel(int n, SigPtr input);
 // Distortion: hard clamps flat at +/-threshold; soft saturates smoothly as
 // threshold*tanh(x/threshold). threshold must be positive.
 SigPtr makeClip(ClipKind kind, double threshold, SigPtr input);

@@ -340,10 +340,15 @@ let song : Scalar Signal =
   CHECK(inner.items[1]->kind == Expr::Kind::App);
 }
 
-TEST(parser_let_in_requires_annotation_and_in) {
+TEST(parser_let_in_annotation_is_optional) {
+  // Local inference: an unannotated `let ... in` parses (the checker
+  // synthesizes the type from the bound expression); `in` stays
+  // mandatory.
   DiagnosticBag d1;
-  parseSrc("let x : Scalar = let y = 1.0 in y ;;", d1);
-  CHECK(d1.hasErrors());
+  auto defs = parseSrc("let x : Scalar = let y = 1.0 in y ;;", d1);
+  CHECK(!d1.hasErrors());
+  CHECK(defs[0].body->kind == Expr::Kind::Let);
+  CHECK(!defs[0].body->declTypeExpr);
   DiagnosticBag d2;
   parseSrc("let x : Scalar = let y : Scalar = 1.0 y ;;", d2);
   CHECK(d2.hasErrors());
@@ -383,11 +388,22 @@ let song : Scalar Signal =
   CHECK(let.items[1]->kind == Expr::Kind::App);
 }
 
-TEST(parser_let_in_params_still_require_annotation) {
-  // The return type stays mandatory when parameters are present.
+TEST(parser_let_in_function_annotation_is_optional) {
+  // A local function's return type may be inferred too: the binding
+  // desugars to an unannotated lambda binding (params stay annotated).
   DiagnosticBag d1;
-  parseSrc("let x : Scalar = let f y:Scalar = y in f 1.0 ;;", d1);
-  CHECK(d1.hasErrors());
+  auto defs =
+      parseSrc("let x : Scalar = let f y:Scalar = y in f 1.0 ;;", d1);
+  CHECK(!d1.hasErrors());
+  const Expr& let = *defs[0].body;
+  CHECK(let.kind == Expr::Kind::Let);
+  CHECK(!let.declTypeExpr);
+  CHECK(let.items[0]->kind == Expr::Kind::Lambda);
+  // `let rec` keeps its annotation: the recursive name must be in scope
+  // in its own body at a known type.
+  DiagnosticBag d2;
+  parseSrc("let x : Scalar = let rec f y:Int = f y in f 1 ;;", d2);
+  CHECK(d2.hasErrors());
 }
 
 TEST(parser_type_variables) {

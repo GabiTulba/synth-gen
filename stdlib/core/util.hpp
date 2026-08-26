@@ -1,6 +1,7 @@
 #pragma once
 #include <cmath>
 #include <cstdint>
+#include <cstring>
 #include <stdexcept>
 #include <string>
 
@@ -24,6 +25,20 @@ inline std::int64_t countArg(const ext::Value& v, const char* prim) {
     throw std::runtime_error(std::string(prim) + ": count " +
                              std::to_string(n) + " is unreasonably large");
   return n;
+}
+
+// splitmix64 over (seed bits, index), mapped to [0, 1): integer-only, so
+// the result is bit-identical on every platform. This is THE library
+// hash - `Time.jitter` applies it in the time domain and `Math.hash`
+// exposes it as a value, so the two share bits by construction.
+inline double hashUnit(double seed, std::int64_t i) {
+  std::uint64_t h;
+  std::memcpy(&h, &seed, sizeof h);
+  h ^= (std::uint64_t)i * 0x9E3779B97F4A7C15ull;
+  h ^= h >> 30; h *= 0xBF58476D1CE4E5B9ull;
+  h ^= h >> 27; h *= 0x94D049BB133111EBull;
+  h ^= h >> 31;
+  return (double)(h >> 11) / 9007199254740992.0;  // [0,1)
 }
 
 // `signal ~f`: apply the Scalar -> Scalar function symbolically to the

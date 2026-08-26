@@ -1,0 +1,5 @@
+{
+  "project": "sampling",
+  "description": "The Io/resample sampling workflow: import, slice, warp, place; stereo taken apart with Arrange.channel and rebuilt with Mix.pan.",
+  "sources": ["sampling.synth"]
+}

@@ -5,34 +5,24 @@
    hands the voice each note's own length. *)
 
 open Core
-open Core.Osc
-open Core.Fx
-open Core.Arrange
-open Core.Render
-open Core.Io
-open Core.Time
-open Core.Sig
-open Core.Math
+open Core.Dsp
 
 import Timing
 import Harmony
 import Voices
 module K = Voices.Keys
 
-open Core.Pitch
 open Core.Scale
 open Core.Score
 
-(* A voice is (freq, duration, velocity) -> Sample. The envelope's
-   plateau and the sample window both follow the written length, which
-   is the thing a pre-baked fixed-length note cannot express; the
-   350 ms release rings on past it. *)
+(* A voice is (freq, duration, velocity) -> Sample. `gated` applies the
+   envelope and ends the window where the envelope does, so the plateau
+   follows the written length and the 350 ms release rings on past it -
+   the thing a pre-baked fixed-length note cannot express. *)
 let piano freq:Scalar dur:Timestamp vel:Scalar : Scalar Sample =
-  K.strike freq
-    * (adsr ~attack:4ms ~decay:600ms ~sustain:0.25 ~release:350ms
-            ~hold:dur)
-    * vel
-    |> sample ~from:0s ~to:(dur + 350ms)
+  K.strike freq * vel
+    |> gated ~attack:4ms ~decay:600ms ~sustain:0.25 ~release:350ms
+             ~hold:dur
 ;;
 
 (* The tune, in scale degrees: 0 is the tonic, and negative degrees

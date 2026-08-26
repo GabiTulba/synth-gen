@@ -5,6 +5,8 @@ cmake-build-*/
 compile_commands.json
 *.wav
 !tests/data/*.wav
+# The sampling example's audio inputs are sources, not artifacts
+!examples/sampling/*.wav
 # Committed showcase renders (refresh with scripts/render-outputs.sh)
 !outputs/**/*.wav
 imgui.ini

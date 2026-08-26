@@ -43,12 +43,17 @@ let _ = render "demo" 48000.0 (sample song 0s 2s)
 All primitives live in **`Core`** — a real library bundled with the
 compiler (see [`core-library.md`](core-library.md)) organized into
 functional submodules: `Osc`, `Fx`, `Arrange`, `Render`, `Io`, `List`,
-`Time`, `Sig`, `Math`. Core is not ambient — bring it into scope like
+`Time`, `Sig`, `Groove`, `Pitch`, `Tempo`, `Scale`, `Score`, `Mix`,
+`Str`, `Math`. Core is not ambient — bring it into scope like
 any library: `import Core` (qualified `Core.Osc.sine`), `open Core`
 (module-qualified `Osc.sine`, `List.map`), or `open Core.Osc` (bare
 `sine`). It aliases like any module (`module C = Core`,
-`module L = Core.List`). Code fragments below assume the relevant
-submodules are open.
+`module L = Core.List`). Once the structure is familiar, the
+working-file idiom for sound-design files is the `Dsp` prelude —
+`open Core open Core.Dsp` re-exports the signal-tier working set under
+bare names, replacing the per-submodule open block (and `synthc lint`
+warns about opens a file never uses). Code fragments below assume the
+relevant submodules are open.
 
 ## Types, annotations, and time
 
@@ -221,9 +226,12 @@ let stack : Scalar Signal = swell [sine 110.0; sine 220.0; sine 440.0] ~gain:0.5
 ```
 
 Recursion is self-only (no mutual groups), needs at least one
-parameter, and is guarded: past 4096 nested calls the build fails with
-a recursion-limit diagnostic instead of running away. Musical lists —
-one recursion level per element — sit far under that.
+parameter, and is guarded: past 4096 genuinely *nested* calls the
+build fails with a recursion-limit diagnostic instead of running away.
+Tail calls — through `let ... in` bodies, `if` branches and `match`
+arms — are eliminated, so accumulator-shaped recursion (every Core
+`List` combinator is written that way) runs at constant depth however
+long the list.
 
 ## Modules: files, libraries, inline modules
 

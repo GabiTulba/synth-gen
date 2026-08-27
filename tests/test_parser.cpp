@@ -202,6 +202,50 @@ TEST(parser_labeled_params_and_args) {
   CHECK(call.argLabels[1] == "amp");
 }
 
+TEST(parser_labeled_argument_punning) {
+  DiagnosticBag diags;
+  auto defs = parseSrc(
+      "let f ~amp:Scalar ~freq:Scalar : Scalar Signal = sine freq * amp ;;\n"
+      "let g : Scalar Signal =\n"
+      "  let amp = 0.5 in let freq = 440.0 in f ~freq ~amp ;;\n"
+      "let h : Scalar Signal = let amp = 0.5 in f ~amp ~freq:220.0 ;;",
+      diags);
+  CHECK(!diags.hasErrors());
+  // `~freq ~amp` is exactly `~freq:freq ~amp:amp`.
+  const Expr& call = *defs[1].body->items[1]->items[1];
+  CHECK(call.kind == Expr::Kind::App);
+  CHECK(call.argLabels.size() == 2);
+  CHECK(call.argLabels[0] == "freq");
+  CHECK(call.argLabels[1] == "amp");
+  CHECK(call.items[1]->kind == Expr::Kind::Ident);
+  CHECK(call.items[1]->name == "freq");
+  CHECK(call.items[1]->punned);
+  CHECK(call.items[2]->name == "amp");
+  CHECK(call.items[2]->punned);
+  // The span covers the name only, not the '~' - that is what makes
+  // hover and go-to-definition land on the variable.
+  std::string src =
+      "let f ~amp:Scalar ~freq:Scalar : Scalar Signal = sine freq * amp ;;\n"
+      "let g : Scalar Signal =\n"
+      "  let amp = 0.5 in let freq = 440.0 in f ~freq ~amp ;;\n"
+      "let h : Scalar Signal = let amp = 0.5 in f ~amp ~freq:220.0 ;;";
+  CHECK(src.substr(call.items[1]->span.lo,
+                   call.items[1]->span.hi - call.items[1]->span.lo) == "freq");
+  // Punned and written-out arguments mix freely.
+  const Expr& mixed = *defs[2].body->items[1];
+  CHECK(mixed.argLabels[0] == "amp");
+  CHECK(mixed.items[1]->punned);
+  CHECK(mixed.argLabels[1] == "freq");
+  CHECK(!mixed.items[2]->punned);
+  CHECK(mixed.items[2]->kind == Expr::Kind::NumLit);
+}
+
+TEST(parser_punned_argument_needs_a_name) {
+  DiagnosticBag diags;
+  parseSrc("let g : Scalar Signal = f ~ ;;", diags);
+  CHECK(diags.hasErrors());
+}
+
 TEST(parser_pipe_desugars_to_application) {
   DiagnosticBag diags;
   auto defs = parseSrc(

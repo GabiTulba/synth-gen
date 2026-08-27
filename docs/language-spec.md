@@ -131,7 +131,9 @@ additive    ::= multiplicative
 multiplicative ::= unary { ("*" | "/" | "*." | "/.") unary }
 unary       ::= ("-" | "-.") unary | app
 app         ::= atom { arg }                        (application, left)
-arg         ::= atom | "~" Ident ":" atom           (labeled argument)
+arg         ::= atom                                (positional)
+              | "~" Ident ":" atom                  (labeled argument)
+              | "~" Ident                           (punned: ~x = ~x:x)
 atom        ::= atom-base { "." Ident }             (record projection;
                                                      binds tighter than
                                                      application)
@@ -335,7 +337,11 @@ Rules:
   `~name:Type` is *labeled*; primitive parameters are all labeled with
   their signature names. At a call site, positional arguments fill the
   leftmost unfilled parameters in order, and labeled arguments
-  (`f ~x:v`) fill their parameter by name, in any order. If every
+  (`f ~x:v`) fill their parameter by name, in any order. A labeled
+  argument whose value is a variable of the same name may be **punned**
+  to just `~x`, which is exactly `~x:x` — the name is resolved as an
+  ordinary reference at that point in scope, so it sees parameters,
+  locals and top-level definitions alike, and shadowing applies. If every
   parameter is filled the call evaluates. Otherwise the call is a
   *partial application*: its value is the curried function of the
   remaining parameters, in declaration order, keeping their labels
@@ -354,8 +360,8 @@ Rules:
   one also resolves against the binding's annotation
   (`let damp : Scalar Signal -> Scalar Signal = lowpass ~cutoff:600.0`).
 - **`let _` is the effect form.** Its body must have type `unit`, and
-  the render primitives (`render`, `render_vis`) are the only sources of
-  `unit`.
+  the render primitives (`render`, `render_vis`) and `Ui.panel` are the
+  only sources of `unit`.
 - **List literals** unify their elements to one type. `[]` (and a
   polymorphic `Nil`, which is the same value) leaves the element as an
   unknown the annotation or the surrounding call resolves — exactly the

@@ -354,6 +354,10 @@ struct RefLoc {
   const CheckedModule* mod = nullptr;
   Span span{};
   bool isDecl = false;
+  // The reference is a punned labeled argument (`~gain`), so `span`
+  // covers text that is *also* the label. Renaming it has to expand the
+  // pun (`~gain:newName`) rather than overwrite both halves at once.
+  bool punned = false;
 };
 
 // References to a local binder: its declaration plus every use in the
@@ -374,7 +378,7 @@ void collectLocalRefs(const CheckedModule& cm, const SymbolTarget& t,
       if (it->name == e.name) {
         if (it->span.lo == t.binder.span.lo &&
             it->span.hi == t.binder.span.hi)
-          out.push_back({&cm, identLeafSpan(src, e), false});
+          out.push_back({&cm, identLeafSpan(src, e), false, e.punned});
         return;  // some other binder shadows ours (or is ours)
       }
   });
@@ -415,7 +419,8 @@ void collectProgramRefs(const Program& prog, const SymbolTarget& t,
           std::string hostId =
               e.moduleName.empty() ? m.parsed.name : e.moduleName;
           if (hostId != t.hostId || e.name != t.stored) return;
-          out.push_back({&m, identLeafSpan(m.parsed.source, e), false});
+          out.push_back(
+              {&m, identLeafSpan(m.parsed.source, e), false, e.punned});
         });
       }
     };
@@ -1296,7 +1301,13 @@ std::vector<std::string> LspServer::onMessage(const std::string& body) {
         if (!seen.insert({key, r.span.lo, r.span.hi}).second) continue;
         Value edit = json::makeObject();
         edit.set("range", rangeValue(r.mod->parsed.source, r.span));
-        edit.set("newText", json::makeString(newName));
+        // A punned `~gain` is one piece of text serving as both label and
+        // value. The label must not move, so the pun opens up instead.
+        std::string text =
+            r.punned ? r.mod->parsed.source.substr(
+                           r.span.lo, r.span.hi - r.span.lo) + ":" + newName
+                     : newName;
+        edit.set("newText", json::makeString(text));
         std::string u = pathToUri(key);
         auto grp = std::find_if(
             byUri.begin(), byUri.end(),

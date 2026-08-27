@@ -603,6 +603,40 @@ TEST(lsp_rename_local_binder) {
   CHECK(rangeStartLine(edits->array[1]) == gUse.line);
 }
 
+TEST(lsp_rename_expands_punned_arguments) {
+  TempDir tmp;
+  fs::path p = tmp.write("song.synth", "");
+  std::string uri = uriFor(p);
+  // `~gain` is one piece of text doing two jobs. Renaming the value must
+  // not carry the label along with it, or the call stops compiling.
+  std::string text =
+      "open Core\n"
+      "open Core.Osc\n"
+      "\n"
+      "let voice ~gain:Scalar : Scalar Signal =\n"
+      "  (sine 220.0) *. gain\n"
+      ";;\n"
+      "\n"
+      "let doubled : Scalar Signal =\n"
+      "  let gain : Scalar = 2.0 in\n"
+      "  voice ~gain\n"
+      ";;\n";
+  LspServer server;
+  server.onMessage(didOpen(uri, text));
+
+  // Rename from the punned occurrence itself.
+  LC use = lcOf(text, "voice ~gain", 1);  // the call, not the declaration
+  use.ch += 7;
+  json::Value edit = resultOf(server, renameRequest(2, uri, use, "g"));
+  const json::Value* edits = edit.get("changes")->get(uri);
+  CHECK(edits != nullptr);
+  CHECK(edits->array.size() == 2);
+  // The declaration is a plain rename; the punned use opens back up.
+  CHECK(edits->array[0].getString("newText") == "g");
+  CHECK(rangeStartLine(edits->array[1]) == use.line);
+  CHECK(edits->array[1].getString("newText") == "gain:g");
+}
+
 TEST(lsp_rename_rejections) {
   TempDir tmp;
   fs::path p = tmp.write("song.synth", "");
@@ -662,6 +696,20 @@ TEST(lsp_formatting_normalizes_whitespace) {
   json::Value clean =
       resultOf(server, docRequest(3, "textDocument/formatting", uri));
   CHECK(clean.array.empty());
+}
+
+TEST(lsp_formatting_keeps_punned_arguments) {
+  TempDir tmp;
+  fs::path p = tmp.write("song.synth", "");
+  std::string uri = uriFor(p);
+  std::string text = "let x : Scalar Signal = f ~freq   ~gain:0.5 ;;\n";
+  LspServer server;
+  server.onMessage(didOpen(uri, text));
+  json::Value edits =
+      resultOf(server, docRequest(2, "textDocument/formatting", uri));
+  CHECK(edits.array.size() == 1);
+  CHECK(edits.array[0].getString("newText") ==
+        "let x : Scalar Signal = f ~freq ~gain:0.5 ;;\n");
 }
 
 TEST(lsp_formatting_refuses_unlexable_source) {

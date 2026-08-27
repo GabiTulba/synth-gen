@@ -145,6 +145,12 @@ struct Expr {
   std::vector<Pattern> patterns;
   // Let only: declared with `let rec`.
   bool isRec = false;
+  // Ident only, and only in labeled-argument position: written punned,
+  // as `~gain` for `~gain:gain`. The node is exactly the Ident the long
+  // form would have produced - nothing downstream distinguishes them -
+  // except that a rename of the *value* has to expand the pun back out,
+  // since the label and the name share one piece of text.
+  bool punned = false;
   // BinOp only: written in the '.'-suffixed form (`+.`, `>.`, ...), which
   // takes the continuous kinds - Scalar, Timestamp, Vector, Signal. The
   // bare form is Int-only. Nothing downstream of the checker looks at

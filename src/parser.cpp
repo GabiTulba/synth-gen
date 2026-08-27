@@ -847,11 +847,21 @@ class Parser {
     std::vector<std::string> labels;
     for (;;) {
       if (at(Tok::Tilde)) {
-        // Labeled argument: ~name:atom
+        // Labeled argument: ~name:atom, or punned as bare ~name.
         advance();
         const Token& name = expect(Tok::Ident, "label after '~'");
-        expect(Tok::Colon, "':' after argument label");
-        args.push_back(parseAtom());
+        if (at(Tok::Colon)) {
+          advance();
+          args.push_back(parseAtom());
+        } else {
+          // `~gain` is `~gain:gain`. The synthesized Ident spans just the
+          // name, so hover, go-to-definition and find-references land on
+          // the variable the way they do in the written-out form.
+          auto id = std::make_unique<Expr>(Expr::Kind::Ident, name.span);
+          id->name = name.text;
+          id->punned = true;
+          args.push_back(std::move(id));
+        }
         labels.push_back(name.text);
       } else if (startsAtom()) {
         args.push_back(parseAtom());

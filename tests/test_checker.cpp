@@ -1478,6 +1478,69 @@ let warm : Scalar Signal =
   CHECK(!diags.hasErrors());
 }
 
+TEST(checker_labeled_argument_punning) {
+  TempProject tp;
+  // `~gain` is `~gain:gain`: it resolves as an ordinary reference, so it
+  // sees parameters, locals and top-level definitions alike, respects
+  // shadowing, and partially applies like the written-out form.
+  std::string f = tp.write("ok.synth", R"(
+open Core open Core.Osc open Core.Fx open Core.Arrange open Core.Render open Core.Io open Core.Time open Core.Sig open Core.Math
+let cutoff : Scalar = 800.0 ;;
+let voice ~freq:Scalar ~gain:Scalar : Scalar Signal = (sine freq) *. gain ;;
+let top : Scalar Signal =
+  let freq = 440.0 in
+  let gain = 0.5 in
+  voice ~freq ~gain
+;;
+let mixed : Scalar Signal = let gain = 0.25 in voice ~freq:220.0 ~gain ;;
+let piped : Scalar Signal = saw 220.0 |> lowpass ~cutoff ;;
+let curried : Scalar -> Scalar Signal = let gain = 0.3 in voice ~gain ;;
+let shadowed : Scalar Signal =
+  let cutoff = 200.0 in
+  saw 110.0 |> lowpass ~cutoff
+;;
+let inner ~freq:Scalar : Scalar Signal = voice ~freq ~gain:1.0 ;;
+)");
+  DiagnosticBag diags;
+  Program prog = checkProject({f}, diags);
+  for (auto& d : diags.items)
+    std::cerr << renderDiagnostic(d, prog.modules.empty() ? std::string{}
+                                       : userMod(prog).parsed.source);
+  CHECK(!diags.hasErrors());
+  CHECK(typeName(userMod(prog).defTypes.at("top")) == "Scalar Signal");
+  CHECK(typeName(userMod(prog).defTypes.at("mixed")) == "Scalar Signal");
+  CHECK(typeName(userMod(prog).defTypes.at("piped")) == "Scalar Signal");
+  CHECK(typeName(userMod(prog).defTypes.at("shadowed")) == "Scalar Signal");
+  CHECK(typeName(userMod(prog).defTypes.at("curried")) ==
+        "Scalar -> Scalar Signal");
+}
+
+TEST(checker_punned_argument_reports_the_name_not_the_label) {
+  TempProject tp;
+  // The pun is sugar, not a new binding form: an unbound name is the
+  // ordinary unknown-name error, and a mistyped one the ordinary
+  // argument-type error, both pointing at the name itself.
+  std::string f = tp.write("bad.synth", R"(
+open Core open Core.Osc open Core.Fx open Core.Arrange open Core.Render open Core.Io open Core.Time open Core.Sig open Core.Math
+let voice ~freq:Scalar ~gain:Scalar : Scalar Signal = (sine freq) *. gain ;;
+let missing : Scalar Signal = voice ~freq ~gain:0.5 ;;
+let wrong : Scalar Signal = let gain = 1s in voice ~freq:440.0 ~gain ;;
+)");
+  DiagnosticBag diags;
+  checkProject({f}, diags);
+  CHECK(diags.hasErrors());
+  bool unknown = false, mistyped = false;
+  for (auto& d : diags.items) {
+    if (d.message.find("unknown name 'freq'") != std::string::npos)
+      unknown = true;
+    if (d.message.find("argument 'gain'") != std::string::npos &&
+        d.message.find("got Timestamp") != std::string::npos)
+      mistyped = true;
+  }
+  CHECK(unknown);
+  CHECK(mistyped);
+}
+
 TEST(checker_let_in_function_binding) {
   TempProject tp;
   // A local function definition: positional and labeled parameters,

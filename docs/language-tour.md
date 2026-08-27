@@ -123,7 +123,10 @@ let _ = sample pattern ~from:0s ~to:2s |> render ~name:"warm" ~rate:48000.0 ;;
   function's arguments — labeled, a positional prefix, or a mix —
   curries it over the remaining parameters. Primitive parameters are all
   labeled with their signature names, so any primitive can be called by
-  label or partially applied.
+  label or partially applied. When the value is a variable of the same
+  name, the label **puns**: `~cutoff` means `~cutoff:cutoff`, so
+  `adsr ~attack ~decay ~sustain ~release` says once what it would
+  otherwise say twice.
 - Any function-typed expression can be applied (`(f 1.0) 2.0`) or passed
   along — a bare name, a partial application, a parameter, a lambda.
 - **Lambdas** (`fun x:Scalar -> ...`) annotate their parameters like

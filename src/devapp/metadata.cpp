@@ -3,6 +3,7 @@
 #include <algorithm>
 #include <filesystem>
 #include <fstream>
+#include <set>
 #include <sstream>
 
 #include "build.hpp"
@@ -81,8 +82,61 @@ MetadataLoadResult loadProjectMetadata(const std::string& path) {
       if (!m.name.empty()) r.meta.controls.push_back(std::move(m));
     }
   }
+  if (const json::Value* panels = root.get("panels");
+      panels && panels->kind == json::Value::Kind::Array) {
+    // Defensive like the arrays above: a malformed entry is dropped, not
+    // fatal. A panel is presentation, and losing one must never stop the
+    // app showing the build.
+    auto names = [](const json::Value& p, const char* key) {
+      std::vector<std::string> out;
+      const json::Value* v = p.get(key);
+      if (!v || v->kind != json::Value::Kind::Array) return out;
+      for (auto& n : v->array)
+        if (n.kind == json::Value::Kind::String && !n.string.empty())
+          out.push_back(n.string);
+      return out;
+    };
+    for (auto& p : panels->array) {
+      PanelMeta m;
+      m.name = p.getString("name");
+      if (m.name.empty()) continue;
+      m.controls = names(p, "controls");
+      m.targets = names(p, "targets");
+      r.meta.panels.push_back(std::move(m));
+    }
+  }
   r.ok = true;
   return r;
+}
+
+std::vector<PanelMeta> resolvePanels(const ProjectMeta& meta) {
+  std::vector<PanelMeta> out = meta.panels;
+  std::set<std::string> claimedControls, claimedTargets;
+  for (auto& p : meta.panels) {
+    claimedControls.insert(p.controls.begin(), p.controls.end());
+    claimedTargets.insert(p.targets.begin(), p.targets.end());
+  }
+  PanelMeta rest;
+  std::set<std::string> seenGroups;
+  for (auto& c : meta.controls) {
+    // A group is claimed under its group name, which is how a panel
+    // names it; its lanes are never listed individually there.
+    const std::string& key = c.group.empty() ? c.name : c.group;
+    if (claimedControls.count(key) || claimedControls.count(c.name)) continue;
+    if (!c.group.empty() && !seenGroups.insert(c.group).second) continue;
+    rest.controls.push_back(key);
+  }
+  for (auto& t : meta.targets)
+    if (!claimedTargets.count(t.name)) rest.targets.push_back(t.name);
+  if (!rest.controls.empty() || !rest.targets.empty()) {
+    // With nothing declared this panel *is* the project, so it says so;
+    // alongside declared panels it is the leftovers.
+    rest.name = meta.panels.empty()
+                    ? (meta.project.empty() ? "all" : meta.project)
+                    : "ungrouped";
+    out.push_back(std::move(rest));
+  }
+  return out;
 }
 
 ControlBand controlLaneBand(const ControlMeta& lane, double otherLanesSum) {

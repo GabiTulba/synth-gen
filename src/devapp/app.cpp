@@ -20,6 +20,7 @@
 #include <cstdlib>
 #include <filesystem>
 #include <map>
+#include <set>
 #include <string>
 #include <vector>
 
@@ -99,10 +100,11 @@ std::map<std::string, double> unitOverrides(const UnitState& u) {
   return overrides;
 }
 
-// One open waveform panel - a floating, draggable window; any number can
-// be open at once, each with its own zoom window and selection. Holds the
-// decoded WAV plus per-channel peak bins; reloaded automatically when a
-// rebuild rewrites the artifact.
+// One artifact's waveform: the decoded WAV, per-channel peak bins, and
+// the view state (zoom, selection, loop) laid over them. Drawn inside
+// whichever panel names its target - there is one of these per artifact,
+// not per panel - and reloaded automatically when a rebuild rewrites the
+// file.
 struct WavePanel {
   std::string artifactPath;  // empty = closed
   std::string targetName;
@@ -114,7 +116,6 @@ struct WavePanel {
   double selStart = -1, selEnd = -1;  // selection in frames; -1 = none
   double dragAnchor = -1;             // frame where a selection drag began
   bool loop = false;   // replay the played range indefinitely
-  int spawnIndex = 0;  // cascades the window's first-ever position
 
   void open(const std::string& path, const std::string& name) {
     artifactPath = path;
@@ -198,8 +199,11 @@ struct AppState {
   double sinceStatMs = 1e9;  // force an immediate first load
   AudioPlayer player;
   std::string playError;
-  std::vector<WavePanel> waves;
-  int waveSpawnCount = 0;  // cascades new wave windows' first positions
+  // Decoded audio and view state per artifact. Waveforms live inside
+  // panels now, so there is exactly one view per artifact however many
+  // panels name it, and it is dropped when no open panel is showing it -
+  // a stem of a full-length song costs tens of megabytes decoded.
+  std::map<std::string, WavePanel> waves;
 
   // The project's settings file (projectstate.hpp). `state` is the last
   // snapshot written to disk; the live state lives in the members it
@@ -212,28 +216,42 @@ struct AppState {
   bool persist = true;  // writes are off under --self-test; reads are not
   ProjectState state;
   std::map<std::string, bool> sections;  // collapsing headers we own
+  // Which panel windows are open, by "<unit>/<panel>", and whether each
+  // unit's flat lists hide what a panel already covers. Where a panel
+  // window sits is ImGui's business, carried in its ini blob; only
+  // whether it is on screen at all is ours to remember.
+  std::map<std::string, bool> panelsOpen;
   WindowGeometry windowGeom;
   bool imguiIniDirty = false;
   double sinceSaveMs = 0;
   std::string stateError;  // last save failure, if any
 
-  WavePanel* findWave(const std::string& path) {
-    for (auto& w : waves)
-      if (w.artifactPath == path) return &w;
-    return nullptr;
+  std::string panelKey(const UnitState& u, const std::string& panel) {
+    return unitKey(u) + "/" + panel;
   }
 
-  void toggleWave(const std::string& path, const std::string& name) {
-    for (size_t i = 0; i < waves.size(); i++) {
-      if (waves[i].artifactPath == path) {
-        waves.erase(waves.begin() + i);
-        return;
-      }
+  // A panel a project bothered to declare is worth showing, so one the
+  // user has never touched opens by default; closing it persists.
+  bool& panelOpen(const UnitState& u, const std::string& panel) {
+    return panelsOpen.try_emplace(panelKey(u, panel), true).first->second;
+  }
+
+  std::vector<PanelMeta> panelsFor(const UnitState& u) {
+    return resolvePanels(u.loaded.meta);
+  }
+
+  // The view for one artifact, decoded on first sight. Panels ask for it
+  // by path, so two panels naming the same target share one view.
+  WavePanel& wave(const std::string& path, const std::string& target) {
+    auto [it, fresh] = waves.try_emplace(path);
+    if (fresh) {
+      auto saved = savedWaves.find(path);
+      if (saved != savedWaves.end())
+        it->second.restore(path, saved->second);
+      else
+        it->second.open(path, target);
     }
-    WavePanel w;
-    w.open(path, name);
-    w.spawnIndex = waveSpawnCount++;
-    waves.push_back(std::move(w));
+    return it->second;
   }
 
   void resolveLayout() {
@@ -264,19 +282,16 @@ struct AppState {
     units = std::move(next);
   }
 
-  // Puts the saved waveform windows back. Artifacts are stored relative
-  // to the layout root, so a panel survives the tree moving; one whose
-  // artifact is missing is still reopened - it shows its load error and
-  // heals itself the moment a build writes the file.
-  void restoreWaves(const std::vector<WavePanelState>& saved) {
-    for (const WavePanelState& st : saved) {
-      std::string path = (fs::path(rootDir) / st.artifact).string();
-      if (findWave(path)) continue;
-      WavePanel w;
-      w.restore(path, st);
-      w.spawnIndex = waveSpawnCount++;
-      waves.push_back(std::move(w));
-    }
+  // View state (zoom, selection, loop) a previous run recorded, by
+  // artifact path. Artifacts are stored relative to the layout root, so
+  // the state survives the tree moving. Seeded into a view the first
+  // time a panel asks for that artifact; an entry whose artifact is gone
+  // simply never gets used.
+  std::map<std::string, WavePanelState> savedWaves;
+
+  void adoptSavedWaves(const std::vector<WavePanelState>& saved) {
+    for (const WavePanelState& st : saved)
+      savedWaves[(fs::path(rootDir) / st.artifact).string()] = st;
   }
 
   // Reads the project's settings and adopts them. Called once, after the
@@ -288,6 +303,8 @@ struct AppState {
     ProjectStateLoad r = loadProjectState(statePath);
     state = std::move(r.state);
     sections = state.ui.sections;
+    panelsOpen = state.ui.panels;
+    adoptSavedWaves(state.ui.waves);
     // Carry the saved placement forward even when this run never touches
     // it (--fullscreen, or a window nobody moves): capturing the state
     // would otherwise write the geometry back out empty.
@@ -341,7 +358,12 @@ struct AppState {
     s.ui.window = windowGeom;
     s.ui.imguiIni = state.ui.imguiIni;  // refreshed by save() when dirty
     s.ui.sections = sections;
-    for (const WavePanel& w : waves) {
+    s.ui.panels = panelsOpen;
+    // Every view currently decoded, plus the ones recorded earlier whose
+    // panel is closed right now: closing a panel must not throw away the
+    // zoom you set inside it.
+    std::map<std::string, WavePanelState> keep = savedWaves;
+    for (const auto& [path, w] : waves) {
       WavePanelState p;
       std::error_code ec;
       fs::path rel = fs::relative(w.artifactPath, rootDir, ec);
@@ -352,8 +374,9 @@ struct AppState {
       p.selStart = w.selStart;
       p.selEnd = w.selEnd;
       p.loop = w.loop;
-      s.ui.waves.push_back(std::move(p));
+      keep[path] = std::move(p);
     }
+    for (auto& [path, p] : keep) s.ui.waves.push_back(p);
     return s;
   }
 
@@ -444,7 +467,9 @@ struct AppState {
     // a build just finished: force every open panel fresh - an artifact
     // rewritten with the same size within the mtime granularity would
     // otherwise be missed and leave the panel showing stale audio.
-    for (auto& w : waves) w.reloadIfChanged(rebuilt);
+    // A knob you turned in a panel is exactly what triggered the
+    // rebuild, so the waveform under it must show the new sound.
+    for (auto& [path, w] : waves) w.reloadIfChanged(rebuilt);
     // Same for a looping playback: re-read the playing artifact so the
     // loop picks up the rebuilt audio instead of replaying its stale
     // in-memory copy forever.
@@ -480,6 +505,24 @@ std::string sectionKey(const UnitState& u, const char* section) {
          section;
 }
 
+// The unit's panel switches: one checkbox per declared panel, plus the
+// toggle that hides panel-covered controls and targets from the flat
+// lists below. This row is the whole point of panels - it is what lets
+// you show the two you are working on and put the rest away.
+void drawPanelBar(AppState& app, UnitState& u) {
+  const std::vector<PanelMeta>& panels = u.loaded.meta.panels;
+  if (panels.empty()) return;
+  ImGui::AlignTextToFramePadding();
+  ImGui::TextUnformatted("panels:");
+  for (const PanelMeta& p : panels) {
+    ImGui::SameLine();
+    bool open = app.panelOpen(u, p.name);
+    if (ImGui::Checkbox(p.name.c_str(), &open))
+      app.panelOpen(u, p.name) = open;
+  }
+  ImGui::Separator();
+}
+
 void drawDiagnostics(AppState& app, const UnitState& u) {
   const ProjectMeta& meta = u.loaded.meta;
   if (meta.diagnostics.empty()) return;
@@ -499,75 +542,6 @@ void drawDiagnostics(AppState& app, const UnitState& u) {
   }
 }
 
-void drawTargets(AppState& app, UnitState& u) {
-  const ProjectMeta& meta = u.loaded.meta;
-  if (meta.targets.empty()) {
-    ImGui::TextDisabled("no render targets in this build");
-    return;
-  }
-  ImGuiTableFlags flags = ImGuiTableFlags_Borders | ImGuiTableFlags_RowBg |
-                          ImGuiTableFlags_SizingStretchProp;
-  if (!ImGui::BeginTable("targets", 6, flags)) return;
-  ImGui::TableSetupColumn("target", ImGuiTableColumnFlags_WidthStretch, 3.0f);
-  ImGui::TableSetupColumn("status", ImGuiTableColumnFlags_WidthStretch, 1.2f);
-  ImGui::TableSetupColumn("duration", ImGuiTableColumnFlags_WidthStretch, 1.4f);
-  ImGui::TableSetupColumn("rate", ImGuiTableColumnFlags_WidthStretch, 1.4f);
-  ImGui::TableSetupColumn("ch", ImGuiTableColumnFlags_WidthStretch, 0.7f);
-  ImGui::TableSetupColumn("", ImGuiTableColumnFlags_WidthStretch, 1.6f);
-  ImGui::TableHeadersRow();
-
-  for (auto& t : meta.targets) {
-    ImGui::TableNextRow();
-    ImGui::PushID(t.name.c_str());
-    ImGui::TableNextColumn();
-    ImGui::TextUnformatted(t.name.c_str());
-
-    ImGui::TableNextColumn();
-    if (t.status == "ok")
-      ImGui::TextColored(ImVec4(0.5f, 0.9f, 0.5f, 1.0f), "ok");
-    else
-      ImGui::TextColored(ImVec4(1.0f, 0.45f, 0.45f, 1.0f), "error");
-
-    ImGui::TableNextColumn();
-    ImGui::Text("%.3fs", t.durationSeconds);
-    ImGui::TableNextColumn();
-    ImGui::Text("%.0f Hz", t.rate);
-    ImGui::TableNextColumn();
-    ImGui::Text("%d", t.channels);
-
-    ImGui::TableNextColumn();
-    std::string artifactPath =
-        (fs::path(app.rootDir) / t.artifact).string();
-    bool isPlaying =
-        app.player.playing() && app.player.currentPath() == artifactPath;
-    if (t.kind != "visual" && t.status == "ok" && !t.artifact.empty()) {
-      bool waveOpen = app.findWave(artifactPath) != nullptr;
-      if (ImGui::SmallButton(waveOpen ? "hide" : "wave"))
-        app.toggleWave(artifactPath, t.name);
-      ImGui::SameLine();
-    }
-    if (t.kind == "visual") {
-      // Waveform images are viewed in any browser/image viewer; the dev
-      // app just points at them.
-      ImGui::TextDisabled("%s", t.status == "ok" ? "waveform svg" : "-");
-    } else if (isPlaying) {
-      if (ImGui::SmallButton("stop")) app.player.stop();
-      ImGui::SameLine();
-      ImGui::ProgressBar((float)app.player.progress(), ImVec2(-1, 0), "");
-    } else if (t.status == "ok" && !t.artifact.empty()) {
-      if (ImGui::SmallButton("play")) {
-        app.playError.clear();
-        if (!app.player.play(artifactPath, app.playError) &&
-            !app.playError.empty())
-          app.playError = t.name + ": " + app.playError;
-      }
-    } else {
-      ImGui::TextDisabled("%s", t.error.empty() ? "-" : t.error.c_str());
-    }
-    ImGui::PopID();
-  }
-  ImGui::EndTable();
-}
 
 // A rotary knob: drag vertically to change the value (hold Shift for
 // fine adjustment). Returns true while the drag is changing the value.
@@ -818,29 +792,11 @@ bool drawControlGroup(UnitState& u, const std::vector<ControlMeta>& controls,
 // writes/second) and once more on release; an attached `synthc watch`
 // picks each write up and rebuilds, and the pending marker clears once
 // the new metadata echoes the final value back.
-void drawControls(AppState& app, UnitState& u) {
-  auto& controls = u.loaded.meta.controls;
-  if (controls.empty()) return;
-  if (!persistentHeader(
-          app, sectionKey(u, "controls"),
-          "controls (" + std::to_string(controls.size()) + ")###controls",
-          true))
-    return;
-
-  bool anyDirty = false;
-  for (size_t i = 0; i < controls.size();) {
-    // Lanes of one group arrive consecutively (declaration order); they
-    // are drawn together because each lane's limits depend on the rest.
-    if (!controls[i].group.empty()) {
-      size_t n = 1;
-      while (i + n < controls.size() &&
-             controls[i + n].group == controls[i].group)
-        n++;
-      anyDirty |= drawControlGroup(u, controls, i, n);
-      i += n;
-      continue;
-    }
-    const ControlMeta& c = controls[i++];
+// One ungrouped control: a knob or a slider, its name, and the pending
+// marker. Split out so a panel can draw one control at a time.
+// for a member it names.
+bool drawOneControl(UnitState& u, const ControlMeta& c) {
+  {
     ControlUi& ui = u.controlUi[c.name];
     ImGui::PushID(c.name.c_str());
     bool edited = false, released = false;
@@ -862,35 +818,61 @@ void drawControls(AppState& app, UnitState& u) {
       ImGui::TextUnformatted(c.name.c_str());
     }
     if (edited || released) noteControlEdit(u, ui, released);
-    anyDirty |= drawControlTail(u, ui, c);
+    bool dirty = drawControlTail(u, ui, c);
     ImGui::PopID();
+    return dirty;
   }
-  if (controls.size() > 1) {
-    if (ImGui::SmallButton("all defaults")) {
-      for (auto& c : controls) {
-        ControlUi& ui = u.controlUi[c.name];
-        ui.value = (float)c.def;
-        ui.editing = false;
-        ui.dirty = true;
-      }
-      writeUnitOverrides(u);
-    }
-    if (anyDirty) {
-      ImGui::SameLine();
-      ImGui::TextDisabled("* pending rebuild");
-    }
-  }
-  if (!u.controlsError.empty())
-    ImGui::TextColored(ImVec4(1.0f, 0.45f, 0.45f, 1.0f), "controls: %s",
-                       u.controlsError.c_str());
 }
 
-// The contents of one waveform window: min/max envelope lanes per channel
+// The lanes of one multi_slider group, found by name. Lanes arrive
+// consecutively in declaration order, so the group is the run of
+// controls sharing this name; they draw together because each lane's
+// limits depend on where the others sit. Returns false when no such
+// group exists.
+bool drawGroupByName(UnitState& u, const std::vector<ControlMeta>& controls,
+                     const std::string& group, bool& anyDirty) {
+  for (size_t i = 0; i < controls.size(); i++) {
+    if (controls[i].group != group) continue;
+    size_t n = 1;
+    while (i + n < controls.size() && controls[i + n].group == group) n++;
+    anyDirty |= drawControlGroup(u, controls, i, n);
+    return true;
+  }
+  return false;
+}
+
+// The unit's whole control list, groups drawn linked. `skip`, when set,
+// names the members some panel already covers, which the "grouped only"
+// toggle hides from here.
+void drawControlList(UnitState& u, const std::vector<ControlMeta>& controls,
+                     const std::set<std::string>* skip, bool& anyDirty) {
+  for (size_t i = 0; i < controls.size();) {
+    if (!controls[i].group.empty()) {
+      const std::string& group = controls[i].group;
+      size_t n = 1;
+      while (i + n < controls.size() && controls[i + n].group == group) n++;
+      if (!skip || !skip->count(group))
+        anyDirty |= drawControlGroup(u, controls, i, n);
+      i += n;
+      continue;
+    }
+    const ControlMeta& c = controls[i++];
+    if (skip && skip->count(c.name)) continue;
+    anyDirty |= drawOneControl(u, c);
+  }
+}
+
+
+// The contents of one waveform view: min/max envelope lanes per channel
 // (matching the .svg vis), wheel zoom about the cursor, right-drag pan,
 // left-drag selection, and (optionally looped) playback of the selection
-// or visible range. The window itself - dragging, resizing, closing - is
-// the caller's.
-void drawWaveContent(AppState& app, WavePanel& p) {
+// or visible range.
+//
+// `availY` is the vertical room the canvas may take. A panel showing
+// several targets divides its window between them and passes each one's
+// share; pass -1 to fill whatever is left, which is what a view that
+// owns its window wants.
+void drawWaveContent(AppState& app, WavePanel& p, float availY = -1.0f) {
   if (!p.error.empty()) {
     ImGui::TextColored(ImVec4(1.0f, 0.45f, 0.45f, 1.0f), "cannot load %s: %s",
                        p.artifactPath.c_str(), p.error.c_str());
@@ -957,10 +939,10 @@ void drawWaveContent(AppState& app, WavePanel& p) {
 
   int channels = (int)p.wav.channels.size();
   float laneGap = 4.0f;
-  // The canvas fills the rest of the window, so resizing the window
+  // The canvas fills its share of the window, so resizing the window
   // resizes the lanes.
-  float availY = ImGui::GetContentRegionAvail().y;
-  float laneH = std::max(48.0f * gUiScale,
+  if (availY < 0) availY = ImGui::GetContentRegionAvail().y;
+  float laneH = std::max(28.0f * gUiScale,
                          (availY - (channels - 1) * laneGap) / channels);
   ImVec2 canvasSize(std::max(120.0f, ImGui::GetContentRegionAvail().x),
                     channels * laneH + (channels - 1) * laneGap);
@@ -1048,6 +1030,159 @@ void drawWaveContent(AppState& app, WavePanel& p) {
   }
 }
 
+// A panel's compact view of one target: the whole file's envelope in a
+// short strip, a playhead while it is playing, and the few controls that
+// matter next to a knob you are turning. Deliberately not the full
+// waveform window - no zoom, no selection - because a panel's point is
+// to fit several targets and their controls on screen at once. `detail`
+// opens the real thing.
+//
+// Height is passed in rather than taken from the content region: unlike
+// drawWaveContent, a strip shares its window with everything above it.
+// One target inside a panel: the row of facts the old targets table
+// carried - status, duration, rate, channels - and then the waveform
+// itself, fully interactive. This is the merge: there is no separate
+// waveform window any more, so everything that used to live in one is
+// here, next to the controls that shape it.
+void drawPanelTarget(AppState& app, UnitState& u, const TargetMeta& t,
+                     float waveHeight, std::set<std::string>& wanted) {
+  ImGui::PushID(t.name.c_str());
+  ImGui::Spacing();
+  ImGui::SeparatorText(t.name.c_str());
+
+  if (t.status != "ok") {
+    ImGui::TextColored(ImVec4(1.0f, 0.45f, 0.45f, 1.0f), "%s",
+                       t.error.empty() ? "not built" : t.error.c_str());
+    ImGui::PopID();
+    return;
+  }
+  if (t.kind == "visual") {
+    // Visual targets are .svg files the app does not render; the build
+    // wrote one, and saying where is the useful thing to show.
+    ImGui::TextDisabled("waveform svg - %s", t.artifact.c_str());
+    ImGui::PopID();
+    return;
+  }
+  if (t.artifact.empty()) {
+    ImGui::TextDisabled("no artifact");
+    ImGui::PopID();
+    return;
+  }
+
+  ImGui::TextDisabled("%s | %g Hz | %d ch | %lld frames",
+                      formatSeconds(t.durationSeconds).c_str(), t.rate,
+                      t.channels, (long long)t.frames);
+
+  // Decoding is the expensive part - a couple of minutes of stereo costs
+  // ~90 MB as doubles - so a target scrolled out of the panel is
+  // reserved its space and skipped. Panels open by default, and a
+  // project with a dozen targets would otherwise decode all of them the
+  // moment you launched.
+  float blockH = waveHeight > 0
+                     ? waveHeight + ImGui::GetFrameHeightWithSpacing() +
+                           ImGui::GetTextLineHeightWithSpacing()
+                     : ImGui::GetContentRegionAvail().y;
+  float blockW = std::max(16.0f, ImGui::GetContentRegionAvail().x);
+  if (!ImGui::IsRectVisible(ImVec2(blockW, blockH))) {
+    ImGui::Dummy(ImVec2(blockW, blockH));
+    ImGui::PopID();
+    return;
+  }
+
+  std::string path = (fs::path(app.rootDir) / t.artifact).string();
+  wanted.insert(path);
+  WavePanel& w = app.wave(path, t.name);
+  drawWaveContent(app, w, waveHeight);
+  ImGui::PopID();
+}
+
+// One panel: its controls, then each of its targets with a full
+// waveform. The window is ordinary - drag, resize, close - and its
+// `###` id is unit-qualified so ImGui's ini remembers where the user put
+// it and how big they made it.
+//
+// `wanted` collects the artifact paths this panel is showing, so the
+// caller can drop the decoded audio of panels that are closed.
+void drawPanel(AppState& app, UnitState& u, const PanelMeta& panel,
+               std::set<std::string>& wanted) {
+  bool open = app.panelOpen(u, panel.name);
+  if (!open) return;
+
+  const ImGuiViewport* vp = ImGui::GetMainViewport();
+  float cascade = 30.0f * gUiScale *
+                  (float)(std::hash<std::string>{}(panel.name) % 6);
+  // Panels are the whole UI now, so they open big enough to work in: a
+  // waveform you can actually read plus room for the controls above it.
+  ImGui::SetNextWindowSize(ImVec2(720 * gUiScale, 560 * gUiScale),
+                           ImGuiCond_FirstUseEver);
+  ImGui::SetNextWindowPos(ImVec2(vp->WorkPos.x + 60 + cascade,
+                                 vp->WorkPos.y + 70 + cascade),
+                          ImGuiCond_FirstUseEver);
+  ImGui::SetNextWindowSizeConstraints(ImVec2(320 * gUiScale, 160 * gUiScale),
+                                      ImVec2(FLT_MAX, FLT_MAX));
+  std::string title = panel.name + "###panel " + app.panelKey(u, panel.name);
+  if (ImGui::Begin(title.c_str(), &open)) {
+    const std::vector<ControlMeta>& controls = u.loaded.meta.controls;
+
+    // Resolve the panel's members once: a control member names either
+    // one control or a whole multi_slider group, and a target member
+    // names one of the unit's targets.
+    std::vector<const TargetMeta*> targets;
+    for (const std::string& name : panel.targets)
+      for (auto& m : u.loaded.meta.targets)
+        if (m.name == name) targets.push_back(&m);
+
+    if (!panel.controls.empty()) {
+      bool anyDirty = false;
+      for (const std::string& name : panel.controls) {
+        const ControlMeta* c = nullptr;
+        for (auto& m : controls)
+          if (m.name == name && m.group.empty()) c = &m;
+        if (c)
+          anyDirty |= drawOneControl(u, *c);
+        else
+          drawGroupByName(u, controls, name, anyDirty);
+      }
+      if (ImGui::SmallButton("defaults")) {
+        for (auto& m : controls) {
+          bool mine = false;
+          for (const std::string& n : panel.controls)
+            if (n == m.name || n == m.group) mine = true;
+          if (!mine) continue;
+          ControlUi& ui = u.controlUi[m.name];
+          ui.value = (float)m.def;
+          ui.editing = false;
+          ui.dirty = true;
+        }
+        writeUnitOverrides(u);
+      }
+      if (anyDirty) {
+        ImGui::SameLine();
+        ImGui::TextDisabled("* pending rebuild");
+      }
+      if (!u.controlsError.empty())
+        ImGui::TextColored(ImVec4(1.0f, 0.45f, 0.45f, 1.0f), "controls: %s",
+                           u.controlsError.c_str());
+    }
+
+    // A lone target fills the window, so a one-target panel uses all the
+    // room you gave it. Several get a fixed, readable height each and
+    // the panel scrolls - dividing the window between seven stems would
+    // leave every one of them too short to read.
+    size_t drawable = 0;
+    for (const TargetMeta* t : targets)
+      if (t->status == "ok" && t->kind != "visual" && !t->artifact.empty())
+        drawable++;
+    float perTarget = drawable > 1 ? 150.0f * gUiScale : -1.0f;
+    for (const TargetMeta* t : targets)
+      drawPanelTarget(app, u, *t, perTarget, wanted);
+    if (targets.empty() && panel.controls.empty())
+      ImGui::TextDisabled("this panel is empty");
+  }
+  ImGui::End();
+  app.panelOpen(u, panel.name) = open;
+}
+
 void drawFrame(AppState& app) {
   const ImGuiViewport* vp = ImGui::GetMainViewport();
   ImGui::SetNextWindowPos(vp->WorkPos);
@@ -1094,8 +1229,7 @@ void drawFrame(AppState& app) {
     ImGui::Separator();
 
     drawDiagnostics(app, u);
-    drawTargets(app, u);
-    drawControls(app, u);
+    drawPanelBar(app, u);
     ImGui::PopID();
   }
   if (anyMissing) {
@@ -1123,25 +1257,39 @@ void drawFrame(AppState& app) {
   }
   ImGui::End();
 
-  // Each open waveform is its own floating window: drag it anywhere,
-  // resize it, close it with the title-bar button. The ### id keeps the
-  // window (and its position) stable across rebuilds and renames.
-  for (size_t i = 0; i < app.waves.size();) {
-    WavePanel& p = app.waves[i];
-    float cascade = 28.0f * gUiScale * (float)(p.spawnIndex % 8);
-    ImGui::SetNextWindowSize(ImVec2(660 * gUiScale, 300 * gUiScale),
-                             ImGuiCond_FirstUseEver);
-    ImGui::SetNextWindowPos(ImVec2(vp->WorkPos.x + 80 + cascade,
-                                   vp->WorkPos.y + 90 + cascade),
-                            ImGuiCond_FirstUseEver);
-    bool open = true;
-    std::string title = "wave: " + p.targetName + "###wave " + p.artifactPath;
-    if (ImGui::Begin(title.c_str(), &open)) drawWaveContent(app, p);
-    ImGui::End();
-    if (open)
-      i++;
-    else
-      app.waves.erase(app.waves.begin() + i);
+  // Panels are the UI: every control and every waveform lives in one.
+  // `wanted` collects the artifacts the open panels are showing, so the
+  // audio behind a panel the user closed can be released.
+  std::set<std::string> wanted;
+  for (size_t i = 0; i < app.units.size(); i++) {
+    UnitState& u = app.units[i];
+    if (!u.loaded.ok) continue;
+    ImGui::PushID((int)i);
+    for (const PanelMeta& panel : app.panelsFor(u))
+      drawPanel(app, u, panel, wanted);
+    ImGui::PopID();
+  }
+
+  // Drop the audio of anything no open panel is showing, remembering its
+  // view first so reopening the panel comes back where you left it.
+  for (auto it = app.waves.begin(); it != app.waves.end();) {
+    if (wanted.count(it->first)) {
+      ++it;
+      continue;
+    }
+    const WavePanel& w = it->second;
+    WavePanelState st;
+    std::error_code ec;
+    fs::path rel = fs::relative(w.artifactPath, app.rootDir, ec);
+    st.artifact = (ec || rel.empty()) ? w.artifactPath : rel.string();
+    st.target = w.targetName;
+    st.viewStart = w.view.start;
+    st.viewEnd = w.view.end;
+    st.selStart = w.selStart;
+    st.selEnd = w.selEnd;
+    st.loop = w.loop;
+    app.savedWaves[it->first] = std::move(st);
+    it = app.waves.erase(it);
   }
 }
 
@@ -1272,12 +1420,6 @@ int main(int argc, char** argv) {
   ImGui_ImplSDL2_InitForSDLRenderer(window, renderer);
   ImGui_ImplSDLRenderer2_Init(renderer);
 
-  // Reopening the saved waveform windows here (rather than on the first
-  // metadata load) keeps them independent of the build: a panel comes
-  // back even when the project has not been rebuilt yet. The self-test
-  // opens every target itself and must stay deterministic, so it skips
-  // whatever a real run happened to leave behind.
-  if (!selfTest) app.restoreWaves(app.state.ui.waves);
 
   // Pace the loop to the display's refresh rate: with vsync,
   // SDL_RenderPresent blocks until vblank and no sleep is needed; on the
@@ -1323,16 +1465,17 @@ int main(int argc, char** argv) {
     app.maybeRefresh(dtMs);
     app.player.update();
 
-    // Self-test also exercises the waveform panes: open every ok audio
-    // target once the metadata has loaded and draw a few frames.
+    // Self-test also exercises waveform decoding: load every ok audio
+    // target once the metadata has loaded and draw a few frames. These
+    // views are not tied to an open panel, so drawFrame's collector
+    // would release them - the self-test reads them before that matters.
     if (selfTest && frames == 1 && app.waves.empty()) {
       for (auto& u : app.units) {
         if (!u.loaded.ok) continue;
         for (auto& t : u.loaded.meta.targets) {
           if (t.kind == "visual" || t.status != "ok" || t.artifact.empty())
             continue;
-          app.toggleWave((fs::path(app.rootDir) / t.artifact).string(),
-                         t.name);
+          app.wave((fs::path(app.rootDir) / t.artifact).string(), t.name);
         }
       }
     }
@@ -1385,7 +1528,15 @@ int main(int argc, char** argv) {
         std::printf("self-test: control '%s' = %.6g%s\n", c.name.c_str(),
                     shown, pending ? " (pending rebuild)" : "");
       }
-    for (auto& w : app.waves) {
+    // Panels are reported but never drawn: a headless smoke test must
+    // stay deterministic.
+    // What the app would actually show, so a project that declares no
+    // panels reports the one holding everything rather than nothing.
+    for (auto& u : app.units)
+      for (auto& p : app.panelsFor(u))
+        std::printf("self-test: panel '%s' (%zu control(s), %zu target(s))\n",
+                    p.name.c_str(), p.controls.size(), p.targets.size());
+    for (auto& [path, w] : app.waves) {
       if (w.error.empty())
         std::printf("self-test: waveform '%s' %lld frame(s), %zu channel(s)\n",
                     w.targetName.c_str(), (long long)w.wav.frames(),

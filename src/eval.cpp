@@ -28,10 +28,10 @@ class Interp {
          DiagnosticBag& diags, std::vector<std::string>* loadedFiles,
          std::string extCacheDir,
          const std::map<std::string, double>* controlOverrides,
-         std::vector<ControlDecl>* controls)
+         std::vector<ControlDecl>* controls, std::vector<PanelDecl>* panels)
       : prog_(prog), targets_(targets), diags_(diags),
         loadedFiles_(loadedFiles), extCacheDir_(std::move(extCacheDir)),
-        overrides_(controlOverrides), controls_(controls) {}
+        overrides_(controlOverrides), controls_(controls), panels_(panels) {}
 
   bool run() {
     bool ok = true;
@@ -56,6 +56,8 @@ class Interp {
   std::vector<ControlDecl>* controls_ = nullptr;
   std::map<std::string, ControlDecl> controlsByName_;
   std::map<std::string, ControlGroupDecl> groupsByName_;
+  std::vector<PanelDecl>* panels_ = nullptr;
+  std::map<std::string, PanelDecl> panelsByName_;
   std::map<std::string, Env> globals_;             // module -> name -> value
   std::map<std::string, SigPtr> fileCache_;        // absolute path -> signal
   mutable CoreListInfo coreList_;                  // resolved on first use
@@ -677,7 +679,38 @@ class Interp {
       g.span = currentDef_ ? currentDef_->span : Span{};
       return registerControlGroup(std::move(g));
     };
+    svc.declarePanel = [this, &callerMod](PanelDecl p) {
+      p.file = callerMod.parsed.path;
+      p.span = currentDef_ ? currentDef_->span : Span{};
+      registerPanel(std::move(p));
+    };
     return it->second(svc, args);
+  }
+
+  // Register a dev-app panel. Panel names share their own name space -
+  // separate from controls and targets, since a panel is not one of
+  // either - and redeclaring one is an error even if the two agree:
+  // unlike a control, a panel yields no value, so there is no reason to
+  // declare the same one twice. Member names are recorded as written and
+  // resolved later, by the build, once every control and target is known.
+  void registerPanel(PanelDecl p) {
+    if (p.name.empty()) throw EvalError("panel: empty panel name");
+    auto it = panelsByName_.find(p.name);
+    if (it != panelsByName_.end())
+      throw EvalError("panel '" + p.name + "' redeclared (also declared in " +
+                      it->second.file + ")");
+    // Duplicates inside one panel would draw the same widget twice.
+    auto dupe = [&p](const std::vector<std::string>& names, const char* what) {
+      std::set<std::string> seen;
+      for (auto& n : names)
+        if (!seen.insert(n).second)
+          throw EvalError("panel '" + p.name + "': " + what + " '" + n +
+                          "' listed twice");
+    };
+    dupe(p.controls, "control");
+    dupe(p.targets, "target");
+    panelsByName_.emplace(p.name, p);
+    if (panels_) panels_->push_back(std::move(p));
   }
 
   // Register a live control declaration and resolve its value for this
@@ -1136,11 +1169,12 @@ bool evaluateProgram(const Program& prog, std::vector<RenderTarget>& targets,
                      std::vector<std::string>* loadedFiles,
                      const std::string& externalCacheDir,
                      const std::map<std::string, double>* controlOverrides,
-                     std::vector<ControlDecl>* controls) {
+                     std::vector<ControlDecl>* controls,
+                     std::vector<PanelDecl>* panels) {
   EvalThreadCtx ctx;
   ctx.fn = [&] {
     return Interp(prog, targets, diags, loadedFiles, externalCacheDir,
-                  controlOverrides, controls)
+                  controlOverrides, controls, panels)
         .run();
   };
   pthread_attr_t attr;

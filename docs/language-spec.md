@@ -924,6 +924,19 @@ type Control.Lane = { name : String; min : Scalar; max : Scalar;
 val Control.multi_slider: name:String -> sum_min:Scalar -> sum_max:Scalar
                  -> lanes:Control.Lane list -> Scalar list
 
+(* dev-app panels: presentation only. A panel names some controls and
+   some render targets, and `synth-dev` shows them together in one
+   window - the knobs on top, a waveform strip per target beneath - so a
+   control sits next to the sound it shapes. Members are named because a
+   control evaluates to a bare Scalar and a render to unit; every name
+   must resolve to a declared control, control group or target, or the
+   build fails. A control member may name a whole multi_slider group
+   instead of each lane. Panel names have their own name space, and
+   redeclaring one is a build error. Panels never affect a rendered
+   artifact, and a project that declares none is unaffected. *)
+val Ui.panel: name:String -> controls:String list -> targets:String list
+     -> unit
+
 (* file import *)
 val Io.load_mono: path:String -> Scalar Signal
 val Io.load_multi: path:String -> Vector Signal

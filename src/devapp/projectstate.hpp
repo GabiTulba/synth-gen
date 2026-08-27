@@ -5,7 +5,7 @@
 
 namespace synth::devapp {
 
-// The project's own settings file - `metadata.json` beside `build.json`
+// The project's own settings file - `project.json` beside `build.json`
 // (MetadataLayout::projectStatePath). Everything in it is the user's,
 // not the build's: where the windows are, which waveforms are open, and
 // where the knobs are set. It is the durable record; the build's
@@ -47,11 +47,20 @@ struct UiState {
   // it here instead of letting ImGui manage an imgui.ini so it stays with
   // the project rather than with the working directory.
   std::string imguiIni;
+  // Waveform view state (zoom, selection, loop) by artifact, for every
+  // target a panel has shown. Not a list of open windows: waveforms live
+  // inside panels, so this is only what you had set up inside them.
   std::vector<WavePanelState> waves;
   // Collapsing-header open/closed state, by "<unit>/<section>". ImGui
   // deliberately does not persist tree state in its ini, so the app
   // tracks the few headers it owns itself.
   std::map<std::string, bool> sections;
+  // Which panel windows are open, by "<unit>/<panel>". Panels are the
+  // whole UI - a panel holds its controls and its waveforms together -
+  // so this is the list of what is on screen. Where each window sits is
+  // ImGui's business and rides in `imguiIni`. A panel absent from the
+  // map has never been touched and opens by default.
+  std::map<std::string, bool> panels;
   bool operator==(const UiState&) const = default;
 };
 

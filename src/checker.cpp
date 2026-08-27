@@ -508,7 +508,8 @@ class ModuleChecker {
         if (bodyType->kind != Type::Kind::Unit)
           fail(def.body->span,
                "'let _' body must have type unit (got " +
-                   typeName(bodyType) + "); only render produces unit");
+                   typeName(bodyType) +
+                   "); only render and panel declarations produce unit");
         return;
       }
       if (!def.retType) {

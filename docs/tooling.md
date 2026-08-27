@@ -86,14 +86,28 @@ build/synth-dev examples/pluck
 *pure consumer* of build output — it reads `metadata.json`, never
 compiler internals:
 
-- Lists targets with duration, rate, channels, and build status
-  (including visual targets; playback is audio-only).
-- Plays artifacts through SDL audio.
-- Opens each audio target's waveform in its own floating window — drag
-  it anywhere, resize it, close it from the title bar. Inside: wheel
-  zoom, right-drag pan, left-drag range selection, playback of the
-  selection or visible range, and a **loop** toggle that replays the
-  played range indefinitely (toggling mid-play applies immediately).
+- **Everything lives in a panel.** A panel is one window holding some of
+  the project's controls together with the waveforms of the targets they
+  shape, so a knob sits next to the sound it changes. There is no
+  separate controls list and no separate waveform window: drag a knob,
+  the daemon rebuilds, and the waveform right under it redraws.
+- Panels come from `Core.Ui.panel` declarations in the source. Anything
+  no panel names — and *everything*, in a project that declares none —
+  collects into one further panel, so nothing is ever unreachable and a
+  project that has never heard of panels still shows all of itself in
+  one window.
+- Each target inside a panel shows its duration, rate, channels, frame
+  count and build status, then its waveform: wheel zoom, right-drag pan,
+  left-drag range selection, playback of the selection or visible range,
+  and a **loop** toggle that replays the played range indefinitely
+  (toggling mid-play applies immediately). Visual targets name their
+  `.svg` instead; playback is audio-only.
+- A panel with one target gives it the whole window; with several, each
+  gets a readable fixed height and the panel scrolls. Audio is decoded
+  only for targets actually on screen and released when they scroll away
+  or the panel closes — a couple of minutes of stereo costs about 90 MB
+  as samples, so a project with a dozen stems would otherwise decode all
+  of them at launch.
 - Shows the build's live controls (`Core.Control.slider` / `knob`) as
   sliders and rotary knobs. Releasing a drag writes the value into the
   unit's `controls.json` (atomically); with `synthc watch` running next
@@ -109,18 +123,25 @@ compiler internals:
   lower another lane to take more here. The budget bar turns amber when
   the group's sum reaches `sum_max`, and carries a mark at `sum_min`
   when there is one.
+- The backdrop window is a thin header: per unit, the project name,
+  build status, diagnostics, and a `panels:` row of checkboxes that
+  shows and hides each panel. Having only what you are working on on
+  screen is the point. A panel you have never touched opens by default;
+  what you close, where you dragged each window and how big you made it
+  all persist.
 - Shows build diagnostics, including for failed builds (the metadata is
   emitted either way).
 - Live-refreshes by watching the metadata file, so pairing it with
   `synthc watch` gives save → rebuild → the app reflects the new
   artifacts. Because metadata is written after the artifacts, a
-  metadata change also forces every open waveform window to reload —
-  even when an artifact was rewritten with the same size inside the
+  metadata change also forces every waveform on screen to reload — even
+  when an artifact was rewritten with the same size inside the
   filesystem's mtime granularity.
 - Remembers how you left it, in **`project.json` beside `build.json`**:
-  where every knob and slider is set, the window's placement and size,
-  each open waveform panel (with its zoom, selection and loop toggle),
-  and which sections you left collapsed. It is a source-tree file, not a
+  where every knob and slider is set, the main window's placement and
+  size, which panels you left open and where you put them, the zoom,
+  selection and loop toggle of every waveform you set up, and which
+  sections you left collapsed. It is a source-tree file, not a
   build output — it survives a clean, and it is yours to commit or ignore
   as you see fit. See [`build-system.md`](build-system.md#live-controls)
   for how it relates to `controls.json`.
@@ -136,7 +157,9 @@ compiler internals:
   build has used yet keep their `*` pending marker until one does.
 - `--self-test` reads `project.json` so it reports the values the real
   app would show, but never writes it and never writes a `controls.json`:
-  a headless smoke test must not edit the project.
+  a headless smoke test must not edit the project. It lists the panels a
+  build declared without opening a panel window or decoding a strip, so
+  the run stays deterministic.
 
 SDL2 is the dev app's only external dependency
 (`scripts/install-deps.sh`); Dear ImGui is vendored under

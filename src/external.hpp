@@ -44,6 +44,9 @@ struct ExtServices {
   // build's value for every lane, in lane order; the caller fills
   // declaration attribution before registering.
   std::function<std::vector<double>(ControlGroupDecl)> declareControlGroup;
+  // Record a dev-app panel; the caller fills declaration attribution
+  // before registering.
+  std::function<void(PanelDecl)> declarePanel;
 };
 
 using ExternalFn =

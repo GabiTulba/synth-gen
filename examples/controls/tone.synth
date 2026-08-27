@@ -54,3 +54,15 @@ let _ =
   |> sample ~from:0s ~to:1s
   |> render ~name:"tone" ~rate:48000.0
 ;;
+
+(* Panels group the controls with the sound they shape, so the dev app
+   shows a knob beside the waveform it moves instead of one flat list of
+   controls above another of targets. Naming the group `env` pulls in
+   all four of its lanes; listing them one by one would work too. *)
+let _ =
+  Ui.panel ~name:"Tone" ~controls:["cutoff"; "gain"] ~targets:["tone"]
+;;
+
+let _ =
+  Ui.panel ~name:"Envelope" ~controls:["env"] ~targets:["tone"]
+;;

@@ -153,6 +153,21 @@ struct ControlGroupDecl {
   Span span{};
 };
 
+// A `panel` call (Core.Ui): a named grouping that pairs some of the
+// project's controls with some of its render targets so the dev app can
+// show them together. Members are recorded as written - a control member
+// may name a whole multi_slider group rather than its lanes - and are
+// resolved against the declared controls and targets once evaluation has
+// seen all of them. Presentation only: a panel never reaches the engine
+// and never affects a rendered artifact.
+struct PanelDecl {
+  std::string name;  // panel identifier and title, unique project-wide
+  std::vector<std::string> controls;
+  std::vector<std::string> targets;
+  std::string file;  // source file that declared it (for diagnostics)
+  Span span{};
+};
+
 // Evaluates every module of a checked program in dependency order and
 // collects all render targets. Runtime errors (bad file, channel mismatch,
 // invalid windows) become diagnostics attached to the declaring top-level
@@ -165,13 +180,16 @@ struct ControlGroupDecl {
 // per-user temp directory is used.
 // `controlOverrides`, when non-null, maps control names to the values an
 // attached dev tool set; `controls`, when non-null, receives every
-// control the program declared, in declaration order.
+// control the program declared, in declaration order; `panels`, when
+// non-null, receives every dev-app panel declared, likewise in
+// declaration order.
 bool evaluateProgram(const Program& prog, std::vector<RenderTarget>& targets,
                      DiagnosticBag& diags,
                      std::vector<std::string>* loadedFiles = nullptr,
                      const std::string& externalCacheDir = {},
                      const std::map<std::string, double>* controlOverrides =
                          nullptr,
-                     std::vector<ControlDecl>* controls = nullptr);
+                     std::vector<ControlDecl>* controls = nullptr,
+                     std::vector<PanelDecl>* panels = nullptr);
 
 }  // namespace synth

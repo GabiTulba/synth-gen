@@ -61,12 +61,26 @@ struct ControlBand {
 };
 ControlBand controlLaneBand(const ControlMeta& lane, double otherLanesSum);
 
+// A panel the build declared (Core.Ui.panel): a named grouping that
+// pairs some of the unit's controls with some of its targets, so the app
+// can show a knob beside the waveform it shapes instead of listing both
+// flat. Members are names, exactly as the source wrote them - a control
+// member may name a whole multi_slider group rather than each of its
+// lanes, which the app resolves when it draws. The build has already
+// checked that every name resolves.
+struct PanelMeta {
+  std::string name;  // identity and window title
+  std::vector<std::string> controls;
+  std::vector<std::string> targets;
+};
+
 struct ProjectMeta {
   std::string project;
   std::string status;  // "ok" | "error"
   std::vector<DiagnosticMeta> diagnostics;
   std::vector<TargetMeta> targets;
   std::vector<ControlMeta> controls;
+  std::vector<PanelMeta> panels;  // empty unless the project declares any
 };
 
 struct MetadataLoadResult {
@@ -98,6 +112,17 @@ struct MetadataLayout {
   // _build/.
   std::string projectStatePath;
 };
+
+// The panels to show for a unit: the ones the build declared, plus -
+// when anything is left over - one holding the rest, named after the
+// project when nothing was declared at all and "ungrouped" otherwise.
+//
+// Panels are the dev app's whole unit of UI, so a control or target no
+// panel names would be unreachable without this; it is also what lets a
+// project that declares no panels still show all of itself. Leftover
+// controls are listed the way a panel would name them: one entry per
+// multi_slider group, under the group name, not one per lane.
+std::vector<PanelMeta> resolvePanels(const ProjectMeta& meta);
 
 // Maps a project directory to the metadata file(s) its builds write,
 // mirroring the build system's output layout (build.hpp §8.2): a project

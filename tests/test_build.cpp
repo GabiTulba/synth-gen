@@ -4477,6 +4477,180 @@ let _ = render "t" 8000.0 (sample (constant x) 0s 10ms) ;;
   CHECK(!buildProject(tp.dir.string()).ok);
 }
 
+TEST(build_panel_groups_controls_and_targets) {
+  TempDir tp;
+  tp.write("a.synth", R"(
+open Core open Core.Control open Core.Arrange open Core.Render open Core.Sig
+let gain : Scalar = Control.knob ~name:"gain" ~min:0.0 ~max:1.0 ~default:0.5 ;;
+let env : Scalar list =
+  Control.multi_slider ~name:"env" ~sum_min:0.0 ~sum_max:1.0
+    ~lanes:[ { name = "attack"; min = 0.0; max = 0.5; default = 0.05 };
+             { name = "decay";  min = 0.0; max = 0.5; default = 0.15 } ] ;;
+let _ = render "demo" 8000.0 (sample (constant gain) 0s 50ms) ;;
+let _ = Ui.panel ~name:"Voice" ~controls:["gain"; "env"] ~targets:["demo"] ;;
+)");
+  tp.write("build.json", projectManifest("panel", {"a.synth"}));
+  BuildResult r = buildProject(tp.dir.string());
+  for (auto& d : r.diags.items) std::cerr << d.message << "\n";
+  CHECK(r.ok);
+  CHECK(r.panels.size() == 1);
+  CHECK(r.panels[0].name == "Voice");
+  // Members are recorded as written: "env" stays the group name rather
+  // than expanding to its lanes, so the dev app can draw the group as
+  // one linked widget.
+  CHECK(r.panels[0].controls.size() == 2);
+  CHECK(r.panels[0].controls[0] == "gain");
+  CHECK(r.panels[0].controls[1] == "env");
+  CHECK(r.panels[0].targets.size() == 1);
+  CHECK(r.panels[0].targets[0] == "demo");
+  std::string meta = slurp(tp.dir / "_build" / "metadata.json");
+  CHECK(meta.find("\"panels\"") != std::string::npos);
+  CHECK(meta.find("\"name\": \"Voice\"") != std::string::npos);
+  CHECK(meta.find("\"controls\": [\"gain\", \"env\"]") != std::string::npos);
+  CHECK(meta.find("\"targets\": [\"demo\"]") != std::string::npos);
+}
+
+TEST(build_metadata_omits_panels_when_none_declared) {
+  // A project that groups nothing must produce exactly the metadata it
+  // did before panels existed - no empty array, no trailing key.
+  TempDir tp;
+  tp.write("a.synth", R"(
+open Core open Core.Arrange open Core.Render open Core.Sig
+let _ = render "demo" 8000.0 (sample (constant 0.5) 0s 50ms) ;;
+)");
+  tp.write("build.json", projectManifest("nopanel", {"a.synth"}));
+  BuildResult r = buildProject(tp.dir.string());
+  CHECK(r.ok);
+  CHECK(r.panels.empty());
+  std::string meta = slurp(tp.dir / "_build" / "metadata.json");
+  CHECK(meta.find("panels") == std::string::npos);
+  // The controls array stays the last member, closed the old way.
+  CHECK(meta.find("\"controls\": [\n  ]\n}\n") != std::string::npos);
+}
+
+TEST(build_panel_member_names_must_resolve) {
+  auto withPanel = [](const std::string& panel) {
+    return "\nopen Core open Core.Control open Core.Arrange open Core.Render "
+           "open Core.Sig\n"
+           "let gain : Scalar = Control.knob ~name:\"gain\" ~min:0.0 "
+           "~max:1.0 ~default:0.5 ;;\n"
+           "let _ = render \"demo\" 8000.0 (sample (constant gain) 0s 50ms) "
+           ";;\n" +
+           panel + "\n";
+  };
+  // A panel naming a control that does not exist fails the build...
+  {
+    TempDir tp;
+    tp.write("a.synth",
+             withPanel("let _ = Ui.panel ~name:\"P\" ~controls:[\"nope\"] "
+                       "~targets:[\"demo\"] ;;"));
+    tp.write("build.json", projectManifest("bad", {"a.synth"}));
+    BuildResult r = buildProject(tp.dir.string());
+    CHECK(!r.ok);
+    bool named = false;
+    for (auto& d : r.diags.items)
+      if (d.message.find("no control or control group named 'nope'") !=
+          std::string::npos)
+        named = true;
+    CHECK(named);
+  }
+  // ...and so does one naming a target that does not exist.
+  {
+    TempDir tp;
+    tp.write("a.synth",
+             withPanel("let _ = Ui.panel ~name:\"P\" ~controls:[\"gain\"] "
+                       "~targets:[\"nope\"] ;;"));
+    tp.write("build.json", projectManifest("bad", {"a.synth"}));
+    BuildResult r = buildProject(tp.dir.string());
+    CHECK(!r.ok);
+    bool named = false;
+    for (auto& d : r.diags.items)
+      if (d.message.find("no render target named 'nope'") != std::string::npos)
+        named = true;
+    CHECK(named);
+  }
+  // A panel may name a member declared later in the file: resolution
+  // waits until evaluation has seen every declaration.
+  {
+    TempDir tp;
+    tp.write("a.synth", R"(
+open Core open Core.Control open Core.Arrange open Core.Render open Core.Sig
+let _ = Ui.panel ~name:"P" ~controls:["gain"] ~targets:["demo"] ;;
+let gain : Scalar = Control.knob ~name:"gain" ~min:0.0 ~max:1.0 ~default:0.5 ;;
+let _ = render "demo" 8000.0 (sample (constant gain) 0s 50ms) ;;
+)");
+    tp.write("build.json", projectManifest("fwd", {"a.synth"}));
+    BuildResult r = buildProject(tp.dir.string());
+    for (auto& d : r.diags.items) std::cerr << d.message << "\n";
+    CHECK(r.ok);
+  }
+}
+
+TEST(build_panel_redeclaration_and_duplicate_members_are_errors) {
+  auto build = [](const std::string& body) {
+    TempDir tp;
+    tp.write("a.synth",
+             "\nopen Core open Core.Control open Core.Arrange "
+             "open Core.Render open Core.Sig\n"
+             "let gain : Scalar = Control.knob ~name:\"gain\" ~min:0.0 "
+             "~max:1.0 ~default:0.5 ;;\n"
+             "let _ = render \"demo\" 8000.0 (sample (constant gain) 0s "
+             "50ms) ;;\n" +
+                 body + "\n");
+    tp.write("build.json", projectManifest("dup", {"a.synth"}));
+    return buildProject(tp.dir.string()).ok;
+  };
+  // Unlike a control, a panel yields no value, so there is no reason to
+  // declare one twice - even identically.
+  CHECK(!build("let _ = Ui.panel ~name:\"P\" ~controls:[\"gain\"] "
+               "~targets:[\"demo\"] ;;\n"
+               "let _ = Ui.panel ~name:\"P\" ~controls:[\"gain\"] "
+               "~targets:[\"demo\"] ;;"));
+  // Listing a member twice would draw the same widget twice.
+  CHECK(!build("let _ = Ui.panel ~name:\"P\" ~controls:[\"gain\"; \"gain\"] "
+               "~targets:[\"demo\"] ;;"));
+  CHECK(!build("let _ = Ui.panel ~name:\"P\" ~controls:[\"gain\"] "
+               "~targets:[\"demo\"; \"demo\"] ;;"));
+  // An empty panel name has no identity to key window state on.
+  CHECK(!build("let _ = Ui.panel ~name:\"\" ~controls:[\"gain\"] "
+               "~targets:[\"demo\"] ;;"));
+  // The control-only and target-only shapes are both legitimate.
+  CHECK(build("let _ = Ui.panel ~name:\"P\" ~controls:[\"gain\"] "
+              "~targets:[] ;;"));
+  CHECK(build("let _ = Ui.panel ~name:\"P\" ~controls:[] "
+              "~targets:[\"demo\"] ;;"));
+}
+
+TEST(build_panel_edits_do_not_invalidate_the_audio_cache) {
+  // A panel is presentation only: renaming one must not re-render a
+  // single sample, or every cosmetic edit would cost a full rebuild.
+  TempDir tp;
+  auto source = [](const std::string& panelName) {
+    return "\nopen Core open Core.Control open Core.Arrange "
+           "open Core.Render open Core.Sig\n"
+           "let gain : Scalar = Control.slider ~name:\"gain\" ~min:0.0 "
+           "~max:1.0 ~default:0.25 ;;\n"
+           "let _ = render \"demo\" 8000.0 (sample (constant gain) 0s "
+           "50ms) ;;\n"
+           "let _ = Ui.panel ~name:\"" +
+           panelName + "\" ~controls:[\"gain\"] ~targets:[\"demo\"] ;;\n";
+  };
+  tp.write("a.synth", source("Before"));
+  tp.write("build.json", projectManifest("panelcache", {"a.synth"}));
+
+  BuildCache cache;
+  BuildResult first = buildProject(tp.dir.string(), &cache);
+  CHECK(first.ok);
+  CHECK(!first.targets[0].cached);
+  CHECK(buildProject(tp.dir.string(), &cache).targets[0].cached);
+
+  tp.write("a.synth", source("After"));
+  BuildResult renamed = buildProject(tp.dir.string(), &cache);
+  CHECK(renamed.ok);
+  CHECK(renamed.panels[0].name == "After");
+  CHECK(renamed.targets[0].cached);
+}
+
 TEST(build_controls_cache_invalidates_on_override_change) {
   TempDir tp;
   tp.write("a.synth", R"(

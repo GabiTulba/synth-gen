@@ -524,6 +524,165 @@ TEST(layout_points_at_a_project_state_file) {
   CHECK(inner.projectStatePath == (tr.dir / "sub" / "project.json").string());
 }
 
+TEST(metadata_loads_panels_from_a_real_build) {
+  // Same end-to-end contract as the targets above: what buildProject
+  // writes for a panel, the dev app reads back.
+  TempDir tp;
+  tp.write("a.synth", R"(
+open Core open Core.Control open Core.Arrange open Core.Render open Core.Sig
+let gain : Scalar = Control.knob ~name:"gain" ~min:0.0 ~max:1.0 ~default:0.5 ;;
+let env : Scalar list =
+  Control.multi_slider ~name:"env" ~sum_min:0.0 ~sum_max:1.0
+    ~lanes:[ { name = "attack"; min = 0.0; max = 0.5; default = 0.05 };
+             { name = "decay";  min = 0.0; max = 0.5; default = 0.15 } ] ;;
+let _ = render "demo" 8000.0 (sample (constant gain) 0s 50ms) ;;
+let _ = Ui.panel ~name:"Voice" ~controls:["gain"; "env"] ~targets:["demo"] ;;
+)");
+  tp.write("build.json", projectManifest("panels-demo", {"a.synth"}));
+  BuildResult r = buildProject(tp.dir.string());
+  CHECK(r.ok);
+
+  MetadataLoadResult m = loadProjectMetadata(r.metadataPath);
+  CHECK(m.ok);
+  CHECK(m.meta.panels.size() == 1);
+  CHECK(m.meta.panels[0].name == "Voice");
+  // "env" stays the group name; expanding it to lanes is the app's job
+  // at draw time, so the group can be drawn as one linked widget.
+  CHECK(m.meta.panels[0].controls.size() == 2);
+  CHECK(m.meta.panels[0].controls[0] == "gain");
+  CHECK(m.meta.panels[0].controls[1] == "env");
+  CHECK(m.meta.panels[0].targets.size() == 1);
+  CHECK(m.meta.panels[0].targets[0] == "demo");
+}
+
+TEST(metadata_without_panels_reports_none) {
+  TempDir tp;
+  tp.write("m.json", R"({"project": "p", "status": "ok", "targets": [],
+                         "controls": []})");
+  MetadataLoadResult m = loadProjectMetadata((tp.dir / "m.json").string());
+  CHECK(m.ok);
+  CHECK(m.meta.panels.empty());
+}
+
+TEST(metadata_malformed_panels_are_dropped_not_fatal) {
+  // A panel is presentation: a broken one must cost you that panel, and
+  // never the app's view of the build.
+  TempDir tp;
+  tp.write("m.json", R"({"project": "p", "status": "ok",
+    "targets": [{"name": "t", "kind": "audio", "status": "ok"}],
+    "controls": [],
+    "panels": [
+      {"name": "", "controls": ["a"], "targets": []},
+      {"controls": ["a"]},
+      {"name": "Bad", "controls": "not-an-array", "targets": 7},
+      {"name": "Good", "controls": ["a", "", 5], "targets": ["t"]}
+    ]})");
+  MetadataLoadResult m = loadProjectMetadata((tp.dir / "m.json").string());
+  CHECK(m.ok);
+  CHECK(m.meta.targets.size() == 1);  // the rest of the file still loads
+  // The nameless two are skipped; "Bad" survives with empty member lists
+  // rather than taking the file down with it.
+  CHECK(m.meta.panels.size() == 2);
+  CHECK(m.meta.panels[0].name == "Bad");
+  CHECK(m.meta.panels[0].controls.empty());
+  CHECK(m.meta.panels[0].targets.empty());
+  CHECK(m.meta.panels[1].name == "Good");
+  // Non-string and empty members are dropped, the good one kept.
+  CHECK(m.meta.panels[1].controls.size() == 1);
+  CHECK(m.meta.panels[1].controls[0] == "a");
+}
+
+TEST(resolve_panels_covers_everything_a_project_declares) {
+  ProjectMeta meta;
+  meta.project = "demo";
+  TargetMeta one, two;
+  one.name = "one";
+  two.name = "two";
+  meta.targets.push_back(one);
+  meta.targets.push_back(two);
+  ControlMeta gain;
+  gain.name = "gain";
+  meta.controls.push_back(gain);
+  ControlMeta lane0, lane1;
+  lane0.name = "env.attack";
+  lane0.group = "env";
+  lane1.name = "env.decay";
+  lane1.group = "env";
+  meta.controls.push_back(lane0);
+  meta.controls.push_back(lane1);
+
+  // Nothing declared: one panel named for the project holds it all, and
+  // the multi_slider group appears once, under its group name.
+  {
+    std::vector<PanelMeta> p = resolvePanels(meta);
+    CHECK(p.size() == 1);
+    CHECK(p[0].name == "demo");
+    CHECK(p[0].controls.size() == 2);
+    CHECK(p[0].controls[0] == "gain");
+    CHECK(p[0].controls[1] == "env");
+    CHECK(p[0].targets.size() == 2);
+  }
+
+  // A declared panel that covers everything leaves no remainder.
+  {
+    ProjectMeta full = meta;
+    full.panels.push_back(
+        PanelMeta{"All", {"gain", "env"}, {"one", "two"}});
+    std::vector<PanelMeta> p = resolvePanels(full);
+    CHECK(p.size() == 1);
+    CHECK(p[0].name == "All");
+  }
+
+  // A partial one leaves the rest in an "ungrouped" panel.
+  {
+    ProjectMeta part = meta;
+    part.panels.push_back(PanelMeta{"Some", {"gain"}, {"one"}});
+    std::vector<PanelMeta> p = resolvePanels(part);
+    CHECK(p.size() == 2);
+    CHECK(p[0].name == "Some");
+    CHECK(p[1].name == "ungrouped");
+    CHECK(p[1].controls.size() == 1);
+    CHECK(p[1].controls[0] == "env");
+    CHECK(p[1].targets.size() == 1);
+    CHECK(p[1].targets[0] == "two");
+  }
+
+  // Naming a lane individually still claims it, so the group does not
+  // come back whole in the remainder.
+  {
+    ProjectMeta lane = meta;
+    lane.panels.push_back(PanelMeta{"Lane", {"env.attack"}, {}});
+    std::vector<PanelMeta> p = resolvePanels(lane);
+    CHECK(p.size() == 2);
+    CHECK(p[1].name == "ungrouped");
+    // "gain" and the group (via its still-unclaimed decay lane).
+    CHECK(p[1].controls.size() == 2);
+    CHECK(p[1].controls[0] == "gain");
+    CHECK(p[1].controls[1] == "env");
+  }
+
+  // An empty project produces no panels rather than an empty one.
+  {
+    ProjectMeta empty;
+    CHECK(resolvePanels(empty).empty());
+  }
+}
+
+TEST(project_state_roundtrips_panel_visibility) {
+  TempDir tp;
+  std::string path = (tp.dir / "project.json").string();
+  ProjectState s;
+  s.ui.panels["./Voice"] = false;
+  s.ui.panels["./Drums"] = true;
+  std::string err;
+  CHECK(saveProjectState(path, s, err));
+  ProjectStateLoad back = loadProjectState(path);
+  CHECK(back.found);
+  CHECK(back.state == s);
+  CHECK(back.state.ui.panels.at("./Voice") == false);
+  CHECK(back.state.ui.panels.at("./Drums") == true);
+}
+
 TEST(project_state_roundtrips) {
   TempDir tp;
   std::string path = (tp.dir / "project.json").string();

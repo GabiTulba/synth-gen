@@ -351,6 +351,46 @@ computed render names (see `Str`).
   `synth-dev` never needs it, because it stops each lane at the budget
   while you drag.
 
+### `Core.Ui`
+
+- **`panel name controls targets`** groups part of a project for the dev
+  app: the named controls and the named render targets are shown
+  together in one window — the knobs on top, each target's waveform
+  beneath. A panel is the dev app's whole unit of UI, so this is how you
+  decide what is shown beside what, and it is what keeps a project with
+  five instruments and a dozen stems legible. Anything no panel names
+  collects into one further panel, so declaring none costs you nothing
+  and declaring some never hides the rest.
+
+  ```
+  open Core.Ui
+  let _ = Ui.panel ~name:"Drums" ~controls:["drums.gain"; "drums.decay"]
+                   ~targets:["song-drums"] ;;
+  ```
+
+  Members are given by **name**, not by value: a control declaration
+  evaluates to a bare Scalar and a `render` to unit, so the name is the
+  only handle either one leaves behind. Every name must resolve to a
+  declared control, control group or render target — a typo fails the
+  build rather than silently dropping a widget — and the check runs
+  after evaluation, so a panel may name something declared further down
+  the file. A control member may name a whole `multi_slider` **group**
+  (`"env"`) instead of listing its lanes, and the group is drawn as the
+  usual linked budget bar.
+
+  Panel names have their own project-wide name space, separate from
+  controls and targets. Unlike a control, redeclaring a panel is always
+  an error, even identically: a panel yields no value, so there is no
+  reason to declare one twice. Listing a member twice is likewise an
+  error — it would draw the same widget twice.
+
+  Panels are **presentation only**. The declaration never reaches the
+  engine, never changes an artifact, and never enters a cache key, so
+  renaming one costs nothing to rebuild. A project that declares no
+  panel behaves exactly as it did before panels existed, down to the
+  bytes of its `metadata.json`. See [`tooling.md`](tooling.md) for what
+  the dev app does with them.
+
 ### `Core.Sig`
 
 - **`constant` / `constant_multi` / `time`** — constants and the ramp

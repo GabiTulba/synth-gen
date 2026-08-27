@@ -400,6 +400,22 @@ module Control = struct
                        ~xs:lanes) ;;
 end ;;
 
+(* --- Dev-app panels (ui.cpp) - presentation only. A panel names some
+   controls and some render targets, and `synth-dev` shows them together
+   in one window: the knobs on top, a waveform strip per target beneath,
+   so a control sits next to the sound it shapes. Projects that declare
+   no panel are unaffected. Members are named because a control
+   evaluates to a bare Scalar and a render to unit - the name is the
+   only handle either leaves behind - and every name must resolve, or
+   the build fails. A control member may name a whole multi_slider group
+   instead of each of its lanes. Panel names share their own name space;
+   redeclaring one is a build error. --------------------------------- *)
+
+module Ui = struct
+  let panel ~name:String ~controls:String list ~targets:String list
+      : unit = external "ui.cpp" ;;
+end ;;
+
 (* --- Audio import (io.cpp) - build inputs, resolved relative to the
    source file that names them. --------------------------------------- *)
 
@@ -1323,6 +1339,9 @@ module Dsp = struct
       ~lanes:Control.Lane list : Scalar list =
     Control.multi_slider ~name:name ~sum_min:sum_min ~sum_max:sum_max
                          ~lanes:lanes ;;
+  (* dev-app panels *)
+  let panel ~name:String ~controls:String list ~targets:String list
+      : unit = Ui.panel ~name:name ~controls:controls ~targets:targets ;;
   (* time conversions *)
   let to_sec ~x:Scalar : Timestamp = Time.to_sec ~x:x ;;
   let to_ms ~x:Scalar : Timestamp = Time.to_ms ~x:x ;;

@@ -326,6 +326,13 @@ ExternalFn loadUserExternal(const std::string& cppPath,
             ControlGroupDecl::Lane{std::move(l.name), l.min, l.max, l.def});
       return svc.declareControlGroup(std::move(g));
     };
+    ctx.panel = [&svc](ext::PanelDecl d) {
+      PanelDecl p;
+      p.name = std::move(d.name);
+      p.controls = std::move(d.controls);
+      p.targets = std::move(d.targets);
+      svc.declarePanel(std::move(p));
+    };
 
     std::vector<ext::Value> extArgs;
     extArgs.reserve(args.size());

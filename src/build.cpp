@@ -184,8 +184,29 @@ void writeMetadata(const std::string& path, const BuildResult& r,
         << ", \"sum_max\": " << formatDouble(c.sumMax);
     j << "}" << (i + 1 < r.controls.size() ? "," : "") << "\n";
   }
-  j << "  ]\n";
-  j << "}\n";
+  j << "  ]";
+  // Panels only when declared, so metadata for a project that groups
+  // nothing stays byte-identical to what it was before panels existed.
+  if (!r.panels.empty()) {
+    auto nameList = [&j](const std::vector<std::string>& names) {
+      j << "[";
+      for (size_t k = 0; k < names.size(); k++)
+        j << "\"" << jsonEscape(names[k]) << "\""
+          << (k + 1 < names.size() ? ", " : "");
+      j << "]";
+    };
+    j << ",\n  \"panels\": [\n";
+    for (size_t i = 0; i < r.panels.size(); i++) {
+      const PanelInfo& p = r.panels[i];
+      j << "    {\"name\": \"" << jsonEscape(p.name) << "\", \"controls\": ";
+      nameList(p.controls);
+      j << ", \"targets\": ";
+      nameList(p.targets);
+      j << "}" << (i + 1 < r.panels.size() ? "," : "") << "\n";
+    }
+    j << "  ]";
+  }
+  j << "\n}\n";
   std::ofstream out(path, std::ios::trunc);
   out << j.str();
 }
@@ -575,12 +596,13 @@ static BuildResult buildUnitImpl(const std::string& projectDir,
       readControlOverrides(r.controlsPath, log);
   std::vector<RenderTarget> targets;
   std::vector<ControlDecl> controls;
+  std::vector<PanelDecl> panels;
   // Audio files plus external implementation .cpp files - both are
   // build inputs the daemon watches; the log counts them apart.
   std::vector<std::string> evalInputs;
   bool evalOk = evaluateProgram(prog, targets, r.diags, &evalInputs,
                                 (buildDir / "externals").string(),
-                                &controlOverrides, &controls);
+                                &controlOverrides, &controls, &panels);
   size_t cppInputs = 0;
   for (auto& a : evalInputs) {
     if (fs::path(a).extension() == ".cpp") cppInputs++;
@@ -601,6 +623,13 @@ static BuildResult buildUnitImpl(const std::string& projectDir,
     ci.sumMin = c.sumMin;
     ci.sumMax = c.sumMax;
     r.controls.push_back(std::move(ci));
+  }
+  for (auto& p : panels) {
+    PanelInfo pi;
+    pi.name = p.name;
+    pi.controls = p.controls;
+    pi.targets = p.targets;
+    r.panels.push_back(std::move(pi));
   }
   if (!r.controls.empty()) {
     // The overrides file is a build input: a running daemon rebuilds
@@ -647,6 +676,35 @@ static BuildResult buildUnitImpl(const std::string& projectDir,
       evalOk = false;
     }
   }
+  // A panel may only name controls and targets that exist. The check
+  // runs here, once evaluation has seen every declaration, because a
+  // panel is free to name something declared later in the file. A
+  // control member may name a whole multi_slider group instead of each
+  // of its lanes, so group names resolve too.
+  if (!panels.empty()) {
+    std::set<std::string> controlNames, groupNames;
+    for (auto& c : r.controls) {
+      controlNames.insert(c.name);
+      if (!c.group.empty()) groupNames.insert(c.group);
+    }
+    for (auto& p : panels) {
+      for (auto& n : p.controls)
+        if (!controlNames.count(n) && !groupNames.count(n)) {
+          r.diags.error(p.file, p.span,
+                        "panel '" + p.name + "': no control or control group "
+                        "named '" + n + "'");
+          evalOk = false;
+        }
+      for (auto& n : p.targets)
+        if (!byName.count(n)) {
+          r.diags.error(p.file, p.span,
+                        "panel '" + p.name + "': no render target named '" +
+                            n + "'");
+          evalOk = false;
+        }
+    }
+  }
+
   if (!evalOk) {
     writeMetadata(r.metadataPath, r, sourcesByPath);
     return r;

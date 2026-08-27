@@ -190,6 +190,41 @@ The build itself neither reads `project.json` nor knows it exists; only
 the dev app does. Note the name is deliberately not `metadata.json` —
 that name belongs to the build's own output under `_build/`.
 
+## Panels
+
+`Core.Ui.panel` groups part of a project for the dev app, pairing some
+of its controls with some of its render targets. A panel is the dev
+app's whole unit of UI — one window holding those controls and the
+waveforms of those targets together — so this is how you decide what is
+shown beside what:
+
+```
+let _ = Ui.panel ~name:"Drums" ~controls:["drums.gain"] ~targets:["song-drums"] ;;
+```
+
+Anything no panel names collects into one further panel, so a project
+that declares none still shows all of itself and nothing is ever
+unreachable. Declared panels reach the unit's metadata under `"panels"`,
+members recorded as written — a control member naming a whole `multi_slider`
+group stays the group name, and the dev app expands it when it draws:
+
+```json
+"panels": [
+  {"name": "Drums", "controls": ["drums.gain"], "targets": ["song-drums"]}
+]
+```
+
+Every member name must resolve to a declared control, control group or
+target; one that does not fails the build, pointing at the panel's own
+line. The check runs after evaluation, so a panel may name something
+declared later in the file.
+
+Panels are presentation only. They never enter a target's cache key, so
+renaming one re-renders nothing, and the key is emitted only when a
+project declares a panel — metadata for a project that groups nothing is
+byte-identical to what it was before panels existed. The build otherwise
+does nothing with them; only the dev app reads them.
+
 ## Incremental builds & caching
 
 Caching is fully automatic, with no user-facing controls.

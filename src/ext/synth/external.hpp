@@ -138,6 +138,22 @@ struct ControlGroupDecl {
   double sumMin = 0, sumMax = 1;
 };
 
+// A dev-app panel being declared: a named grouping that pairs some of
+// the project's live controls with some of its render targets, so the
+// dev app can show them together instead of as two flat lists. Members
+// are named, not passed by value, because a control declaration yields
+// only its Scalar value and a render declaration yields unit - the
+// name is the only handle either leaves behind. A control member may
+// name a whole multi_slider group rather than each of its lanes.
+//
+// Panels are presentation only: they never reach the engine and never
+// affect a rendered artifact.
+struct PanelDecl {
+  std::string name;  // panel identifier and title, unique project-wide
+  std::vector<std::string> controls;
+  std::vector<std::string> targets;
+};
+
 // Host services available during one call.
 struct Ctx {
   // Apply a synth function value (an Opaque argument) to positional
@@ -153,6 +169,8 @@ struct Ctx {
   // Declare a sum-constrained group of live controls and get this
   // build's value for every lane, in lane order.
   std::function<std::vector<double>(ControlGroupDecl)> controlGroup;
+  // Declare a dev-app panel grouping controls and targets by name.
+  std::function<void(PanelDecl)> panel;
 };
 
 }  // namespace synth::ext

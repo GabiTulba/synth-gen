@@ -149,6 +149,14 @@ ProjectStateLoad loadProjectState(const std::string& path) {
       if (value.kind == json::Value::Kind::Bool)
         r.state.ui.sections[key] = value.boolean;
 
+  auto readFlags = [&ui](const char* key, std::map<std::string, bool>& out) {
+    const json::Value* v = ui->get(key);
+    if (!v || v->kind != json::Value::Kind::Object) return;
+    for (auto& [name, value] : v->object)
+      if (value.kind == json::Value::Kind::Bool) out[name] = value.boolean;
+  };
+  readFlags("panels", r.state.ui.panels);
+
   return r;
 }
 
@@ -195,6 +203,14 @@ bool saveProjectState(const std::string& path, const ProjectState& state,
   for (auto& [key, open] : state.ui.sections)
     secs.set(key, json::makeBool(open));
   ui.set("sections", std::move(secs));
+
+  auto writeFlags = [&ui](const char* key,
+                          const std::map<std::string, bool>& flags) {
+    json::Value v = json::makeObject();
+    for (auto& [name, on] : flags) v.set(name, json::makeBool(on));
+    ui.set(key, std::move(v));
+  };
+  writeFlags("panels", state.ui.panels);
   root.set("ui", std::move(ui));
 
   std::string text;

@@ -77,6 +77,19 @@ struct ControlInfo {
   double sumMin = 0, sumMax = 0;
 };
 
+// A dev-app panel declared by the build (Core.Ui.panel): a named
+// grouping that pairs some of the unit's controls with some of its
+// render targets, so the dev app can show a knob beside the waveform it
+// shapes. Members are stored as written - a control member may name a
+// whole multi_slider group rather than each lane - and every name is
+// checked to resolve before the build succeeds. Presentation only: a
+// panel never affects a rendered artifact or a cache key.
+struct PanelInfo {
+  std::string name;
+  std::vector<std::string> controls;
+  std::vector<std::string> targets;
+};
+
 // Cross-build cache (Epic 8). Purely automatic: keys are content hashes of
 // each target's dependency closure (plus audio-input stamps and an engine
 // version salt); a target whose key is unchanged and whose artifact still
@@ -96,6 +109,7 @@ struct BuildResult {
   Manifest manifest;
   std::vector<TargetInfo> targets;
   std::vector<ControlInfo> controls;  // declaration order
+  std::vector<PanelInfo> panels;      // declaration order
   DiagnosticBag diags;
   std::string metadataPath;
   std::string controlsPath;  // where control overrides are read from

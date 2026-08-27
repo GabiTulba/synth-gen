@@ -4186,3 +4186,205 @@ let _ = out |> sample ~from:0s ~to:1s |> render ~name:"out" ~rate:8000.0 ;;
 )";
   checkSameBytes(broadcast, perChannel, "out.wav");
 }
+
+// --- Live controls (Core.Control) ---------------------------------------
+
+TEST(build_controls_declared_with_defaults) {
+  TempDir tp;
+  tp.write("a.synth", R"(
+open Core open Core.Arrange open Core.Render open Core.Sig
+let gain : Scalar = Control.knob ~name:"gain" ~min:0.0 ~max:1.0 ~default:0.25 ;;
+let cutoff : Scalar = Control.slider ~name:"cutoff" ~min:100.0 ~max:2000.0 ~default:700.0 ;;
+let _ = render "demo" 8000.0 (sample (constant gain) 0s 100ms) ;;
+)");
+  tp.write("build.json", projectManifest("controls", {"a.synth"}));
+  BuildResult r = buildProject(tp.dir.string());
+  for (auto& d : r.diags.items) std::cerr << d.message << "\n";
+  CHECK(r.ok);
+  CHECK(r.controls.size() == 2);
+  CHECK(r.controls[0].name == "gain");
+  CHECK(r.controls[0].kind == "knob");
+  CHECK_NEAR(r.controls[0].min, 0.0, 1e-12);
+  CHECK_NEAR(r.controls[0].max, 1.0, 1e-12);
+  CHECK_NEAR(r.controls[0].defaultValue, 0.25, 1e-12);
+  CHECK_NEAR(r.controls[0].value, 0.25, 1e-12);  // no override active
+  CHECK(r.controls[1].name == "cutoff");
+  CHECK(r.controls[1].kind == "slider");
+  CHECK_NEAR(r.controls[1].value, 700.0, 1e-12);
+
+  // The default drives the render...
+  WavData w = readWav((tp.dir / "_build" / "artifacts" / "demo.wav").string());
+  CHECK_NEAR(w.channels[0][100], 0.25, 0.01);
+  // ...and the metadata carries the controls for the dev app.
+  std::string meta = slurp(tp.dir / "_build" / "metadata.json");
+  CHECK(meta.find("\"controls\": [") != std::string::npos);
+  CHECK(meta.find("\"name\": \"cutoff\"") != std::string::npos);
+  CHECK(meta.find("\"kind\": \"knob\"") != std::string::npos);
+  // The overrides file is a build input, so a daemon watches it.
+  bool hasControlsInput = false;
+  for (auto& i : r.inputs)
+    if (i == r.controlsPath) hasControlsInput = true;
+  CHECK(hasControlsInput);
+}
+
+TEST(build_controls_overrides_apply_and_clamp) {
+  TempDir tp;
+  tp.write("a.synth", R"(
+open Core open Core.Arrange open Core.Render open Core.Sig
+let gain : Scalar = Control.slider ~name:"gain" ~min:0.0 ~max:1.0 ~default:0.25 ;;
+let _ = render "demo" 8000.0 (sample (constant gain) 0s 100ms) ;;
+)");
+  tp.write("build.json", projectManifest("overrides", {"a.synth"}));
+  fs::create_directories(tp.dir / "_build");
+  {
+    std::ofstream out(tp.dir / "_build" / "controls.json");
+    out << R"({"overrides": {"gain": 0.75, "unknown": 3.0}})";
+  }
+  BuildResult r = buildProject(tp.dir.string());
+  CHECK(r.ok);
+  CHECK(r.controls.size() == 1);
+  CHECK_NEAR(r.controls[0].value, 0.75, 1e-12);
+  CHECK_NEAR(r.controls[0].defaultValue, 0.25, 1e-12);  // default unchanged
+  WavData w = readWav((tp.dir / "_build" / "artifacts" / "demo.wav").string());
+  CHECK_NEAR(w.channels[0][100], 0.75, 0.01);
+
+  // An out-of-range override clamps to the declared range.
+  {
+    std::ofstream out(tp.dir / "_build" / "controls.json");
+    out << R"({"overrides": {"gain": 42.0}})";
+  }
+  BuildResult r2 = buildProject(tp.dir.string());
+  CHECK(r2.ok);
+  CHECK_NEAR(r2.controls[0].value, 1.0, 1e-12);
+
+  // Malformed overrides fall back to defaults instead of failing.
+  {
+    std::ofstream out(tp.dir / "_build" / "controls.json");
+    out << "{not json";
+  }
+  BuildResult r3 = buildProject(tp.dir.string());
+  CHECK(r3.ok);
+  CHECK_NEAR(r3.controls[0].value, 0.25, 1e-12);
+}
+
+TEST(build_controls_redeclaration_rules) {
+  // The same name with the same kind and range is fine (same value back);
+  // a conflicting redeclaration is a build error.
+  TempDir tp;
+  tp.write("ok.synth", R"(
+open Core open Core.Arrange open Core.Render open Core.Sig
+let a : Scalar = Control.slider ~name:"amt" ~min:0.0 ~max:1.0 ~default:0.5 ;;
+let b : Scalar = Control.slider ~name:"amt" ~min:0.0 ~max:1.0 ~default:0.5 ;;
+let _ = render "ok" 8000.0 (sample (constant (a +. b)) 0s 10ms) ;;
+)");
+  tp.write("build.json", projectManifest("redecl", {"ok.synth"}));
+  BuildResult r = buildProject(tp.dir.string());
+  CHECK(r.ok);
+  CHECK(r.controls.size() == 1);
+
+  tp.write("ok.synth", R"(
+open Core open Core.Arrange open Core.Render open Core.Sig
+let a : Scalar = Control.slider ~name:"amt" ~min:0.0 ~max:1.0 ~default:0.5 ;;
+let b : Scalar = Control.knob ~name:"amt" ~min:0.0 ~max:2.0 ~default:0.5 ;;
+let _ = render "ok" 8000.0 (sample (constant (a +. b)) 0s 10ms) ;;
+)");
+  BuildResult r2 = buildProject(tp.dir.string());
+  CHECK(!r2.ok);
+  CHECK(r2.diags.hasErrors());
+}
+
+TEST(build_controls_validation_errors) {
+  TempDir tp;
+  // max must exceed min.
+  tp.write("a.synth", R"(
+open Core open Core.Arrange open Core.Render open Core.Sig
+let x : Scalar = Control.slider ~name:"x" ~min:1.0 ~max:1.0 ~default:1.0 ;;
+let _ = render "t" 8000.0 (sample (constant x) 0s 10ms) ;;
+)");
+  tp.write("build.json", projectManifest("badrange", {"a.synth"}));
+  BuildResult r = buildProject(tp.dir.string());
+  CHECK(!r.ok);
+
+  // The default must sit inside [min, max].
+  tp.write("a.synth", R"(
+open Core open Core.Arrange open Core.Render open Core.Sig
+let x : Scalar = Control.slider ~name:"x" ~min:0.0 ~max:1.0 ~default:2.0 ;;
+let _ = render "t" 8000.0 (sample (constant x) 0s 10ms) ;;
+)");
+  BuildResult r2 = buildProject(tp.dir.string());
+  CHECK(!r2.ok);
+}
+
+TEST(build_controls_cache_invalidates_on_override_change) {
+  TempDir tp;
+  tp.write("a.synth", R"(
+open Core open Core.Arrange open Core.Render open Core.Sig open Core.Osc
+let gain : Scalar = Control.slider ~name:"gain" ~min:0.0 ~max:1.0 ~default:0.25 ;;
+let _ = render "uses_control" 8000.0 (sample (constant gain) 0s 50ms) ;;
+)");
+  tp.write("build.json", projectManifest("ctlcache", {"a.synth"}));
+
+  BuildCache cache;
+  BuildResult first = buildProject(tp.dir.string(), &cache);
+  CHECK(first.ok);
+  CHECK(!first.targets[0].cached);
+  BuildResult second = buildProject(tp.dir.string(), &cache);
+  CHECK(second.targets[0].cached);
+
+  // A moved slider re-renders; the artifact reflects the new value.
+  {
+    std::ofstream out(tp.dir / "_build" / "controls.json");
+    out << R"({"overrides": {"gain": 0.5}})";
+  }
+  BuildResult third = buildProject(tp.dir.string(), &cache);
+  CHECK(third.ok);
+  CHECK(!third.targets[0].cached);
+  WavData w =
+      readWav((tp.dir / "_build" / "artifacts" / "uses_control.wav").string());
+  CHECK_NEAR(w.channels[0][100], 0.5, 0.01);
+
+  // Unchanged overrides stay cached (the value, not the file stamp, is
+  // what salts the key).
+  BuildResult fourth = buildProject(tp.dir.string(), &cache);
+  CHECK(fourth.targets[0].cached);
+}
+
+TEST(build_watch_rebuilds_on_override_change) {
+  // The dev app "attaches" to a watch instance by writing the unit's
+  // controls.json; the daemon treats it as an input and rebuilds.
+  TempDir tp;
+  tp.write("a.synth", R"(
+open Core open Core.Arrange open Core.Render open Core.Sig
+let gain : Scalar = Control.slider ~name:"gain" ~min:0.0 ~max:1.0 ~default:0.25 ;;
+let _ = render "t" 8000.0 (sample (constant gain) 0s 10ms) ;;
+)");
+  tp.write("build.json", projectManifest("ctlwatch", {"a.synth"}));
+
+  int builds = 0;
+  bool changed = false;
+  double lastValue = -1;
+  watchProject(
+      tp.dir.string(),
+      [&](const BuildResult& r) {
+        builds++;
+        CHECK(r.ok);
+        CHECK(r.controls.size() == 1);
+        lastValue = r.controls[0].value;
+      },
+      [&] {
+        if (builds == 1 && !changed) {
+          std::this_thread::sleep_for(std::chrono::milliseconds(20));
+          std::ofstream out(tp.dir / "_build" / "controls.json");
+          out << R"({"overrides": {"gain": 0.9}})";
+          out.close();
+          fs::last_write_time(tp.dir / "_build" / "controls.json",
+                              fs::file_time_type::clock::now() +
+                                  std::chrono::seconds(2));
+          changed = true;
+        }
+        return builds < 2;
+      },
+      10);
+  CHECK(builds == 2);
+  CHECK_NEAR(lastValue, 0.9, 1e-12);
+}

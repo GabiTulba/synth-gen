@@ -29,7 +29,10 @@ its own detailed document (linked below).
 2. **Evaluation** — the evaluator reduces definitions to values.
    Everything is pure except `render` (and its `render_vis` /
    `render_stems` variants), which records a *render target*: a named
-   sample window plus a rate. Signals stay lazy graphs throughout.
+   sample window plus a rate. `Control.slider`/`knob` declare *live
+   controls* — build-time Scalar parameters resolved here from the
+   unit's override file, fixed for the whole build. Signals stay lazy
+   graphs throughout.
 3. **Build** — the build system enumerates targets across the project,
    consults the incremental cache (Merkle content hashes over each
    target's definition closure), and renders cache-miss targets in
@@ -39,7 +42,10 @@ its own detailed document (linked below).
    visual targets) artifacts plus a `metadata.json` index.
 5. **Consumption** — the dev app reads the metadata (a pure consumer, no
    compiler internals) and lets you browse and play artifacts; the watch
-   daemon loops the whole pipeline on file changes.
+   daemon loops the whole pipeline on file changes. Live controls close
+   the loop in the other direction: the dev app renders them as sliders
+   and knobs and writes overrides into the unit's `controls.json`, a
+   build input the daemon rebuilds on.
 
 ## Components
 

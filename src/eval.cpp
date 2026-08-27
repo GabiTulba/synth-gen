@@ -3,6 +3,7 @@
 #include <cstring>
 #include <pthread.h>
 
+#include <algorithm>
 #include <cmath>
 #include <filesystem>
 #include <functional>
@@ -24,9 +25,12 @@ class Interp {
  public:
   Interp(const Program& prog, std::vector<RenderTarget>& targets,
          DiagnosticBag& diags, std::vector<std::string>* loadedFiles,
-         std::string extCacheDir)
+         std::string extCacheDir,
+         const std::map<std::string, double>* controlOverrides,
+         std::vector<ControlDecl>* controls)
       : prog_(prog), targets_(targets), diags_(diags),
-        loadedFiles_(loadedFiles), extCacheDir_(std::move(extCacheDir)) {}
+        loadedFiles_(loadedFiles), extCacheDir_(std::move(extCacheDir)),
+        overrides_(controlOverrides), controls_(controls) {}
 
   bool run() {
     bool ok = true;
@@ -47,6 +51,9 @@ class Interp {
   const TopDef* currentDef_ = nullptr;
   std::vector<std::string>* loadedFiles_ = nullptr;
   std::string extCacheDir_;                        // user external .so cache
+  const std::map<std::string, double>* overrides_ = nullptr;
+  std::vector<ControlDecl>* controls_ = nullptr;
+  std::map<std::string, ControlDecl> controlsByName_;
   std::map<std::string, Env> globals_;             // module -> name -> value
   std::map<std::string, SigPtr> fileCache_;        // absolute path -> signal
   mutable CoreListInfo coreList_;                  // resolved on first use
@@ -658,7 +665,49 @@ class Interp {
       t.declDef = currentDef_;
       targets_.push_back(std::move(t));
     };
+    svc.declareControl = [this, &callerMod](ControlDecl c) {
+      c.file = callerMod.parsed.path;
+      c.span = currentDef_ ? currentDef_->span : Span{};
+      return registerControl(std::move(c));
+    };
     return it->second(svc, args);
+  }
+
+  // Register a live control declaration and resolve its value for this
+  // build. Control names share one project-wide name space: redeclaring
+  // a name is fine as long as kind and range agree (the same value comes
+  // back), and a conflicting redeclaration is a build error.
+  double registerControl(ControlDecl c) {
+    if (c.name.empty()) throw EvalError("control: empty control name");
+    if (!(c.max > c.min))
+      throw EvalError("control '" + c.name + "': max (" +
+                      std::to_string(c.max) + ") must exceed min (" +
+                      std::to_string(c.min) + ")");
+    if (c.def < c.min || c.def > c.max)
+      throw EvalError("control '" + c.name + "': default " +
+                      std::to_string(c.def) + " is outside [" +
+                      std::to_string(c.min) + ", " + std::to_string(c.max) +
+                      "]");
+    auto it = controlsByName_.find(c.name);
+    if (it != controlsByName_.end()) {
+      const ControlDecl& prev = it->second;
+      if (prev.kind != c.kind || prev.min != c.min || prev.max != c.max ||
+          prev.def != c.def)
+        throw EvalError("control '" + c.name +
+                        "' redeclared with a different kind or range (also "
+                        "declared in " + prev.file + ")");
+      return prev.value;
+    }
+    c.value = c.def;
+    if (overrides_) {
+      auto ov = overrides_->find(c.name);
+      if (ov != overrides_->end())
+        c.value = std::clamp(ov->second, c.min, c.max);
+    }
+    double v = c.value;
+    controlsByName_.emplace(c.name, c);
+    if (controls_) controls_->push_back(std::move(c));
+    return v;
   }
 
   // Audio file paths resolve relative to the source file that mentions them;
@@ -930,10 +979,14 @@ void* evalThreadMain(void* arg) {
 bool evaluateProgram(const Program& prog, std::vector<RenderTarget>& targets,
                      DiagnosticBag& diags,
                      std::vector<std::string>* loadedFiles,
-                     const std::string& externalCacheDir) {
+                     const std::string& externalCacheDir,
+                     const std::map<std::string, double>* controlOverrides,
+                     std::vector<ControlDecl>* controls) {
   EvalThreadCtx ctx;
   ctx.fn = [&] {
-    return Interp(prog, targets, diags, loadedFiles, externalCacheDir).run();
+    return Interp(prog, targets, diags, loadedFiles, externalCacheDir,
+                  controlOverrides, controls)
+        .run();
   };
   pthread_attr_t attr;
   pthread_t thread;

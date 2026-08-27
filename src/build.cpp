@@ -6,6 +6,7 @@
 #include <cmath>
 #include <condition_variable>
 #include <cstdio>
+#include <cstring>
 #include <deque>
 #include <filesystem>
 #include <fstream>
@@ -165,10 +166,48 @@ void writeMetadata(const std::string& path, const BuildResult& r,
       << ", \"error\": \"" << jsonEscape(t.error) << "\"}"
       << (i + 1 < r.targets.size() ? "," : "") << "\n";
   }
+  j << "  ],\n";
+  j << "  \"controls\": [\n";
+  for (size_t i = 0; i < r.controls.size(); i++) {
+    const ControlInfo& c = r.controls[i];
+    j << "    {\"name\": \"" << jsonEscape(c.name) << "\", \"kind\": \""
+      << jsonEscape(c.kind) << "\", \"min\": " << formatDouble(c.min)
+      << ", \"max\": " << formatDouble(c.max)
+      << ", \"default\": " << formatDouble(c.defaultValue)
+      << ", \"value\": " << formatDouble(c.value) << "}"
+      << (i + 1 < r.controls.size() ? "," : "") << "\n";
+  }
   j << "  ]\n";
   j << "}\n";
   std::ofstream out(path, std::ios::trunc);
   out << j.str();
+}
+
+// The unit's control overrides ({"overrides": {"name": value, ...}}),
+// written by the dev app next to the metadata. Unreadable or malformed
+// content falls back to defaults - the file is dev-tool state, not part
+// of the project, so it never fails the build.
+std::map<std::string, double> readControlOverrides(const std::string& path,
+                                                   BuildLog& log) {
+  std::map<std::string, double> overrides;
+  std::ifstream in(path, std::ios::binary);
+  if (!in) return overrides;
+  std::ostringstream ss;
+  ss << in.rdbuf();
+  json::Value root;
+  std::string err;
+  if (!json::parse(ss.str(), root, err) ||
+      root.kind != json::Value::Kind::Object) {
+    log.line("controls: cannot parse '" + path + "' (" +
+             (err.empty() ? "not an object" : err) + "); using defaults");
+    return overrides;
+  }
+  if (const json::Value* ov = root.get("overrides");
+      ov && ov->kind == json::Value::Kind::Object) {
+    for (auto& [name, v] : ov->object)
+      if (v.kind == json::Value::Kind::Number) overrides[name] = v.number;
+  }
+  return overrides;
 }
 
 }  // namespace
@@ -514,6 +553,7 @@ static BuildResult buildUnitImpl(const std::string& projectDir,
   std::error_code ec;
   fs::create_directories(artifactDir, ec);
   r.metadataPath = (buildDir / "metadata.json").string();
+  r.controlsPath = (buildDir / "controls.json").string();
 
   if (r.diags.hasErrors()) {
     writeMetadata(r.metadataPath, r, sourcesByPath);
@@ -521,17 +561,44 @@ static BuildResult buildUnitImpl(const std::string& projectDir,
   }
 
   // 3. Evaluate: enumerate render targets (and run load_* validation).
+  // Live-control overrides (written by an attached dev app) apply here,
+  // where slider/knob calls resolve to their build-time values.
   auto evalStart = std::chrono::steady_clock::now();
+  std::map<std::string, double> controlOverrides =
+      readControlOverrides(r.controlsPath, log);
   std::vector<RenderTarget> targets;
+  std::vector<ControlDecl> controls;
   // Audio files plus external implementation .cpp files - both are
   // build inputs the daemon watches; the log counts them apart.
   std::vector<std::string> evalInputs;
   bool evalOk = evaluateProgram(prog, targets, r.diags, &evalInputs,
-                                (buildDir / "externals").string());
+                                (buildDir / "externals").string(),
+                                &controlOverrides, &controls);
   size_t cppInputs = 0;
   for (auto& a : evalInputs) {
     if (fs::path(a).extension() == ".cpp") cppInputs++;
     r.inputs.push_back(a);
+  }
+  for (auto& c : controls) {
+    ControlInfo ci;
+    ci.name = c.name;
+    ci.kind = c.kind == ControlDecl::Kind::Knob ? "knob" : "slider";
+    ci.min = c.min;
+    ci.max = c.max;
+    ci.defaultValue = c.def;
+    ci.value = c.value;
+    r.controls.push_back(std::move(ci));
+  }
+  if (!r.controls.empty()) {
+    // The overrides file is a build input: a running daemon rebuilds
+    // when the dev app writes it (that is how synth-dev "attaches" to a
+    // watch instance).
+    r.inputs.push_back(r.controlsPath);
+    size_t active = 0;
+    for (auto& c : r.controls)
+      if (controlOverrides.count(c.name)) active++;
+    log.line("controls: " + std::to_string(r.controls.size()) +
+             " declared, " + std::to_string(active) + " override(s) active");
   }
   log.line("evaluate: " + std::to_string(targets.size()) + " target(s), " +
            std::to_string(evalInputs.size() - cppInputs) +
@@ -585,6 +652,17 @@ static BuildResult buildUnitImpl(const std::string& projectDir,
       audioSalt = fnv1a(a.data(), a.size(), audioSalt);
       audioSalt = fnvCombine(audioSalt, (uint64_t)s.size);
       audioSalt = fnvCombine(audioSalt, (uint64_t)s.mtime);
+    }
+    // Live-control values fold in by value, not by overrides-file stamp:
+    // a moved slider invalidates (conservatively, for every target - the
+    // structural sample cache still skips unaffected sample renders),
+    // while a rewrite that changes nothing stays fresh.
+    for (auto& c : r.controls) {
+      audioSalt = fnv1a(c.name.data(), c.name.size(), audioSalt);
+      uint64_t bits;
+      static_assert(sizeof bits == sizeof c.value);
+      std::memcpy(&bits, &c.value, sizeof bits);
+      audioSalt = fnvCombine(audioSalt, bits);
     }
   }
   std::vector<uint64_t> keys(targets.size(), 0);

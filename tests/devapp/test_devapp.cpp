@@ -2,6 +2,7 @@
 
 #include <filesystem>
 #include <fstream>
+#include <sstream>
 
 #include "build.hpp"
 #include "manifest_helpers.hpp"
@@ -291,4 +292,88 @@ TEST(player_reports_missing_file) {
   CHECK(!p.play("/nonexistent/x.wav", err));
   CHECK(!err.empty());
   CHECK(!p.playing());
+}
+
+TEST(metadata_parses_controls) {
+  TempDir tp;
+  tp.write("metadata.json", R"({
+  "project": "p", "status": "ok", "diagnostics": [], "targets": [],
+  "controls": [
+    {"name": "cutoff", "kind": "slider", "min": 100, "max": 2000,
+     "default": 700, "value": 900},
+    {"name": "gain", "kind": "knob", "min": 0, "max": 1, "default": 0.25,
+     "value": 0.25},
+    {"kind": "slider", "min": 0, "max": 1, "default": 0, "value": 0}
+  ]
+})");
+  MetadataLoadResult m =
+      loadProjectMetadata((tp.dir / "metadata.json").string());
+  CHECK(m.ok);
+  CHECK(m.meta.controls.size() == 2);  // the nameless one is dropped
+  CHECK(m.meta.controls[0].name == "cutoff");
+  CHECK(m.meta.controls[0].kind == "slider");
+  CHECK_NEAR(m.meta.controls[0].min, 100.0, 1e-9);
+  CHECK_NEAR(m.meta.controls[0].max, 2000.0, 1e-9);
+  CHECK_NEAR(m.meta.controls[0].def, 700.0, 1e-9);
+  CHECK_NEAR(m.meta.controls[0].value, 900.0, 1e-9);
+  CHECK(m.meta.controls[1].kind == "knob");
+}
+
+TEST(control_overrides_roundtrip_through_a_build) {
+  // The full attach loop, minus the daemon: build with defaults, write
+  // overrides the way the UI does, rebuild, and see the new value both in
+  // the metadata and in the artifact.
+  TempDir tp;
+  tp.write("song.synth", R"(
+open Core open Core.Arrange open Core.Render open Core.Sig
+let gain : Scalar = Control.slider ~name:"gain" ~min:0.0 ~max:1.0 ~default:0.25 ;;
+let _ = render "beep" 8000.0 (sample (constant gain) 0s 100ms) ;;
+)");
+  tp.write("build.json", projectManifest("ctl-demo", {"song.synth"}));
+  BuildResult r = buildProject(tp.dir.string());
+  CHECK(r.ok);
+
+  MetadataLoadResult m = loadProjectMetadata(r.metadataPath);
+  CHECK(m.ok);
+  CHECK(m.meta.controls.size() == 1);
+  CHECK_NEAR(m.meta.controls[0].value, 0.25, 1e-9);
+
+  std::string overridesPath = controlsPathFor(r.metadataPath);
+  CHECK(overridesPath == r.controlsPath);
+  std::string err;
+  CHECK(writeControlOverrides(overridesPath, {{"gain", 0.75}}, err));
+
+  BuildResult r2 = buildProject(tp.dir.string());
+  CHECK(r2.ok);
+  MetadataLoadResult m2 = loadProjectMetadata(r2.metadataPath);
+  CHECK_NEAR(m2.meta.controls[0].value, 0.75, 1e-9);
+  CHECK_NEAR(m2.meta.controls[0].def, 0.25, 1e-9);
+  WavData w = readWav((tp.dir / m2.meta.targets[0].artifact).string());
+  CHECK_NEAR(w.channels[0][100], 0.75, 0.01);
+
+  // An empty overrides map is still a real write: back to defaults.
+  CHECK(writeControlOverrides(overridesPath, {}, err));
+  BuildResult r3 = buildProject(tp.dir.string());
+  MetadataLoadResult m3 = loadProjectMetadata(r3.metadataPath);
+  CHECK_NEAR(m3.meta.controls[0].value, 0.25, 1e-9);
+}
+
+TEST(control_overrides_write_is_atomic) {
+  // The write goes through a temp file + rename; no .tmp litter remains
+  // and the result parses.
+  TempDir tp;
+  std::string path = (tp.dir / "controls.json").string();
+  std::string err;
+  CHECK(writeControlOverrides(path, {{"a", 1.5}, {"b", -2.0}}, err));
+  CHECK(!fs::exists(path + ".tmp"));
+  std::ifstream in(path, std::ios::binary);
+  std::ostringstream ss;
+  ss << in.rdbuf();
+  json::Value v;
+  std::string jsonErr;
+  CHECK(json::parse(ss.str(), v, jsonErr));
+  const json::Value* ov = v.get("overrides");
+  CHECK(ov != nullptr);
+  CHECK_NEAR(ov->getNumber("a"), 1.5, 1e-12);
+  CHECK_NEAR(ov->getNumber("b"), -2.0, 1e-12);
 }

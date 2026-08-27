@@ -1,4 +1,4 @@
-// synth external API v3.
+// synth external API v4.
 //
 // Implement a synth `external "this_file.cpp"` binding by defining, for a
 // declaration `let name ... = external "this_file.cpp"`:
@@ -107,6 +107,20 @@ struct RenderDecl {
   std::vector<std::pair<std::string, Sample>> stems;  // VisualStems lanes
 };
 
+// A live control being declared: a named build-time Scalar parameter
+// (shown as a slider or a knob by the dev app) with a range and a
+// default. Declaring it yields the control's value for this build: the
+// override an attached dev tool wrote, clamped to [min, max], or `def`
+// when none is active. Names share one project-wide name space;
+// redeclaring a name with the same kind and range yields the same value.
+struct ControlDecl {
+  enum class Kind { Slider, Knob };
+  Kind kind = Kind::Slider;
+  std::string name;  // stable identifier, unique project-wide
+  double min = 0, max = 1;
+  double def = 0;
+};
+
 // Host services available during one call.
 struct Ctx {
   // Apply a synth function value (an Opaque argument) to positional
@@ -117,6 +131,8 @@ struct Ctx {
   std::function<SigPtr(const std::string& path)> loadAudio;
   // Declare a render target.
   std::function<void(RenderDecl)> render;
+  // Declare a live control and get its current value.
+  std::function<double(ControlDecl)> control;
 };
 
 }  // namespace synth::ext

@@ -31,7 +31,7 @@ bool AudioPlayer::play(const std::string& wavPath, std::string& error) {
 }
 
 bool AudioPlayer::playRange(const std::string& wavPath, int64_t fromFrame,
-                            int64_t toFrame, std::string& error) {
+                            int64_t toFrame, std::string& error, bool loop) {
   stop();
   WavData w;
   try {
@@ -71,6 +71,11 @@ bool AudioPlayer::playRange(const std::string& wavPath, int64_t fromFrame,
   SDL_PauseAudioDevice(dev, 0);
   dev_ = dev;
   totalBytes_ = data.size() * sizeof(float);
+  queuedBytes_ = totalBytes_;
+  loop_ = loop;
+  // Kept even when not (yet) looping: setLooping(true) mid-play needs
+  // the range to re-queue from.
+  data_ = std::move(data);
   path_ = wavPath;
   rangeStartSec_ = w.rate > 0 ? (double)fromFrame / w.rate : 0;
   rangeEndSec_ = w.rate > 0 ? (double)toFrame / w.rate : 0;
@@ -83,18 +88,42 @@ void AudioPlayer::stop() {
     dev_ = 0;
   }
   totalBytes_ = 0;
+  queuedBytes_ = 0;
+  loop_ = false;
+  data_.clear();
+  data_.shrink_to_fit();
   path_.clear();
   rangeStartSec_ = rangeEndSec_ = 0;
 }
 
 void AudioPlayer::update() {
-  if (dev_ != 0 && SDL_GetQueuedAudioSize(dev_) == 0) stop();
+  if (dev_ == 0) return;
+  size_t remaining = SDL_GetQueuedAudioSize(dev_);
+  if (loop_ && totalBytes_ > 0) {
+    // Keep at least a quarter second (and at least one full copy of the
+    // range) queued ahead, so short selections survive frame hiccups.
+    double rate = rangeEndSec_ > rangeStartSec_
+                      ? totalBytes_ / (rangeEndSec_ - rangeStartSec_)
+                      : 0;
+    size_t minAhead = std::max(totalBytes_, (size_t)(rate * 0.25));
+    while (remaining < minAhead) {
+      if (SDL_QueueAudio(dev_, data_.data(), (Uint32)totalBytes_) != 0) break;
+      remaining += totalBytes_;
+      queuedBytes_ += totalBytes_;
+    }
+  } else if (remaining == 0) {
+    stop();
+  }
 }
 
 double AudioPlayer::progress() const {
   if (dev_ == 0 || totalBytes_ == 0) return 0;
   double remaining = (double)SDL_GetQueuedAudioSize(dev_);
-  return 1.0 - remaining / (double)totalBytes_;
+  double consumed = (double)queuedBytes_ - remaining;
+  if (queuedBytes_ <= totalBytes_)  // never looped: plain 0..1
+    return std::clamp(consumed / (double)totalBytes_, 0.0, 1.0);
+  return std::fmod(std::max(consumed, 0.0), (double)totalBytes_) /
+         (double)totalBytes_;
 }
 
 }  // namespace synth::devapp

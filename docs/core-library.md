@@ -37,6 +37,7 @@ idioms that tie them together.
 | `Core.Arrange` | Combination and arrangement: `mix_all`, `channels`, `channel`, `sample`, `place`, `place_multi` | `stdlib/core/sampling.cpp` |
 | `Core.Fx` | Envelopes (`exp_decay`, `adsr`), filters (`lowpass`, `highpass`, the modulated `lowpass_mod`/`highpass_mod`, the resonant `resonant`), control (`follow`), distortion (`hard_clip`, `soft_clip`), time effects (`delay`, `feedback`, `resample`, `reverb`), and the voice sugar (`gated`, `echoes`) | `stdlib/core/effects.cpp` + SynthGraph sugar |
 | `Core.Render` | The effects: `render`, `render_vis`, `render_stems`, `render_vis_stems` | `stdlib/core/render.cpp` |
+| `Core.Control` | Live controls: `slider`, `knob` — named build-time Scalar parameters the dev app can override between rebuilds | `stdlib/core/control.cpp` |
 | `Core.Io` | Audio import: `load_mono`, `load_multi` | `stdlib/core/io.cpp` |
 | `Core.Sig` | Signal constructors: `constant`, `constant_multi`, `time`, `signal`, `signal_multi`, `select` | `stdlib/core/signals.cpp` |
 | `Core.Groove` | The sequencing tier: `pattern`, `humanized`, `mask`, `euclid` | written in SynthGraph (`lib.synth`) |
@@ -296,6 +297,22 @@ computed render names (see `Str`).
   them, channel counts are validated (`load_mono` insists on 1). A
   loaded file occupies `[0s, duration)` and is silence afterward. The
   worked example is `examples/sampling`.
+
+### `Core.Control`
+
+- **`slider name min max default`** / **`knob name min max default`**
+  declare a named live control and evaluate to its value for this
+  build: the override an attached `synth-dev` wrote into the unit's
+  `controls.json` (clamped to `[min, max]`), or the default. The two
+  differ only in how the dev app draws them. `max` must exceed `min`,
+  the default must lie in range, and names share one project-wide name
+  space — redeclaring a name with the same kind and range yields the
+  same value, a conflicting redeclaration is a build error. The value
+  is an ordinary Scalar, fixed for the whole build, so evaluation stays
+  pure and renders stay deterministic; moving a slider is a rebuild,
+  not a modulation (use signals for that). The worked example is
+  `examples/controls`; the file format and daemon wiring live in
+  [`build-system.md`](build-system.md).
 
 ### `Core.Sig`
 

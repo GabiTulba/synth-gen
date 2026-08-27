@@ -1582,6 +1582,41 @@ let _ = render_stems ~name:"mix" ~rate:8000.0
   CHECK(d2.hasErrors());
 }
 
+TEST(checker_control_slider_and_knob) {
+  TempProject tp;
+  // The controls are ordinary Scalars usable anywhere a Scalar is.
+  std::string f = tp.write("ok.synth", R"(
+open Core open Core.Osc open Core.Fx open Core.Arrange open Core.Render open Core.Io open Core.Time open Core.Sig open Core.Math
+let cutoff : Scalar = Control.slider ~name:"cutoff" ~min:100.0 ~max:2000.0 ~default:700.0 ;;
+let gain : Scalar = Control.knob ~name:"gain" ~min:0.0 ~max:1.0 ~default:0.5 ;;
+let voice : Scalar Signal = lowpass cutoff (saw 110.0) *. gain ;;
+)");
+  DiagnosticBag diags;
+  Program prog = checkProject({f}, diags);
+  for (auto& d : diags.items)
+    std::cerr << renderDiagnostic(d, prog.modules.empty() ? std::string{}
+                                       : userMod(prog).parsed.source);
+  CHECK(!diags.hasErrors());
+
+  // The arguments are typed: a String where a Scalar bound is due fails.
+  std::string g = tp.write("bad.synth", R"(
+open Core open Core.Osc open Core.Fx open Core.Arrange open Core.Render open Core.Io open Core.Time open Core.Sig open Core.Math
+let x : Scalar = Control.slider ~name:"x" ~min:"low" ~max:1.0 ~default:0.5 ;;
+)");
+  DiagnosticBag d2;
+  checkProject({g}, d2);
+  CHECK(d2.hasErrors());
+
+  // ...and the result is a Scalar, not a Signal.
+  std::string h = tp.write("bad2.synth", R"(
+open Core open Core.Osc open Core.Fx open Core.Arrange open Core.Render open Core.Io open Core.Time open Core.Sig open Core.Math
+let x : Scalar Signal = Control.knob ~name:"x" ~min:0.0 ~max:1.0 ~default:0.5 ;;
+)");
+  DiagnosticBag d3;
+  checkProject({h}, d3);
+  CHECK(d3.hasErrors());
+}
+
 TEST(checker_render_vis_stems) {
   TempProject tp;
   std::string f = tp.write("ok.synth", R"(

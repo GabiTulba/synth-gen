@@ -813,9 +813,11 @@ constructors, the same ones the engine itself uses (the symbols resolve
 against the host process when the object is loaded). Functions (and
 type-variable-typed values generally) arrive as opaque handles, callable
 through the context's `apply` service or passable back unchanged. The
-context also offers `loadAudio` (audio files as build inputs) and
-`render` (declaring render targets) — Core's own `Io.load_mono` and
-`Render.render` are ordinary externals built on exactly these. External
+context also offers `loadAudio` (audio files as build inputs),
+`render` (declaring render targets) and `control` (declaring live
+controls and reading their current value) — Core's own `Io.load_mono`,
+`Render.render` and `Control.slider` are ordinary externals built on
+exactly these. External
 names must form C++ symbols (letters, digits, `_`).
 
 ## 6. Primitive signatures (v1 roster)
@@ -897,6 +899,17 @@ val Render.render_stems: name:String -> rate:Scalar
 val Render.render_vis_stems: name:String -> rate:Scalar
                     -> stems:(String, 'a Sample) list -> unit
   (* ONE svg artifact: a labeled waveform lane per stem, shared time axis *)
+
+(* live controls: named build-time Scalar parameters. Each declaration
+   evaluates to the control's value for THIS build: the override an
+   attached dev tool wrote (clamped to [min, max]) or the default.
+   Names share one project-wide name space; a redeclaration with the
+   same kind and range yields the same value, a conflicting one is a
+   build error. max must exceed min; the default must lie in range. *)
+val Control.slider: name:String -> min:Scalar -> max:Scalar
+           -> default:Scalar -> Scalar
+val Control.knob: name:String -> min:Scalar -> max:Scalar
+         -> default:Scalar -> Scalar  (* same semantics; shown as a knob *)
 
 (* file import *)
 val Io.load_mono: path:String -> Scalar Signal

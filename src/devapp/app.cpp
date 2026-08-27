@@ -18,7 +18,9 @@
 #include <cmath>
 #include <cstdio>
 #include <filesystem>
+#include <map>
 #include <string>
+#include <vector>
 
 #include "imgui.h"
 #include "imgui_impl_sdl2.h"
@@ -33,15 +35,28 @@ using namespace synth::devapp;
 
 namespace {
 
+// The app's editing state for one live control: `value` is what the UI
+// shows, `editing` is true while the user is actively changing it, and
+// `dirty` is true from the first edit until the daemon's rebuild echoes
+// the value back through the metadata (shown as a pending marker).
+struct ControlUi {
+  float value = 0;
+  bool editing = false;
+  bool dirty = false;
+};
+
 struct UnitState {
   MetadataUnit unit;
   MetadataLoadResult loaded;
   FileStamp stamp;
+  std::map<std::string, ControlUi> controlUi;  // by control name
+  std::string controlsError;  // last overrides-write failure, if any
 };
 
-// One open waveform panel; any number can be open at once, each with its
-// own zoom window and selection. Holds the decoded WAV plus per-channel
-// peak bins; reloaded automatically when a rebuild rewrites the artifact.
+// One open waveform panel - a floating, draggable window; any number can
+// be open at once, each with its own zoom window and selection. Holds the
+// decoded WAV plus per-channel peak bins; reloaded automatically when a
+// rebuild rewrites the artifact.
 struct WavePanel {
   std::string artifactPath;  // empty = closed
   std::string targetName;
@@ -52,6 +67,8 @@ struct WavePanel {
   WaveView view;
   double selStart = -1, selEnd = -1;  // selection in frames; -1 = none
   double dragAnchor = -1;             // frame where a selection drag began
+  bool loop = false;   // replay the played range indefinitely
+  int spawnIndex = 0;  // cascades the window's first-ever position
 
   void open(const std::string& path, const std::string& name) {
     artifactPath = path;
@@ -78,11 +95,14 @@ struct WavePanel {
   }
 
   // A rebuild rewrote (or removed) the artifact: reload, keeping the
-  // current zoom window and selection clamped to the new length.
-  void reloadIfChanged() {
+  // current zoom window and selection clamped to the new length. `force`
+  // reloads even when the stamp looks unchanged - a rebuild that rewrites
+  // a same-sized artifact within the filesystem's mtime granularity is
+  // invisible to the stamp, so metadata changes force the panels fresh.
+  void reloadIfChanged(bool force) {
     if (artifactPath.empty()) return;
     FileStamp now = stampFile(artifactPath);
-    if (now == stamp) return;
+    if (!force && now == stamp) return;
     stamp = now;
     WaveView old = view;
     double oldSelStart = selStart, oldSelEnd = selEnd;
@@ -112,6 +132,7 @@ struct AppState {
   AudioPlayer player;
   std::string playError;
   std::vector<WavePanel> waves;
+  int waveSpawnCount = 0;  // cascades new wave windows' first positions
 
   WavePanel* findWave(const std::string& path) {
     for (auto& w : waves)
@@ -128,6 +149,7 @@ struct AppState {
     }
     WavePanel w;
     w.open(path, name);
+    w.spawnIndex = waveSpawnCount++;
     waves.push_back(std::move(w));
   }
 
@@ -146,6 +168,29 @@ struct AppState {
     units = std::move(next);
   }
 
+  // Pulls the build's control values into the UI. A control the user is
+  // editing (or whose write the daemon hasn't rebuilt with yet) keeps its
+  // UI value; `dirty` clears once the metadata echoes the value back.
+  void syncControls(UnitState& u) {
+    std::map<std::string, ControlUi> next;
+    for (auto& c : u.loaded.meta.controls) {
+      auto it = u.controlUi.find(c.name);
+      if (it == u.controlUi.end()) {
+        next[c.name].value = (float)c.value;
+        continue;
+      }
+      ControlUi ui = it->second;
+      // Range-relative tolerance: the echo went through float -> JSON
+      // (~6 significant digits) -> double, so exact equality would leave
+      // the pending marker stuck on wide-range controls.
+      double tol = std::max(1e-9, 1e-4 * (c.max - c.min));
+      if (ui.dirty && std::fabs(ui.value - c.value) <= tol) ui.dirty = false;
+      if (!ui.dirty && !ui.editing) ui.value = (float)c.value;
+      next[c.name] = ui;
+    }
+    u.controlUi = std::move(next);
+  }
+
   void maybeRefresh(double dtMs) {
     sinceStatMs += dtMs;
     if (sinceStatMs < 250.0) return;  // stat ~4x/second, reload on change
@@ -157,13 +202,21 @@ struct AppState {
       manifestStamp = m;
       resolveLayout();
     }
+    bool rebuilt = false;
     for (auto& u : units) {
       FileStamp now = stampFile(u.unit.metadataPath);
-      if (now == u.stamp && u.loaded.ok) continue;
+      bool changed = !(now == u.stamp);
+      if (!changed && u.loaded.ok) continue;
       u.stamp = now;
       u.loaded = loadProjectMetadata(u.unit.metadataPath);
+      syncControls(u);
+      if (changed) rebuilt = true;
     }
-    for (auto& w : waves) w.reloadIfChanged();
+    // Metadata is written after the artifacts, so a metadata change means
+    // a build just finished: force every open panel fresh - an artifact
+    // rewritten with the same size within the mtime granularity would
+    // otherwise be missed and leave the panel showing stale audio.
+    for (auto& w : waves) w.reloadIfChanged(rebuilt);
   }
 };
 
@@ -261,26 +314,159 @@ void drawTargets(AppState& app, UnitState& u) {
   ImGui::EndTable();
 }
 
-// The interactive waveform pane: min/max envelope lanes per channel
-// (matching the .svg vis), wheel zoom about the cursor, right-drag pan,
-// left-drag selection, and playback of the selection or visible range.
-// Returns false when the user closed the panel.
-bool drawWavePanel(AppState& app, WavePanel& p) {
-  ImGui::Spacing();
-  ImGui::Separator();
-  ImGui::Spacing();
-  ImGui::Text("waveform: %s", p.targetName.c_str());
-  ImGui::SameLine();
-  if (ImGui::SmallButton("close")) return false;
+// A rotary knob: drag vertically to change the value (hold Shift for
+// fine adjustment). Returns true while the drag is changing the value.
+bool knobFloat(const char* id, float* v, float vmin, float vmax,
+               float diameter) {
+  ImGui::PushID(id);
+  ImVec2 pos = ImGui::GetCursorScreenPos();
+  ImGui::InvisibleButton("knob", ImVec2(diameter, diameter));
+  bool edited = false;
+  ImGuiIO& io = ImGui::GetIO();
+  if (ImGui::IsItemActive() && io.MouseDelta.y != 0.0f) {
+    // Full range over ~200 px of travel; 10x finer with Shift.
+    float perPixel = (vmax - vmin) / 200.0f;
+    if (io.KeyShift) perPixel *= 0.1f;
+    *v = std::clamp(*v - io.MouseDelta.y * perPixel, vmin, vmax);
+    edited = true;
+  }
 
+  // The dial: a 270-degree arc from lower-left to lower-right, with the
+  // indicator line at the value's angle.
+  ImDrawList* dl = ImGui::GetWindowDrawList();
+  ImVec2 center(pos.x + diameter * 0.5f, pos.y + diameter * 0.5f);
+  float radius = diameter * 0.5f - 2.0f;
+  float t = vmax > vmin ? (*v - vmin) / (vmax - vmin) : 0.0f;
+  const float start = 0.75f * 3.14159265f;  // lower-left
+  const float sweep = 1.5f * 3.14159265f;   // 270 degrees
+  bool hovered = ImGui::IsItemHovered() || ImGui::IsItemActive();
+  dl->PathArcTo(center, radius, start, start + sweep, 24);
+  dl->PathStroke(IM_COL32(70, 70, 88, 255), 0, 2.0f);
+  dl->PathArcTo(center, radius, start, start + sweep * t, 24);
+  dl->PathStroke(IM_COL32(110, 205, 160, 255), 0, 2.0f);
+  float angle = start + sweep * t;
+  dl->AddLine(center,
+              ImVec2(center.x + std::cos(angle) * radius * 0.75f,
+                     center.y + std::sin(angle) * radius * 0.75f),
+              hovered ? IM_COL32(235, 235, 245, 255)
+                      : IM_COL32(200, 200, 210, 255),
+              2.0f);
+  ImGui::PopID();
+  return edited;
+}
+
+// Writes the unit's override file from the UI values: every control that
+// differs from its declared default. Also called with everything back at
+// defaults - the (empty) overrides object still reaches the daemon and
+// rebuilds. The write is atomic, so a mid-write daemon poll never parses
+// a torn file.
+void writeUnitOverrides(UnitState& u) {
+  std::map<std::string, double> overrides;
+  for (auto& c : u.loaded.meta.controls) {
+    auto it = u.controlUi.find(c.name);
+    if (it != u.controlUi.end() && std::fabs(it->second.value - c.def) > 1e-6)
+      overrides[c.name] = it->second.value;
+  }
+  u.controlsError.clear();
+  std::string err;
+  if (!writeControlOverrides(controlsPathFor(u.unit.metadataPath), overrides,
+                             err))
+    u.controlsError = err;
+}
+
+// The live controls of one unit: a slider or knob per Core.Control
+// declaration. Edits write the unit's controls.json when the drag ends;
+// an attached `synthc watch` picks the file up and rebuilds, and the
+// pending marker clears once the new metadata echoes the value back.
+void drawControls(UnitState& u) {
+  auto& controls = u.loaded.meta.controls;
+  if (controls.empty()) return;
+  if (!ImGui::CollapsingHeader(
+          ("controls (" + std::to_string(controls.size()) + ")###controls")
+              .c_str(),
+          ImGuiTreeNodeFlags_DefaultOpen))
+    return;
+
+  bool anyDirty = false;
+  for (auto& c : controls) {
+    ControlUi& ui = u.controlUi[c.name];
+    ImGui::PushID(c.name.c_str());
+    bool edited = false, released = false;
+    if (c.kind == "knob") {
+      edited = knobFloat("##knob", &ui.value, (float)c.min, (float)c.max,
+                         36.0f);
+      released = ImGui::IsItemDeactivated() && ui.editing;
+      ImGui::SameLine();
+      ImGui::AlignTextToFramePadding();
+      ImGui::Text("%s  %.4g", c.name.c_str(), (double)ui.value);
+    } else {
+      ImGui::SetNextItemWidth(
+          std::max(160.0f, ImGui::GetContentRegionAvail().x * 0.45f));
+      edited = ImGui::SliderFloat("##slider", &ui.value, (float)c.min,
+                                  (float)c.max, "%.4g");
+      released = ImGui::IsItemDeactivatedAfterEdit();
+      ImGui::SameLine();
+      ImGui::TextUnformatted(c.name.c_str());
+    }
+    if (edited) {
+      ui.editing = true;
+      ui.dirty = true;
+    }
+    if (released) {
+      ui.editing = false;
+      writeUnitOverrides(u);
+    }
+    if (ui.dirty) {
+      ImGui::SameLine();
+      ImGui::TextColored(ImVec4(0.95f, 0.85f, 0.5f, 1.0f), "*");
+      if (ImGui::IsItemHovered())
+        ImGui::SetTooltip("waiting for a rebuild with this value\n"
+                          "(leave `synthc watch` running)");
+      anyDirty = true;
+    }
+    ImGui::SameLine();
+    if (ImGui::SmallButton("reset")) {
+      ui.value = (float)c.def;
+      ui.editing = false;
+      ui.dirty = true;
+      writeUnitOverrides(u);
+    }
+    ImGui::PopID();
+  }
+  if (controls.size() > 1) {
+    if (ImGui::SmallButton("all defaults")) {
+      for (auto& c : controls) {
+        ControlUi& ui = u.controlUi[c.name];
+        ui.value = (float)c.def;
+        ui.editing = false;
+        ui.dirty = true;
+      }
+      writeUnitOverrides(u);
+    }
+    if (anyDirty) {
+      ImGui::SameLine();
+      ImGui::TextDisabled("* pending rebuild");
+    }
+  }
+  if (!u.controlsError.empty())
+    ImGui::TextColored(ImVec4(1.0f, 0.45f, 0.45f, 1.0f), "controls: %s",
+                       u.controlsError.c_str());
+}
+
+// The contents of one waveform window: min/max envelope lanes per channel
+// (matching the .svg vis), wheel zoom about the cursor, right-drag pan,
+// left-drag selection, and (optionally looped) playback of the selection
+// or visible range. The window itself - dragging, resizing, closing - is
+// the caller's.
+void drawWaveContent(AppState& app, WavePanel& p) {
   if (!p.error.empty()) {
     ImGui::TextColored(ImVec4(1.0f, 0.45f, 0.45f, 1.0f), "cannot load %s: %s",
                        p.artifactPath.c_str(), p.error.c_str());
-    return true;
+    return;
   }
   if (p.wav.frames() == 0) {
     ImGui::TextDisabled("empty artifact");
-    return true;
+    return;
   }
 
   WaveView& v = p.view;
@@ -297,11 +483,17 @@ bool drawWavePanel(AppState& app, WavePanel& p) {
       double to = p.hasSelection() ? p.selEnd : v.end;
       app.playError.clear();
       if (!app.player.playRange(p.artifactPath, (int64_t)std::floor(from),
-                                (int64_t)std::ceil(to), app.playError) &&
+                                (int64_t)std::ceil(to), app.playError,
+                                p.loop) &&
           !app.playError.empty())
         app.playError = p.targetName + ": " + app.playError;
     }
   }
+  ImGui::SameLine();
+  // Replays the played range (the selection, usually) until stopped;
+  // toggling mid-play applies to the running playback too.
+  if (ImGui::Checkbox("loop", &p.loop) && isThisPlaying)
+    app.player.setLooping(p.loop);
   ImGui::SameLine();
   if (ImGui::SmallButton("zoom in")) v.zoomAt(0.5, 1.0 / 1.5);
   ImGui::SameLine();
@@ -332,8 +524,12 @@ bool drawWavePanel(AppState& app, WavePanel& p) {
   }
 
   int channels = (int)p.wav.channels.size();
-  float laneH = channels > 1 ? 80.0f : 140.0f;
   float laneGap = 4.0f;
+  // The canvas fills the rest of the window, so resizing the window
+  // resizes the lanes.
+  float availY = ImGui::GetContentRegionAvail().y;
+  float laneH =
+      std::max(48.0f, (availY - (channels - 1) * laneGap) / channels);
   ImVec2 canvasSize(std::max(120.0f, ImGui::GetContentRegionAvail().x),
                     channels * laneH + (channels - 1) * laneGap);
   ImVec2 pos = ImGui::GetCursorScreenPos();
@@ -418,7 +614,6 @@ bool drawWavePanel(AppState& app, WavePanel& p) {
                   IM_COL32(255, 230, 120, 220));
     }
   }
-  return true;
 }
 
 void drawFrame(AppState& app) {
@@ -464,6 +659,7 @@ void drawFrame(AppState& app) {
 
     drawDiagnostics(meta);
     drawTargets(app, u);
+    drawControls(u);
     ImGui::PopID();
   }
   if (anyMissing) {
@@ -474,16 +670,6 @@ void drawFrame(AppState& app) {
         app.projectDir.c_str(), app.projectDir.c_str());
   }
 
-  for (size_t i = 0; i < app.waves.size();) {
-    ImGui::PushID(app.waves[i].artifactPath.c_str());
-    bool keep = drawWavePanel(app, app.waves[i]);
-    ImGui::PopID();
-    if (keep)
-      i++;
-    else
-      app.waves.erase(app.waves.begin() + i);
-  }
-
   if (!app.playError.empty()) {
     ImGui::Spacing();
     ImGui::TextColored(ImVec4(1.0f, 0.45f, 0.45f, 1.0f), "playback: %s",
@@ -491,9 +677,30 @@ void drawFrame(AppState& app) {
   }
   if (app.player.playing()) {
     ImGui::Spacing();
-    ImGui::TextDisabled("playing %s", app.player.currentPath().c_str());
+    ImGui::TextDisabled("playing%s %s", app.player.looping() ? " (loop)" : "",
+                        app.player.currentPath().c_str());
   }
   ImGui::End();
+
+  // Each open waveform is its own floating window: drag it anywhere,
+  // resize it, close it with the title-bar button. The ### id keeps the
+  // window (and its position) stable across rebuilds and renames.
+  for (size_t i = 0; i < app.waves.size();) {
+    WavePanel& p = app.waves[i];
+    float cascade = 28.0f * (float)(p.spawnIndex % 8);
+    ImGui::SetNextWindowSize(ImVec2(660, 300), ImGuiCond_FirstUseEver);
+    ImGui::SetNextWindowPos(ImVec2(vp->WorkPos.x + 80 + cascade,
+                                   vp->WorkPos.y + 90 + cascade),
+                            ImGuiCond_FirstUseEver);
+    bool open = true;
+    std::string title = "wave: " + p.targetName + "###wave " + p.artifactPath;
+    if (ImGui::Begin(title.c_str(), &open)) drawWaveContent(app, p);
+    ImGui::End();
+    if (open)
+      i++;
+    else
+      app.waves.erase(app.waves.begin() + i);
+  }
 }
 
 int usage() {
@@ -610,16 +817,17 @@ int main(int argc, char** argv) {
   }
 
   if (selfTest) {
-    size_t loadedCount = 0, targetCount = 0, diagCount = 0;
+    size_t loadedCount = 0, targetCount = 0, diagCount = 0, controlCount = 0;
     for (auto& u : app.units) {
       if (u.loaded.ok) loadedCount++;
       targetCount += u.loaded.meta.targets.size();
       diagCount += u.loaded.meta.diagnostics.size();
+      controlCount += u.loaded.meta.controls.size();
     }
     std::printf(
         "self-test: metadata %zu/%zu loaded, %zu target(s), "
-        "%zu diagnostic(s)\n",
-        loadedCount, app.units.size(), targetCount, diagCount);
+        "%zu diagnostic(s), %zu control(s)\n",
+        loadedCount, app.units.size(), targetCount, diagCount, controlCount);
     for (auto& w : app.waves) {
       if (w.error.empty())
         std::printf("self-test: waveform '%s' %lld frame(s), %zu channel(s)\n",

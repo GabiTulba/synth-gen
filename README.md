@@ -35,6 +35,13 @@ additionally needs SDL2 (`scripts/install-deps.sh`); Dear ImGui is
 vendored. Without SDL2 the dev app is skipped and everything else still
 builds.
 
+The whole toolchain also runs on an Android phone under
+[Termux](https://termux.dev) with the Termux:X11 app as the display.
+After a one-time setup (`scripts/install-deps.sh`, plus the Termux:X11
+APK from its GitHub releases), `scripts/android-dev.sh <project>` starts
+the display and audio servers, a `synthc watch`, and the dev app
+fullscreen; see that script's header for details.
+
 ## A taste of the language
 
 ```ocaml

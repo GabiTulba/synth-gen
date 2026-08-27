@@ -294,6 +294,37 @@ TEST(player_reports_missing_file) {
   CHECK(!p.playing());
 }
 
+TEST(player_looping_reload_picks_up_rewritten_artifact) {
+  // A rebuild rewrites the artifact while it loop-plays: reloadIfLooping
+  // must re-read the file (here visibly shorter) rather than keep
+  // replaying its stale in-memory copy. The dummy audio driver stands in
+  // for a real device.
+  ::setenv("SDL_AUDIODRIVER", "dummy", 1);
+  TempDir tp;
+  std::string path = (tp.dir / "a.wav").string();
+  writeWav(path, 8000.0, 1, std::vector<double>(800, 0.5));
+  AudioPlayer p;
+  std::string err;
+  CHECK(p.playRange(path, 0, -1, err, true));
+  CHECK(p.playing());
+  CHECK_NEAR(p.rangeEndSeconds(), 0.1, 1e-9);
+
+  writeWav(path, 8000.0, 1, std::vector<double>(400, -0.5));
+  p.reloadIfLooping();
+  CHECK(p.playing());
+  CHECK(p.looping());
+  CHECK_NEAR(p.rangeEndSeconds(), 0.05, 1e-9);
+
+  // A rate/channel change can't reuse the open device; playback restarts
+  // on a fresh one, still looping the same (clamped) range.
+  writeWav(path, 16000.0, 1, std::vector<double>(400, 0.25));
+  p.reloadIfLooping();
+  CHECK(p.playing());
+  CHECK(p.looping());
+  CHECK_NEAR(p.rangeEndSeconds(), 0.025, 1e-9);
+  p.stop();
+}
+
 TEST(metadata_parses_controls) {
   TempDir tp;
   tp.write("metadata.json", R"({

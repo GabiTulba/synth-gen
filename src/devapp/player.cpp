@@ -77,6 +77,10 @@ bool AudioPlayer::playRange(const std::string& wavPath, int64_t fromFrame,
   // the range to re-queue from.
   data_ = std::move(data);
   path_ = wavPath;
+  fromFrame_ = fromFrame;
+  toFrame_ = toFrame;
+  rate_ = w.rate;
+  channels_ = (int)w.channels.size();
   rangeStartSec_ = w.rate > 0 ? (double)fromFrame / w.rate : 0;
   rangeEndSec_ = w.rate > 0 ? (double)toFrame / w.rate : 0;
   return true;
@@ -93,7 +97,43 @@ void AudioPlayer::stop() {
   data_.clear();
   data_.shrink_to_fit();
   path_.clear();
+  fromFrame_ = toFrame_ = 0;
+  rate_ = 0;
+  channels_ = 0;
   rangeStartSec_ = rangeEndSec_ = 0;
+}
+
+void AudioPlayer::reloadIfLooping() {
+  if (dev_ == 0 || !loop_) return;
+  WavData w;
+  try {
+    w = readWav(path_);
+  } catch (const std::exception&) {
+    return;  // keep looping the old audio
+  }
+  // The device is fixed to the original rate/channel spec; a format
+  // change needs a fresh device, so restart the playback (the range
+  // resets to its beginning - rare enough not to matter).
+  if (w.rate != rate_ || (int)w.channels.size() != channels_) {
+    std::string path = path_;
+    int64_t from = fromFrame_, to = toFrame_;
+    std::string ignored;
+    playRange(path, from, to, ignored, true);
+    return;
+  }
+  int64_t to = std::min<int64_t>(toFrame_, w.frames());
+  std::vector<float> data = interleaveToFloat(w, fromFrame_, to);
+  if (data.empty()) {  // the file shrank past the range; nothing to loop
+    stop();
+    return;
+  }
+  // Swap the re-queue buffer; the already-queued old copies drain first,
+  // so the new audio starts at a loop boundary. If the range's length
+  // changed, the playhead is approximate until those old copies drain
+  // (progress() divides by the new length).
+  data_ = std::move(data);
+  totalBytes_ = data_.size() * sizeof(float);
+  rangeEndSec_ = rate_ > 0 ? (double)to / rate_ : 0;
 }
 
 void AudioPlayer::update() {

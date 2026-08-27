@@ -223,6 +223,10 @@ struct AppState {
     // rewritten with the same size within the mtime granularity would
     // otherwise be missed and leave the panel showing stale audio.
     for (auto& w : waves) w.reloadIfChanged(rebuilt);
+    // Same for a looping playback: re-read the playing artifact so the
+    // loop picks up the rebuilt audio instead of replaying its stale
+    // in-memory copy forever.
+    if (rebuilt) player.reloadIfLooping();
   }
 };
 

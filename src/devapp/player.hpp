@@ -41,6 +41,14 @@ class AudioPlayer {
   // releases the device when (non-looping) playback finishes.
   void update();
 
+  // A rebuild rewrote the playing artifact: re-read it so the loop picks
+  // up the new audio at the next re-queue (i.e. within a loop iteration
+  // or two - loop-boundary-aligned, so no mid-cycle click). The played
+  // range stays the same, clamped to the new length. Non-looping playback
+  // is left alone (its audio is already queued in full), and a file that
+  // can't be re-read keeps the old audio.
+  void reloadIfLooping();
+
   bool playing() const { return dev_ != 0; }
   double progress() const;  // 0..1 through the range (wraps when looping)
   const std::string& currentPath() const { return path_; }
@@ -61,6 +69,9 @@ class AudioPlayer {
   bool loop_ = false;
   std::vector<float> data_;  // the range, kept for loop re-queueing
   std::string path_;
+  int64_t fromFrame_ = 0, toFrame_ = 0;  // the playing range, post-clamp
+  double rate_ = 0;    // the spec the device was opened with, for
+  int channels_ = 0;   // detecting a format change on reload
   double rangeStartSec_ = 0;
   double rangeEndSec_ = 0;
 };

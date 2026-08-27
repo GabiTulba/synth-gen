@@ -54,7 +54,8 @@ bool AudioPlayer::playRange(const std::string& wavPath, int64_t fromFrame,
   want.freq = (int)std::lround(w.rate);
   want.format = AUDIO_F32SYS;
   want.channels = (Uint8)w.channels.size();
-  want.samples = 4096;
+  want.samples = 1024;  // ~21ms at 48k: keeps the device's own buffering
+                        // from adding much to the live-reload latency
   SDL_AudioSpec have{};
   SDL_AudioDeviceID dev = SDL_OpenAudioDevice(nullptr, 0, &want, &have, 0);
   if (dev == 0) {
@@ -71,7 +72,7 @@ bool AudioPlayer::playRange(const std::string& wavPath, int64_t fromFrame,
   SDL_PauseAudioDevice(dev, 0);
   dev_ = dev;
   totalBytes_ = data.size() * sizeof(float);
-  queuedBytes_ = totalBytes_;
+  cursor_ = 0;  // the queued stream ends at end-of-range = offset 0
   loop_ = loop;
   // Kept even when not (yet) looping: setLooping(true) mid-play needs
   // the range to re-queue from.
@@ -92,7 +93,7 @@ void AudioPlayer::stop() {
     dev_ = 0;
   }
   totalBytes_ = 0;
-  queuedBytes_ = 0;
+  cursor_ = 0;
   loop_ = false;
   data_.clear();
   data_.shrink_to_fit();
@@ -127,40 +128,53 @@ void AudioPlayer::reloadIfLooping() {
     stop();
     return;
   }
-  // Cut over immediately at the current loop phase: drop the queued old
-  // audio and queue the rest of the new copy from the equivalent
-  // position. A small discontinuity at the splice is the price of
-  // hearing the change now instead of after the queued old copies drain
-  // (up to a whole loop iteration plus the read-ahead).
-  double phase = progress();
+  // Splice the new audio in exactly where the queued old audio ends
+  // (`cursor_`, sample-exact - nothing is guessed and nothing queued is
+  // dropped), through a short crossfade so the parameter step never
+  // lands as an amplitude step (a click). The old read-ahead before the
+  // splice is at most ~0.2s (see update()), which is the change's
+  // latency.
+  size_t frameBytes = (size_t)channels_ * sizeof(float);
+  size_t oldFrames = totalBytes_ / frameBytes;
+  size_t newFrames = data.size() / (size_t)channels_;
+  size_t c = cursor_ / frameBytes;
+  size_t newPos = c < newFrames ? c : 0;  // same phase, or wrap if shorter
+  size_t fade = (size_t)(rate_ * 0.015);
+  fade = std::min({fade, oldFrames - c, newFrames - newPos});
+  if (fade > 0) {
+    std::vector<float> mix(fade * (size_t)channels_);
+    for (size_t f = 0; f < fade; f++) {
+      float t = (float)(f + 1) / (float)(fade + 1);
+      for (int ch = 0; ch < channels_; ch++)
+        mix[f * (size_t)channels_ + ch] =
+            data_[(c + f) * (size_t)channels_ + ch] * (1.0f - t) +
+            data[(newPos + f) * (size_t)channels_ + ch] * t;
+    }
+    SDL_QueueAudio(dev_, mix.data(), (Uint32)(mix.size() * sizeof(float)));
+  }
   data_ = std::move(data);
   totalBytes_ = data_.size() * sizeof(float);
+  cursor_ = ((newPos + fade) % newFrames) * frameBytes;
   rangeEndSec_ = rate_ > 0 ? (double)to / rate_ : 0;
-  size_t frameBytes = (size_t)channels_ * sizeof(float);
-  size_t frames = totalBytes_ / frameBytes;
-  size_t offset = (size_t)(phase * (double)frames) % frames * frameBytes;
-  SDL_ClearQueuedAudio(dev_);
-  SDL_QueueAudio(dev_, (const char*)data_.data() + offset,
-                 (Uint32)(totalBytes_ - offset));
-  // One copy queued, of which `offset` bytes read as already consumed:
-  // progress() resumes at `phase` and update() tops up from here.
-  queuedBytes_ = totalBytes_;
 }
 
 void AudioPlayer::update() {
   if (dev_ == 0) return;
   size_t remaining = SDL_GetQueuedAudioSize(dev_);
   if (loop_ && totalBytes_ > 0) {
-    // Keep at least a quarter second (and at least one full copy of the
-    // range) queued ahead, so short selections survive frame hiccups.
-    double rate = rangeEndSec_ > rangeStartSec_
-                      ? totalBytes_ / (rangeEndSec_ - rangeStartSec_)
-                      : 0;
-    size_t minAhead = std::max(totalBytes_, (size_t)(rate * 0.25));
+    // Keep a short read-ahead queued as wrapping chunks from `cursor_`
+    // rather than whole copies of the range: on a reload, at most this
+    // much stale audio stands between the listener and the new sound.
+    // Long enough to survive a dropped UI frame or two (update() runs
+    // once per frame), short enough to feel live.
+    size_t minAhead = (size_t)(rate_ * channels_ * sizeof(float) * 0.2);
     while (remaining < minAhead) {
-      if (SDL_QueueAudio(dev_, data_.data(), (Uint32)totalBytes_) != 0) break;
-      remaining += totalBytes_;
-      queuedBytes_ += totalBytes_;
+      size_t chunk = std::min(totalBytes_ - cursor_, minAhead);
+      if (SDL_QueueAudio(dev_, (const char*)data_.data() + cursor_,
+                         (Uint32)chunk) != 0)
+        break;
+      cursor_ = (cursor_ + chunk) % totalBytes_;
+      remaining += chunk;
     }
   } else if (remaining == 0) {
     stop();
@@ -169,12 +183,14 @@ void AudioPlayer::update() {
 
 double AudioPlayer::progress() const {
   if (dev_ == 0 || totalBytes_ == 0) return 0;
-  double remaining = (double)SDL_GetQueuedAudioSize(dev_);
-  double consumed = (double)queuedBytes_ - remaining;
-  if (queuedBytes_ <= totalBytes_)  // never looped: plain 0..1
-    return std::clamp(consumed / (double)totalBytes_, 0.0, 1.0);
-  return std::fmod(std::max(consumed, 0.0), (double)totalBytes_) /
-         (double)totalBytes_;
+  // The queued stream ends at offset `cursor_` in the range, so the
+  // playing position is cursor_ minus what is still queued, wrapped into
+  // the range.
+  double pos = std::fmod(
+      (double)cursor_ - (double)SDL_GetQueuedAudioSize(dev_),
+      (double)totalBytes_);
+  if (pos < 0) pos += (double)totalBytes_;
+  return pos / (double)totalBytes_;
 }
 
 }  // namespace synth::devapp

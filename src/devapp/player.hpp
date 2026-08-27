@@ -41,13 +41,13 @@ class AudioPlayer {
   // releases the device when (non-looping) playback finishes.
   void update();
 
-  // A rebuild rewrote the playing artifact: re-read it and cut the loop
-  // over to the new audio immediately, at the same loop phase (dropping
-  // the queued old audio; a small splice discontinuity beats waiting a
-  // whole loop to hear the change). The played range stays the same,
-  // clamped to the new length. Non-looping playback is left alone (its
-  // audio is already queued in full), and a file that can't be re-read
-  // keeps the old audio.
+  // A rebuild rewrote the playing artifact: re-read it and splice the
+  // new audio in where the queued old audio ends (at most the ~0.2s
+  // read-ahead away), through a short crossfade so the cut is
+  // click-free. The played range stays the same, clamped to the new
+  // length. Non-looping playback is left alone (its audio is already
+  // queued in full), and a file that can't be re-read keeps the old
+  // audio.
   void reloadIfLooping();
 
   bool playing() const { return dev_ != 0; }
@@ -65,8 +65,8 @@ class AudioPlayer {
 
  private:
   uint32_t dev_ = 0;  // SDL_AudioDeviceID
-  size_t totalBytes_ = 0;   // one copy of the playing range
-  size_t queuedBytes_ = 0;  // total ever queued (grows while looping)
+  size_t totalBytes_ = 0;  // one copy of the playing range
+  size_t cursor_ = 0;  // byte offset in data_ where the queued stream ends
   bool loop_ = false;
   std::vector<float> data_;  // the range, kept for loop re-queueing
   std::string path_;

@@ -127,13 +127,24 @@ void AudioPlayer::reloadIfLooping() {
     stop();
     return;
   }
-  // Swap the re-queue buffer; the already-queued old copies drain first,
-  // so the new audio starts at a loop boundary. If the range's length
-  // changed, the playhead is approximate until those old copies drain
-  // (progress() divides by the new length).
+  // Cut over immediately at the current loop phase: drop the queued old
+  // audio and queue the rest of the new copy from the equivalent
+  // position. A small discontinuity at the splice is the price of
+  // hearing the change now instead of after the queued old copies drain
+  // (up to a whole loop iteration plus the read-ahead).
+  double phase = progress();
   data_ = std::move(data);
   totalBytes_ = data_.size() * sizeof(float);
   rangeEndSec_ = rate_ > 0 ? (double)to / rate_ : 0;
+  size_t frameBytes = (size_t)channels_ * sizeof(float);
+  size_t frames = totalBytes_ / frameBytes;
+  size_t offset = (size_t)(phase * (double)frames) % frames * frameBytes;
+  SDL_ClearQueuedAudio(dev_);
+  SDL_QueueAudio(dev_, (const char*)data_.data() + offset,
+                 (Uint32)(totalBytes_ - offset));
+  // One copy queued, of which `offset` bytes read as already consumed:
+  // progress() resumes at `phase` and update() tops up from here.
+  queuedBytes_ = totalBytes_;
 }
 
 void AudioPlayer::update() {

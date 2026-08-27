@@ -112,7 +112,7 @@ int cmdWatch(const std::string& dir, bool verbose) {
           std::cout << (rr.ok ? "build succeeded" : "build failed")
                     << "; watching for changes...\n";
         },
-        [] { return true; }, 300, log);
+        [] { return true; }, 100, log);
     return 0;
   }
   synth::watchProject(
@@ -122,7 +122,7 @@ int cmdWatch(const std::string& dir, bool verbose) {
         std::cout << (r.ok ? "build succeeded" : "build failed")
                   << "; watching for changes...\n";
       },
-      [] { return true; }, 300, log);
+      [] { return true; }, 100, log);
   return 0;
 }
 

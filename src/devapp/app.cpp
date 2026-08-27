@@ -57,6 +57,7 @@ struct UnitState {
   FileStamp stamp;
   std::map<std::string, ControlUi> controlUi;  // by control name
   std::string controlsError;  // last overrides-write failure, if any
+  double lastControlWriteSec = 0;  // throttles mid-drag override writes
 };
 
 // One open waveform panel - a floating, draggable window; any number can
@@ -199,7 +200,7 @@ struct AppState {
 
   void maybeRefresh(double dtMs) {
     sinceStatMs += dtMs;
-    if (sinceStatMs < 250.0) return;  // stat ~4x/second, reload on change
+    if (sinceStatMs < 100.0) return;  // stat ~10x/second, reload on change
     sinceStatMs = 0;
     // Adding or removing root build rules changes which metadata files
     // this app should be watching.
@@ -385,9 +386,10 @@ void writeUnitOverrides(UnitState& u) {
 }
 
 // The live controls of one unit: a slider or knob per Core.Control
-// declaration. Edits write the unit's controls.json when the drag ends;
-// an attached `synthc watch` picks the file up and rebuilds, and the
-// pending marker clears once the new metadata echoes the value back.
+// declaration. Edits write the unit's controls.json live while dragging
+// (throttled to ~10 writes/second) and once more on release; an attached
+// `synthc watch` picks each write up and rebuilds, and the pending
+// marker clears once the new metadata echoes the final value back.
 void drawControls(UnitState& u) {
   auto& controls = u.loaded.meta.controls;
   if (controls.empty()) return;
@@ -422,10 +424,17 @@ void drawControls(UnitState& u) {
     if (edited) {
       ui.editing = true;
       ui.dirty = true;
+      // Mid-drag writes make the sound track the drag; the throttle keeps
+      // a fast drag from flooding the daemon with rebuilds.
+      if (ImGui::GetTime() - u.lastControlWriteSec > 0.1) {
+        writeUnitOverrides(u);
+        u.lastControlWriteSec = ImGui::GetTime();
+      }
     }
     if (released) {
       ui.editing = false;
       writeUnitOverrides(u);
+      u.lastControlWriteSec = ImGui::GetTime();
     }
     if (ui.dirty) {
       ImGui::SameLine();

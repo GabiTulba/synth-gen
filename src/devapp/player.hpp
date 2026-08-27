@@ -41,12 +41,13 @@ class AudioPlayer {
   // releases the device when (non-looping) playback finishes.
   void update();
 
-  // A rebuild rewrote the playing artifact: re-read it so the loop picks
-  // up the new audio at the next re-queue (i.e. within a loop iteration
-  // or two - loop-boundary-aligned, so no mid-cycle click). The played
-  // range stays the same, clamped to the new length. Non-looping playback
-  // is left alone (its audio is already queued in full), and a file that
-  // can't be re-read keeps the old audio.
+  // A rebuild rewrote the playing artifact: re-read it and cut the loop
+  // over to the new audio immediately, at the same loop phase (dropping
+  // the queued old audio; a small splice discontinuity beats waiting a
+  // whole loop to hear the change). The played range stays the same,
+  // clamped to the new length. Non-looping playback is left alone (its
+  // audio is already queued in full), and a file that can't be re-read
+  // keeps the old audio.
   void reloadIfLooping();
 
   bool playing() const { return dev_ != 0; }

@@ -640,9 +640,13 @@ void drawFrame(AppState& app) {
   const ImGuiViewport* vp = ImGui::GetMainViewport();
   ImGui::SetNextWindowPos(vp->WorkPos);
   ImGui::SetNextWindowSize(vp->WorkSize);
+  // NoBringToFrontOnFocus/NoNavFocus keep this full-screen backdrop pinned
+  // behind everything: clicking it must not bury the floating wave panels.
   ImGui::Begin("synthgraph", nullptr,
                ImGuiWindowFlags_NoTitleBar | ImGuiWindowFlags_NoResize |
-                   ImGuiWindowFlags_NoMove | ImGuiWindowFlags_NoCollapse);
+                   ImGuiWindowFlags_NoMove | ImGuiWindowFlags_NoCollapse |
+                   ImGuiWindowFlags_NoBringToFrontOnFocus |
+                   ImGuiWindowFlags_NoNavFocus);
 
   bool anyMissing = false;
   for (size_t i = 0; i < app.units.size(); i++) {

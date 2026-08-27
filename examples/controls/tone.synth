@@ -1,33 +1,56 @@
-(* tone.synth — live controls: a filtered saw whose cutoff, gain and
-   decay are sliders/knobs in `synth-dev`. Run `synthc watch` here,
-   open the dev app next to it, and drag the controls: every release
-   writes an override into the build's controls.json and the daemon
-   rebuilds with the new values. *)
+(* tone.synth — live controls: a filtered saw whose cutoff and gain are
+   a slider and a knob in `synth-dev`, under an envelope whose four
+   durations are one multi_slider group. Run `synthc watch` here, open
+   the dev app next to it, and drag the controls: every release writes
+   an override into the build's controls.json and the daemon rebuilds
+   with the new values.
+
+   The group is the part a plain slider cannot express. Each lane has
+   its own range, and the four together must fit the 1s the render
+   lasts — so the dev app draws them linked: a lane stops where the
+   others' share begins, and the shaded stretch of its track is the
+   headroom still going spare. *)
 
 open Core
 open Core.Osc
 open Core.Fx
 open Core.Arrange
 open Core.Render
+open Core.Control
+open Core.Time
 
 let cutoff : Scalar =
   Control.slider ~name:"cutoff" ~min:100.0 ~max:4000.0 ~default:900.0
 ;;
 
-let decay : Scalar =
-  Control.slider ~name:"decay" ~min:0.5 ~max:12.0 ~default:4.0
+(* The envelope: four durations in seconds, each with its own range,
+   summing to no more than the 1s window the render cuts. *)
+let env : Scalar list =
+  Control.multi_slider ~name:"env" ~sum_min:0.0 ~sum_max:1.0
+    ~lanes:[{ name = "attack"; min = 0.0; max = 0.4; default = 0.02 };
+             { name = "decay"; min = 0.0; max = 0.5; default = 0.18 };
+             { name = "hold"; min = 0.0; max = 0.6; default = 0.30 };
+             { name = "release"; min = 0.0; max = 0.8; default = 0.40 }]
 ;;
+
+let attack : Timestamp = to_sec (List.nth ~xs:env ~i:0 ~default:0.0) ;;
+let decay : Timestamp = to_sec (List.nth ~xs:env ~i:1 ~default:0.0) ;;
+let hold : Timestamp = to_sec (List.nth ~xs:env ~i:2 ~default:0.0) ;;
+let release : Timestamp = to_sec (List.nth ~xs:env ~i:3 ~default:0.0) ;;
 
 let gain : Scalar =
   Control.knob ~name:"gain" ~min:0.0 ~max:1.0 ~default:0.6
 ;;
 
 let voice : Scalar Signal =
-  saw_bl 110.0 *. exp_decay decay |> lowpass ~cutoff:cutoff
+  saw_bl 110.0 |> lowpass ~cutoff:cutoff
 ;;
 
 let _ =
   voice *. gain
-  |> sample ~from:0s ~to:2s
+  |> gated ~attack:attack ~decay:decay ~sustain:0.7
+           ~release:release ~hold:hold
+  |> place ~at:0s
+  |> sample ~from:0s ~to:1s
   |> render ~name:"tone" ~rate:48000.0
 ;;

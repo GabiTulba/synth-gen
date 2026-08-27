@@ -1,4 +1,4 @@
-// synth external API v4.
+// synth external API v5.
 //
 // Implement a synth `external "this_file.cpp"` binding by defining, for a
 // declaration `let name ... = external "this_file.cpp"`:
@@ -121,6 +121,23 @@ struct ControlDecl {
   double def = 0;
 };
 
+// A group of live controls declared together, with a bound on their sum:
+// each lane is a named Scalar in its own [min, max], and the lane values
+// additionally satisfy sumMin <= sum <= sumMax. Declaring the group
+// yields one value per lane, in lane order. Lanes are ordinary controls
+// named "<group>.<lane>", so they share the project-wide control name
+// space; redeclaring a group with identical lanes and bounds yields the
+// same values.
+struct ControlGroupDecl {
+  struct Lane {
+    std::string name;  // lane identifier, unique within the group
+    double min = 0, max = 1, def = 0;
+  };
+  std::string name;  // group identifier, unique project-wide
+  std::vector<Lane> lanes;
+  double sumMin = 0, sumMax = 1;
+};
+
 // Host services available during one call.
 struct Ctx {
   // Apply a synth function value (an Opaque argument) to positional
@@ -133,6 +150,9 @@ struct Ctx {
   std::function<void(RenderDecl)> render;
   // Declare a live control and get its current value.
   std::function<double(ControlDecl)> control;
+  // Declare a sum-constrained group of live controls and get this
+  // build's value for every lane, in lane order.
+  std::function<std::vector<double>(ControlGroupDecl)> controlGroup;
 };
 
 }  // namespace synth::ext

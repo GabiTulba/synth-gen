@@ -10,6 +10,7 @@
 #include "metadata.hpp"
 #include "player.hpp"
 #include "test_framework.hpp"
+#include "projectstate.hpp"
 #include "wav.hpp"
 #include "waveform.hpp"
 
@@ -348,6 +349,78 @@ TEST(metadata_parses_controls) {
   CHECK_NEAR(m.meta.controls[0].def, 700.0, 1e-9);
   CHECK_NEAR(m.meta.controls[0].value, 900.0, 1e-9);
   CHECK(m.meta.controls[1].kind == "knob");
+  CHECK(m.meta.controls[0].group.empty());  // ungrouped: no group fields
+  CHECK(m.meta.controls[0].groupIndex == -1);
+}
+
+TEST(metadata_parses_multi_slider_group_lanes) {
+  TempDir tp;
+  tp.write("metadata.json", R"({
+  "project": "p", "status": "ok", "diagnostics": [], "targets": [],
+  "controls": [
+    {"name": "env.attack", "kind": "multi_slider", "min": 0, "max": 0.5,
+     "default": 0.05, "value": 0.1, "group": "env", "group_index": 0,
+     "sum_min": 0, "sum_max": 1},
+    {"name": "env.decay", "kind": "multi_slider", "min": 0, "max": 0.5,
+     "default": 0.15, "value": 0.2, "group": "env", "group_index": 1,
+     "sum_min": 0, "sum_max": 1}
+  ]
+})");
+  MetadataLoadResult m =
+      loadProjectMetadata((tp.dir / "metadata.json").string());
+  CHECK(m.ok);
+  CHECK(m.meta.controls.size() == 2);
+  CHECK(m.meta.controls[0].kind == "multi_slider");
+  CHECK(m.meta.controls[0].group == "env");
+  CHECK(m.meta.controls[0].groupIndex == 0);
+  CHECK_NEAR(m.meta.controls[0].sumMax, 1.0, 1e-9);
+  CHECK(m.meta.controls[1].groupIndex == 1);
+  // Lanes of one group arrive consecutively - the app relies on that to
+  // draw them as one linked block.
+  CHECK(m.meta.controls[1].group == m.meta.controls[0].group);
+}
+
+TEST(control_lane_band_is_what_the_other_lanes_leave) {
+  ControlMeta lane;
+  lane.name = "env.attack";
+  lane.kind = "multi_slider";
+  lane.group = "env";
+  lane.min = 0.0;
+  lane.max = 0.5;
+  lane.sumMin = 0.0;
+  lane.sumMax = 1.0;
+
+  // Plenty of budget left: the lane's own range is the whole band.
+  ControlBand free_ = controlLaneBand(lane, 0.2);
+  CHECK_NEAR(free_.lo, 0.0, 1e-12);
+  CHECK_NEAR(free_.hi, 0.5, 1e-12);
+
+  // The others have spent 0.7, so only 0.3 of the lane's 0.5 is reachable.
+  ControlBand tight = controlLaneBand(lane, 0.7);
+  CHECK_NEAR(tight.lo, 0.0, 1e-12);
+  CHECK_NEAR(tight.hi, 0.3, 1e-12);
+
+  // Budget exhausted: the lane is pinned, and the band is degenerate
+  // rather than inverted.
+  ControlBand pinned = controlLaneBand(lane, 1.2);
+  CHECK_NEAR(pinned.lo, 0.0, 1e-12);
+  CHECK_NEAR(pinned.hi, 0.0, 1e-12);
+  CHECK(pinned.hi >= pinned.lo);
+
+  // A sum_min floor pushes the *lower* limit up: with the others at 0.2
+  // and a floor of 0.6, this lane may not go below 0.4.
+  lane.sumMin = 0.6;
+  ControlBand floored = controlLaneBand(lane, 0.2);
+  CHECK_NEAR(floored.lo, 0.4, 1e-12);
+  CHECK_NEAR(floored.hi, 0.5, 1e-12);
+
+  // Anywhere inside the band keeps the group's sum inside its bounds -
+  // which is the whole point of clamping the drag to it.
+  double rest = 0.2;
+  for (double v : {floored.lo, 0.45, floored.hi}) {
+    CHECK(v + rest >= lane.sumMin - 1e-12);
+    CHECK(v + rest <= lane.sumMax + 1e-12);
+  }
 }
 
 TEST(control_overrides_roundtrip_through_a_build) {
@@ -407,4 +480,159 @@ TEST(control_overrides_write_is_atomic) {
   CHECK(ov != nullptr);
   CHECK_NEAR(ov->getNumber("a"), 1.5, 1e-12);
   CHECK_NEAR(ov->getNumber("b"), -2.0, 1e-12);
+}
+
+TEST(control_overrides_read_back) {
+  // What the UI wrote is what a restarted UI reads, so a value edited
+  // with no daemon attached is not lost on the next run.
+  TempDir tp;
+  std::string path = (tp.dir / "controls.json").string();
+  std::string err;
+  CHECK(writeControlOverrides(path, {{"gain", 0.75}, {"cutoff", 880.0}}, err));
+  std::map<std::string, double> back = readControlOverrides(path);
+  CHECK(back.size() == 2);
+  CHECK_NEAR(back["gain"], 0.75, 1e-12);
+  CHECK_NEAR(back["cutoff"], 880.0, 1e-12);
+
+  // Missing and malformed files are "no overrides", never an error.
+  CHECK(readControlOverrides((tp.dir / "nope.json").string()).empty());
+  tp.write("junk.json", "{not json");
+  CHECK(readControlOverrides((tp.dir / "junk.json").string()).empty());
+  tp.write("wrong.json", R"({"overrides": 3})");
+  CHECK(readControlOverrides((tp.dir / "wrong.json").string()).empty());
+}
+
+TEST(layout_points_at_a_project_state_file) {
+  // Beside the build.json the app was pointed at - never the same path
+  // as a unit's build metadata, which always lives under _build/.
+  TempDir tp;
+  tp.write("build.json", projectManifest("solo", {"a.synth"}));
+  MetadataLayout l = resolveMetadataLayout(tp.dir.string());
+  CHECK(l.projectStatePath == (tp.dir / "project.json").string());
+  CHECK(l.units[0].metadataPath ==
+        (tp.dir / "_build" / "metadata.json").string());
+
+  TempDir tr;
+  fs::create_directories(tr.dir / "sub");
+  tr.write("sub/build.json", projectManifest("sub", {"s.synth"}));
+  tr.write("build.json", rootManifest("multi", {"sub"}));
+  // Pointed at the root: the root's own project.json.
+  MetadataLayout root = resolveMetadataLayout(tr.dir.string());
+  CHECK(root.projectStatePath == (tr.dir / "project.json").string());
+  // Pointed at the subproject: the subproject's, not the root's.
+  MetadataLayout inner = resolveMetadataLayout((tr.dir / "sub").string());
+  CHECK(inner.projectStatePath == (tr.dir / "sub" / "project.json").string());
+}
+
+TEST(project_state_roundtrips) {
+  TempDir tp;
+  std::string path = (tp.dir / "project.json").string();
+
+  ProjectState s;
+  s.controls["."] = {{"cutoff", 2500.0}, {"gain", 0.42}};
+  s.controls["sub"] = {{"env.attack", 0.125}};
+  s.ui.window = WindowGeometry{true, 120, 64, 1280, 800};
+  // ImGui's dump is multi-line text with quotes and brackets in it - it
+  // has to survive JSON escaping byte for byte.
+  s.ui.imguiIni = "[Window][synthgraph]\nPos=0,19\nSize=900,581\nCollapsed=0\n";
+  WavePanelState p;
+  p.artifact = "_build/pluck/artifacts/demo.wav";
+  p.target = "demo";
+  p.viewStart = 1024.5;
+  p.viewEnd = 48000.25;
+  p.selStart = 2000;
+  p.selEnd = 3000;
+  p.loop = true;
+  s.ui.waves.push_back(p);
+  s.ui.sections["./diags"] = false;
+  s.ui.sections["./controls"] = true;
+
+  std::string err;
+  CHECK(saveProjectState(path, s, err));
+  CHECK(err.empty());
+  CHECK(!fs::exists(path + ".tmp"));  // temp + rename, no litter
+
+  ProjectStateLoad back = loadProjectState(path);
+  CHECK(back.found);
+  CHECK(back.state == s);
+}
+
+TEST(project_state_is_written_for_people_to_read) {
+  // It sits in the source tree next to build.json, so it is indented and
+  // its numbers are the shortest form that reads back identically -
+  // never the 0.41999999999999998 that %.17g would produce.
+  TempDir tp;
+  std::string path = (tp.dir / "project.json").string();
+  ProjectState s;
+  s.controls["."] = {{"gain", 0.42}, {"cutoff", 900.0}};
+  std::string err;
+  CHECK(saveProjectState(path, s, err));
+
+  std::ifstream in(path, std::ios::binary);
+  std::ostringstream ss;
+  ss << in.rdbuf();
+  std::string text = ss.str();
+  CHECK(text.find("\n  \"controls\": {") != std::string::npos);
+  CHECK(text.find("\"gain\": 0.42") != std::string::npos);
+  CHECK(text.find("\"cutoff\": 900") != std::string::npos);
+  CHECK(text.find("0.4199") == std::string::npos);
+  // Still valid JSON, and still exactly what we put in.
+  json::Value v;
+  std::string jsonErr;
+  CHECK(json::parse(text, v, jsonErr));
+  CHECK(loadProjectState(path).state == s);
+}
+
+TEST(project_state_empty_control_sets_are_omitted) {
+  // "back to defaults" is the absence of an entry, so a project that has
+  // been reset does not carry dead units around forever.
+  TempDir tp;
+  std::string path = (tp.dir / "project.json").string();
+  ProjectState s;
+  s.controls["."] = {};
+  s.controls["sub"] = {{"gain", 0.5}};
+  std::string err;
+  CHECK(saveProjectState(path, s, err));
+  ProjectState back = loadProjectState(path).state;
+  CHECK(back.controls.size() == 1);
+  CHECK(back.controls.count(".") == 0);
+  CHECK_NEAR(back.controls.at("sub").at("gain"), 0.5, 1e-12);
+}
+
+TEST(project_state_missing_or_corrupt_is_not_fatal) {
+  // The app must start even when the file is garbage - and `found` has to
+  // stay false, because the app treats that as "this project has no
+  // settings yet" and keeps whatever controls.json already holds rather
+  // than overwriting it from an empty state.
+  TempDir tp;
+  ProjectStateLoad none = loadProjectState((tp.dir / "project.json").string());
+  CHECK(!none.found);
+  CHECK(none.state == ProjectState{});
+
+  tp.write("bad.json", "{\"ui\": {\"waves\": [1, 2");
+  CHECK(!loadProjectState((tp.dir / "bad.json").string()).found);
+  tp.write("array.json", "[1, 2, 3]");
+  CHECK(!loadProjectState((tp.dir / "array.json").string()).found);
+
+  // Well-formed JSON with the wrong shapes: take what parses, drop the
+  // rest, and never crash. A zero-size window is not a usable placement.
+  tp.write("odd.json", R"({"controls": {"good": {"a": 1}, "bad": 7,
+                                        "mixed": {"n": 2, "s": "no"}},
+                           "ui": {"window": {"x": 1, "y": 2, "w": 0, "h": 0},
+                                  "imgui": 7,
+                                  "waves": [3, {"target": "no artifact"},
+                                            {"artifact": "a.wav"}],
+                                  "sections": {"a": true, "b": "not a bool"}}})");
+  ProjectStateLoad odd = loadProjectState((tp.dir / "odd.json").string());
+  CHECK(odd.found);
+  CHECK(odd.state.controls.size() == 2);
+  CHECK_NEAR(odd.state.controls.at("good").at("a"), 1.0, 1e-12);
+  CHECK(odd.state.controls.at("mixed").size() == 1);
+  CHECK(!odd.state.ui.window.valid);
+  CHECK(odd.state.ui.imguiIni.empty());
+  CHECK(odd.state.ui.waves.size() == 1);
+  CHECK(odd.state.ui.waves[0].artifact == "a.wav");
+  CHECK(odd.state.ui.waves[0].selStart == -1);
+  CHECK(odd.state.ui.sections.size() == 1);
+  CHECK(odd.state.ui.sections.at("a") == true);
 }

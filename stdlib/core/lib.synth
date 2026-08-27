@@ -376,6 +376,28 @@ module Control = struct
       : Scalar = external "control.cpp" ;;
   let knob ~name:String ~min:Scalar ~max:Scalar ~default:Scalar
       : Scalar = external "control.cpp" ;;
+  (* One lane of a multi_slider: its own range and default, named within
+     the group. *)
+  type Lane = { name : String; min : Scalar; max : Scalar;
+                default : Scalar } ;;
+  (* The boundary-crossing form of multi_slider. Records reach an
+     external as opaque handles, so the public entry point below flattens
+     each lane to a (name, min, max, default) tuple first. *)
+  let multi_slider_lanes ~name:String ~sum_min:Scalar ~sum_max:Scalar
+      ~lanes:(String, Scalar, Scalar, Scalar) list
+      : Scalar list = external "control.cpp" ;;
+  (* A group of lanes whose values sum into [sum_min, sum_max] - the
+     shape an envelope wants, where each duration has its own range and
+     the total has a budget. Yields one value per lane, in lane order
+     (index them with List.nth). Every lane is an ordinary control named
+     "<group>.<lane>", so lanes override and rebuild exactly like
+     sliders; the dev app draws the group as linked sliders that stop at
+     the sum budget. *)
+  let multi_slider ~name:String ~sum_min:Scalar ~sum_max:Scalar
+      ~lanes:Lane list : Scalar list =
+    multi_slider_lanes ~name:name ~sum_min:sum_min ~sum_max:sum_max
+      ~lanes:(List.map ~f:(fun l:Lane -> (l.name, l.min, l.max, l.default))
+                       ~xs:lanes) ;;
 end ;;
 
 (* --- Audio import (io.cpp) - build inputs, resolved relative to the
@@ -1297,6 +1319,10 @@ module Dsp = struct
   let knob ~name:String ~min:Scalar ~max:Scalar ~default:Scalar
       : Scalar =
     Control.knob ~name:name ~min:min ~max:max ~default:default ;;
+  let multi_slider ~name:String ~sum_min:Scalar ~sum_max:Scalar
+      ~lanes:Control.Lane list : Scalar list =
+    Control.multi_slider ~name:name ~sum_min:sum_min ~sum_max:sum_max
+                         ~lanes:lanes ;;
   (* time conversions *)
   let to_sec ~x:Scalar : Timestamp = Time.to_sec ~x:x ;;
   let to_ms ~x:Scalar : Timestamp = Time.to_ms ~x:x ;;

@@ -1,5 +1,6 @@
 #include "metadata.hpp"
 
+#include <algorithm>
 #include <filesystem>
 #include <fstream>
 #include <sstream>
@@ -73,6 +74,10 @@ MetadataLoadResult loadProjectMetadata(const std::string& path) {
       m.max = c.getNumber("max", 1);
       m.def = c.getNumber("default");
       m.value = c.getNumber("value", m.def);
+      m.group = c.getString("group");
+      m.groupIndex = (int)c.getNumber("group_index", -1);
+      m.sumMin = c.getNumber("sum_min");
+      m.sumMax = c.getNumber("sum_max");
       if (!m.name.empty()) r.meta.controls.push_back(std::move(m));
     }
   }
@@ -80,19 +85,30 @@ MetadataLoadResult loadProjectMetadata(const std::string& path) {
   return r;
 }
 
+ControlBand controlLaneBand(const ControlMeta& lane, double otherLanesSum) {
+  ControlBand b;
+  b.lo = std::max(lane.min, lane.sumMin - otherLanesSum);
+  b.hi = std::min(lane.max, lane.sumMax - otherLanesSum);
+  if (b.hi < b.lo) b.hi = b.lo;
+  return b;
+}
+
 std::string controlsPathFor(const std::string& metadataPath) {
   return (fs::path(metadataPath).parent_path() / "controls.json").string();
 }
 
-bool writeControlOverrides(const std::string& path,
-                           const std::map<std::string, double>& overrides,
-                           std::string& error) {
-  json::Value ov = json::makeObject();
-  for (auto& [name, value] : overrides) ov.set(name, json::makeNumber(value));
-  json::Value root = json::makeObject();
-  root.set("overrides", std::move(ov));
-
+bool writeFileAtomically(const std::string& path, const std::string& text,
+                         bool createParents, std::string& error) {
   fs::path target(path);
+  if (createParents && target.has_parent_path()) {
+    std::error_code ec;
+    fs::create_directories(target.parent_path(), ec);
+    if (ec) {
+      error = "cannot create '" + target.parent_path().string() +
+              "': " + ec.message();
+      return false;
+    }
+  }
   fs::path tmp = target;
   tmp += ".tmp";
   {
@@ -101,7 +117,7 @@ bool writeControlOverrides(const std::string& path,
       error = "cannot write '" + tmp.string() + "'";
       return false;
     }
-    out << json::serialize(root) << "\n";
+    out << text;
     if (!out) {
       error = "write to '" + tmp.string() + "' failed";
       return false;
@@ -115,6 +131,33 @@ bool writeControlOverrides(const std::string& path,
     return false;
   }
   return true;
+}
+
+bool writeControlOverrides(const std::string& path,
+                           const std::map<std::string, double>& overrides,
+                           std::string& error) {
+  json::Value ov = json::makeObject();
+  for (auto& [name, value] : overrides) ov.set(name, json::makeNumber(value));
+  json::Value root = json::makeObject();
+  root.set("overrides", std::move(ov));
+  return writeFileAtomically(path, json::serialize(root) + "\n",
+                             /*createParents=*/false, error);
+}
+
+std::map<std::string, double> readControlOverrides(const std::string& path) {
+  std::map<std::string, double> out;
+  std::ifstream in(path, std::ios::binary);
+  if (!in) return out;
+  std::ostringstream ss;
+  ss << in.rdbuf();
+  json::Value root;
+  std::string err;
+  if (!json::parse(ss.str(), root, err)) return out;
+  const json::Value* ov = root.get("overrides");
+  if (!ov || ov->kind != json::Value::Kind::Object) return out;
+  for (auto& [name, value] : ov->object)
+    if (value.kind == json::Value::Kind::Number) out[name] = value.number;
+  return out;
 }
 
 MetadataLayout resolveMetadataLayout(const std::string& projectDir) {
@@ -131,6 +174,10 @@ MetadataLayout resolveMetadataLayout(const std::string& projectDir) {
   }
   layout.rootDir = base.string();
   layout.manifestPath = (base / kManifestFileName).string();
+  // Beside the build.json the app was pointed at, not beside the root's:
+  // pointed at a subproject, its settings belong to that subproject.
+  layout.projectStatePath =
+      (fs::path(projectDir) / "project.json").lexically_normal().string();
 
   // The root dir itself: one unit per build rule, mirroring buildRoot's
   // output layout.

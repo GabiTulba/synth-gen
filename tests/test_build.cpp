@@ -4315,6 +4315,168 @@ let _ = render "t" 8000.0 (sample (constant x) 0s 10ms) ;;
   CHECK(!r2.ok);
 }
 
+TEST(build_multi_slider_declares_lanes_with_sum_bounds) {
+  TempDir tp;
+  tp.write("a.synth", R"(
+open Core open Core.Control open Core.Arrange open Core.Render open Core.Sig
+let env : Scalar list =
+  Control.multi_slider ~name:"env" ~sum_min:0.0 ~sum_max:1.0
+    ~lanes:[ { name = "attack";  min = 0.0; max = 0.5; default = 0.05 };
+             { name = "decay";   min = 0.0; max = 0.5; default = 0.15 };
+             { name = "sustain"; min = 0.0; max = 1.0; default = 0.60 } ] ;;
+let a : Scalar = List.nth ~xs:env ~i:0 ~default:0.0 ;;
+let _ = render "demo" 8000.0 (sample (constant a) 0s 100ms) ;;
+)");
+  tp.write("build.json", projectManifest("group", {"a.synth"}));
+  BuildResult r = buildProject(tp.dir.string());
+  for (auto& d : r.diags.items) std::cerr << d.message << "\n";
+  CHECK(r.ok);
+  // One ordinary control per lane, named "<group>.<lane>", in lane order.
+  CHECK(r.controls.size() == 3);
+  CHECK(r.controls[0].name == "env.attack");
+  CHECK(r.controls[0].kind == "multi_slider");
+  CHECK(r.controls[0].group == "env");
+  CHECK(r.controls[0].groupIndex == 0);
+  CHECK_NEAR(r.controls[0].max, 0.5, 1e-12);
+  CHECK_NEAR(r.controls[0].sumMax, 1.0, 1e-12);
+  CHECK_NEAR(r.controls[0].value, 0.05, 1e-12);
+  CHECK(r.controls[2].name == "env.sustain");
+  CHECK(r.controls[2].groupIndex == 2);
+  CHECK_NEAR(r.controls[2].value, 0.60, 1e-12);
+  // The lane value drives the render, and the metadata carries the group
+  // so the dev app can draw the lanes linked.
+  WavData w = readWav((tp.dir / "_build" / "artifacts" / "demo.wav").string());
+  CHECK_NEAR(w.channels[0][50], 0.05, 0.01);
+  std::string meta = slurp(tp.dir / "_build" / "metadata.json");
+  CHECK(meta.find("\"name\": \"env.attack\"") != std::string::npos);
+  CHECK(meta.find("\"group\": \"env\"") != std::string::npos);
+  CHECK(meta.find("\"group_index\": 2") != std::string::npos);
+  CHECK(meta.find("\"sum_max\": 1") != std::string::npos);
+}
+
+TEST(build_multi_slider_projects_overrides_into_the_sum_bounds) {
+  TempDir tp;
+  tp.write("a.synth", R"(
+open Core open Core.Control open Core.Arrange open Core.Render open Core.Sig
+let env : Scalar list =
+  Control.multi_slider ~name:"env" ~sum_min:0.5 ~sum_max:1.0
+    ~lanes:[ { name = "a"; min = 0.0; max = 1.0; default = 0.25 };
+             { name = "b"; min = 0.0; max = 1.0; default = 0.25 } ] ;;
+let a : Scalar = List.nth ~xs:env ~i:0 ~default:0.0 ;;
+let _ = render "demo" 8000.0 (sample (constant a) 0s 100ms) ;;
+)");
+  tp.write("build.json", projectManifest("proj", {"a.synth"}));
+  fs::create_directories(tp.dir / "_build");
+  // Hand-edited overrides: each lane is in its own range, but together
+  // they blow the budget. The group is projected back onto it.
+  {
+    std::ofstream out(tp.dir / "_build" / "controls.json");
+    out << R"({"overrides": {"env.a": 1.0, "env.b": 1.0}})";
+  }
+  BuildResult r = buildProject(tp.dir.string());
+  CHECK(r.ok);
+  CHECK(r.controls.size() == 2);
+  CHECK_NEAR(r.controls[0].value + r.controls[1].value, 1.0, 1e-9);
+  CHECK_NEAR(r.controls[0].value, 0.5, 1e-9);  // shed pro rata
+
+  // ...and the same in the other direction, under sum_min.
+  {
+    std::ofstream out(tp.dir / "_build" / "controls.json");
+    out << R"({"overrides": {"env.a": 0.0, "env.b": 0.0}})";
+  }
+  BuildResult r2 = buildProject(tp.dir.string());
+  CHECK(r2.ok);
+  CHECK_NEAR(r2.controls[0].value + r2.controls[1].value, 0.5, 1e-9);
+}
+
+TEST(build_multi_slider_validation_errors) {
+  TempDir tp;
+  auto source = [](const std::string& group) {
+    return "\nopen Core open Core.Control open Core.Arrange open Core.Render "
+           "open Core.Sig\nlet env : Scalar list =\n  " + group +
+           " ;;\nlet a : Scalar = List.nth ~xs:env ~i:0 ~default:0.0 ;;\n"
+           "let _ = render \"t\" 8000.0 (sample (constant a) 0s 10ms) ;;\n";
+  };
+  tp.write("build.json", projectManifest("badgroup", {"a.synth"}));
+
+  // The defaults must themselves satisfy the sum bounds.
+  tp.write("a.synth", source(
+      R"(Control.multi_slider ~name:"env" ~sum_min:0.0 ~sum_max:1.0
+    ~lanes:[ { name = "a"; min = 0.0; max = 1.0; default = 0.8 };
+             { name = "b"; min = 0.0; max = 1.0; default = 0.8 } ])"));
+  CHECK(!buildProject(tp.dir.string()).ok);
+
+  // A group no assignment can satisfy: the lane minimums already exceed
+  // sum_max.
+  tp.write("a.synth", source(
+      R"(Control.multi_slider ~name:"env" ~sum_min:0.0 ~sum_max:0.5
+    ~lanes:[ { name = "a"; min = 0.4; max = 1.0; default = 0.4 };
+             { name = "b"; min = 0.4; max = 1.0; default = 0.4 } ])"));
+  CHECK(!buildProject(tp.dir.string()).ok);
+
+  // Duplicate lane names.
+  tp.write("a.synth", source(
+      R"(Control.multi_slider ~name:"env" ~sum_min:0.0 ~sum_max:1.0
+    ~lanes:[ { name = "a"; min = 0.0; max = 1.0; default = 0.2 };
+             { name = "a"; min = 0.0; max = 1.0; default = 0.2 } ])"));
+  CHECK(!buildProject(tp.dir.string()).ok);
+
+  // A lane whose own default is out of its own range.
+  tp.write("a.synth", source(
+      R"(Control.multi_slider ~name:"env" ~sum_min:0.0 ~sum_max:2.0
+    ~lanes:[ { name = "a"; min = 0.0; max = 0.1; default = 0.9 } ])"));
+  CHECK(!buildProject(tp.dir.string()).ok);
+}
+
+TEST(build_multi_slider_redeclaration_rules) {
+  TempDir tp;
+  // The identical group twice is the same group.
+  tp.write("a.synth", R"(
+open Core open Core.Control open Core.Arrange open Core.Render open Core.Sig
+let g : Scalar list =
+  Control.multi_slider ~name:"env" ~sum_min:0.0 ~sum_max:1.0
+    ~lanes:[ { name = "a"; min = 0.0; max = 1.0; default = 0.3 } ] ;;
+let h : Scalar list =
+  Control.multi_slider ~name:"env" ~sum_min:0.0 ~sum_max:1.0
+    ~lanes:[ { name = "a"; min = 0.0; max = 1.0; default = 0.3 } ] ;;
+let x : Scalar = List.nth ~xs:g ~i:0 ~default:0.0
+                 +. List.nth ~xs:h ~i:0 ~default:0.0 ;;
+let _ = render "t" 8000.0 (sample (constant x) 0s 10ms) ;;
+)");
+  tp.write("build.json", projectManifest("redecl", {"a.synth"}));
+  BuildResult r = buildProject(tp.dir.string());
+  for (auto& d : r.diags.items) std::cerr << d.message << "\n";
+  CHECK(r.ok);
+  CHECK(r.controls.size() == 1);  // declared once, not twice
+
+  // Differing bounds under the same name is a conflict.
+  tp.write("a.synth", R"(
+open Core open Core.Control open Core.Arrange open Core.Render open Core.Sig
+let g : Scalar list =
+  Control.multi_slider ~name:"env" ~sum_min:0.0 ~sum_max:1.0
+    ~lanes:[ { name = "a"; min = 0.0; max = 1.0; default = 0.3 } ] ;;
+let h : Scalar list =
+  Control.multi_slider ~name:"env" ~sum_min:0.0 ~sum_max:2.0
+    ~lanes:[ { name = "a"; min = 0.0; max = 1.0; default = 0.3 } ] ;;
+let x : Scalar = List.nth ~xs:g ~i:0 ~default:0.0
+                 +. List.nth ~xs:h ~i:0 ~default:0.0 ;;
+let _ = render "t" 8000.0 (sample (constant x) 0s 10ms) ;;
+)");
+  CHECK(!buildProject(tp.dir.string()).ok);
+
+  // So is a plain control colliding with a lane's name.
+  tp.write("a.synth", R"(
+open Core open Core.Control open Core.Arrange open Core.Render open Core.Sig
+let s : Scalar = Control.slider ~name:"env.a" ~min:0.0 ~max:1.0 ~default:0.5 ;;
+let g : Scalar list =
+  Control.multi_slider ~name:"env" ~sum_min:0.0 ~sum_max:1.0
+    ~lanes:[ { name = "a"; min = 0.0; max = 1.0; default = 0.3 } ] ;;
+let x : Scalar = s +. List.nth ~xs:g ~i:0 ~default:0.0 ;;
+let _ = render "t" 8000.0 (sample (constant x) 0s 10ms) ;;
+)");
+  CHECK(!buildProject(tp.dir.string()).ok);
+}
+
 TEST(build_controls_cache_invalidates_on_override_change) {
   TempDir tp;
   tp.write("a.synth", R"(

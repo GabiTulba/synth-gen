@@ -102,6 +102,13 @@ compiler internals:
   still waiting for their rebuild; `reset` / `all defaults` clear
   overrides. See [`build-system.md`](build-system.md) for the file
   format.
+- Draws a `multi_slider` group as linked lanes under a budget bar. A
+  lane's track is banded: what it has taken, the headroom it can still
+  take, and the stretch the other lanes have spoken for, with a tick at
+  the limit. Dragging stops there — no lane ever moves on its own, so
+  lower another lane to take more here. The budget bar turns amber when
+  the group's sum reaches `sum_max`, and carries a mark at `sum_min`
+  when there is one.
 - Shows build diagnostics, including for failed builds (the metadata is
   emitted either way).
 - Live-refreshes by watching the metadata file, so pairing it with
@@ -110,7 +117,26 @@ compiler internals:
   metadata change also forces every open waveform window to reload —
   even when an artifact was rewritten with the same size inside the
   filesystem's mtime granularity.
-- `--self-test` exercises the metadata reader and player headlessly.
+- Remembers how you left it, in **`project.json` beside `build.json`**:
+  where every knob and slider is set, the window's placement and size,
+  each open waveform panel (with its zoom, selection and loop toggle),
+  and which sections you left collapsed. It is a source-tree file, not a
+  build output — it survives a clean, and it is yours to commit or ignore
+  as you see fit. See [`build-system.md`](build-system.md#live-controls)
+  for how it relates to `controls.json`.
+- The file is written only when something actually changed, at most once
+  a second, and once more on exit — so dragging a window or a knob does
+  not thrash the disk. It is indented and its numbers are the shortest
+  form that reads back identically (`0.42`, not `0.41999999999999998`),
+  because it is meant to be read and diffed. Deleting it resets
+  everything; a corrupt one is ignored rather than fatal.
+- Control values are therefore never lost, `synthc watch` attached or
+  not. On startup the app pushes what `project.json` records into the
+  unit's `controls.json`, so an attached daemon applies them; values no
+  build has used yet keep their `*` pending marker until one does.
+- `--self-test` reads `project.json` so it reports the values the real
+  app would show, but never writes it and never writes a `controls.json`:
+  a headless smoke test must not edit the project.
 
 SDL2 is the dev app's only external dependency
 (`scripts/install-deps.sh`); Dear ImGui is vendored under

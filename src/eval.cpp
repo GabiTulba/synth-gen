@@ -9,6 +9,7 @@
 #include <functional>
 #include <map>
 #include <optional>
+#include <set>
 #include <stdexcept>
 
 #include "external.hpp"
@@ -54,6 +55,7 @@ class Interp {
   const std::map<std::string, double>* overrides_ = nullptr;
   std::vector<ControlDecl>* controls_ = nullptr;
   std::map<std::string, ControlDecl> controlsByName_;
+  std::map<std::string, ControlGroupDecl> groupsByName_;
   std::map<std::string, Env> globals_;             // module -> name -> value
   std::map<std::string, SigPtr> fileCache_;        // absolute path -> signal
   mutable CoreListInfo coreList_;                  // resolved on first use
@@ -670,6 +672,11 @@ class Interp {
       c.span = currentDef_ ? currentDef_->span : Span{};
       return registerControl(std::move(c));
     };
+    svc.declareControlGroup = [this, &callerMod](ControlGroupDecl g) {
+      g.file = callerMod.parsed.path;
+      g.span = currentDef_ ? currentDef_->span : Span{};
+      return registerControlGroup(std::move(g));
+    };
     return it->second(svc, args);
   }
 
@@ -708,6 +715,154 @@ class Interp {
     controlsByName_.emplace(c.name, c);
     if (controls_) controls_->push_back(std::move(c));
     return v;
+  }
+
+  // Register a `multi_slider` group and resolve every lane's value for
+  // this build. Lanes are ordinary controls named "<group>.<lane>", so
+  // they share the project-wide name space and reach the metadata (and
+  // the overrides file) exactly like a slider does. What the group adds
+  // is a bound on the sum, which no per-lane clamp can enforce - so the
+  // whole group resolves in one call, here.
+  std::vector<double> registerControlGroup(ControlGroupDecl g) {
+    if (g.name.empty()) throw EvalError("multi_slider: empty group name");
+    if (g.lanes.empty())
+      throw EvalError("multi_slider '" + g.name + "': no lanes");
+    if (g.sumMax < g.sumMin)
+      throw EvalError("multi_slider '" + g.name + "': sum_max (" +
+                      std::to_string(g.sumMax) + ") is below sum_min (" +
+                      std::to_string(g.sumMin) + ")");
+    double sumMin = 0, sumMax = 0, sumDef = 0;
+    std::set<std::string> laneNames;
+    for (auto& l : g.lanes) {
+      if (l.name.empty())
+        throw EvalError("multi_slider '" + g.name + "': empty lane name");
+      if (!laneNames.insert(l.name).second)
+        throw EvalError("multi_slider '" + g.name + "': lane '" + l.name +
+                        "' declared twice");
+      if (!(l.max > l.min))
+        throw EvalError("multi_slider '" + g.name + "', lane '" + l.name +
+                        "': max (" + std::to_string(l.max) +
+                        ") must exceed min (" + std::to_string(l.min) + ")");
+      if (l.def < l.min || l.def > l.max)
+        throw EvalError("multi_slider '" + g.name + "', lane '" + l.name +
+                        "': default " + std::to_string(l.def) +
+                        " is outside [" + std::to_string(l.min) + ", " +
+                        std::to_string(l.max) + "]");
+      sumMin += l.min;
+      sumMax += l.max;
+      sumDef += l.def;
+    }
+    // A group whose lane ranges cannot reach the sum bounds has no
+    // solution at all; better to say so at the declaration than to hand
+    // back silently projected values every build.
+    if (sumMin > g.sumMax)
+      throw EvalError("multi_slider '" + g.name +
+                      "': the lane minimums already sum to " +
+                      std::to_string(sumMin) + ", above sum_max " +
+                      std::to_string(g.sumMax));
+    if (sumMax < g.sumMin)
+      throw EvalError("multi_slider '" + g.name +
+                      "': the lane maximums only sum to " +
+                      std::to_string(sumMax) + ", below sum_min " +
+                      std::to_string(g.sumMin));
+    if (sumDef < g.sumMin || sumDef > g.sumMax)
+      throw EvalError("multi_slider '" + g.name + "': the defaults sum to " +
+                      std::to_string(sumDef) + ", outside [" +
+                      std::to_string(g.sumMin) + ", " +
+                      std::to_string(g.sumMax) + "]");
+
+    // Redeclaration follows the slider/knob rule: an identical group is
+    // the same group and yields the same values.
+    std::vector<double> values(g.lanes.size());
+    auto prevIt = groupsByName_.find(g.name);
+    if (prevIt != groupsByName_.end()) {
+      const ControlGroupDecl& prev = prevIt->second;
+      bool same = prev.lanes.size() == g.lanes.size() &&
+                  prev.sumMin == g.sumMin && prev.sumMax == g.sumMax;
+      for (size_t i = 0; same && i < g.lanes.size(); i++)
+        same = prev.lanes[i].name == g.lanes[i].name &&
+               prev.lanes[i].min == g.lanes[i].min &&
+               prev.lanes[i].max == g.lanes[i].max &&
+               prev.lanes[i].def == g.lanes[i].def;
+      if (!same)
+        throw EvalError("multi_slider '" + g.name +
+                        "' redeclared with different lanes or sum bounds "
+                        "(also declared in " + prev.file + ")");
+      for (size_t i = 0; i < g.lanes.size(); i++)
+        values[i] = controlsByName_[g.name + "." + g.lanes[i].name].value;
+      return values;
+    }
+
+    // Start from the defaults, apply each lane's own override clamped to
+    // its own range, then put the group back inside its sum bounds: the
+    // overrides file is dev-tool state a hand edit can put out of range,
+    // and evaluation must not see an infeasible group.
+    for (size_t i = 0; i < g.lanes.size(); i++) {
+      values[i] = g.lanes[i].def;
+      if (overrides_) {
+        auto ov = overrides_->find(g.name + "." + g.lanes[i].name);
+        if (ov != overrides_->end())
+          values[i] = std::clamp(ov->second, g.lanes[i].min, g.lanes[i].max);
+      }
+    }
+    projectOntoSum(g, values);
+
+    for (size_t i = 0; i < g.lanes.size(); i++) {
+      ControlDecl c;
+      c.kind = ControlDecl::Kind::MultiSlider;
+      c.name = g.name + "." + g.lanes[i].name;
+      c.min = g.lanes[i].min;
+      c.max = g.lanes[i].max;
+      c.def = g.lanes[i].def;
+      c.value = values[i];
+      c.group = g.name;
+      c.groupIndex = (int)i;
+      c.sumMin = g.sumMin;
+      c.sumMax = g.sumMax;
+      c.file = g.file;
+      c.span = g.span;
+      if (controlsByName_.count(c.name))
+        throw EvalError("multi_slider '" + g.name + "': lane control '" +
+                        c.name + "' collides with an existing control (also "
+                        "declared in " + controlsByName_[c.name].file + ")");
+      controlsByName_.emplace(c.name, c);
+      if (controls_) controls_->push_back(std::move(c));
+    }
+    groupsByName_.emplace(g.name, std::move(g));
+    return values;
+  }
+
+  // Move `values` the shortest sensible distance back into
+  // [sumMin, sumMax]: shed the excess (or take up the shortfall)
+  // proportionally to how much room each lane has left toward its own
+  // bound, pinning lanes that run out and re-sharing what is left. Each
+  // pass pins at least one lane, so this settles in at most N passes.
+  static void projectOntoSum(const ControlGroupDecl& g,
+                             std::vector<double>& values) {
+    const double eps = 1e-12;
+    for (size_t pass = 0; pass <= g.lanes.size(); pass++) {
+      double sum = 0;
+      for (double v : values) sum += v;
+      double excess = sum > g.sumMax   ? sum - g.sumMax
+                      : sum < g.sumMin ? sum - g.sumMin
+                                       : 0.0;
+      if (std::fabs(excess) <= eps) return;
+      // Shedding (excess > 0) draws on the room down to each lane's min;
+      // taking up a shortfall draws on the room up to each lane's max.
+      double room = 0;
+      for (size_t i = 0; i < values.size(); i++)
+        room += excess > 0 ? values[i] - g.lanes[i].min
+                           : g.lanes[i].max - values[i];
+      if (room <= eps) return;  // nothing left to give; declaration-checked
+      double take = std::min(std::fabs(excess), room);
+      for (size_t i = 0; i < values.size(); i++) {
+        double lane = excess > 0 ? values[i] - g.lanes[i].min
+                                 : g.lanes[i].max - values[i];
+        double share = take * (lane / room);
+        values[i] += excess > 0 ? -share : share;
+        values[i] = std::clamp(values[i], g.lanes[i].min, g.lanes[i].max);
+      }
+    }
   }
 
   // Audio file paths resolve relative to the source file that mentions them;

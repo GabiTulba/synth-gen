@@ -40,6 +40,10 @@ struct ExtServices {
   // active override or the default); the caller fills declaration
   // attribution before registering.
   std::function<double(ControlDecl)> declareControl;
+  // Record a sum-constrained group of live controls and return this
+  // build's value for every lane, in lane order; the caller fills
+  // declaration attribution before registering.
+  std::function<std::vector<double>(ControlGroupDecl)> declareControlGroup;
 };
 
 using ExternalFn =

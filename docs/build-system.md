@@ -146,12 +146,49 @@ the value this build used), and the build reads overrides from
 { "overrides": { "cutoff": 900.0 } }
 ```
 
-Override values clamp to the declared range; unknown names and
+`Core.Control.multi_slider` declares a whole group at once: each lane
+becomes a control named `"<group>.<lane>"` (`env.attack`), so the file
+stays flat and per-lane —
+
+```json
+{ "overrides": { "cutoff": 900.0, "env.attack": 0.1, "env.decay": 0.2 } }
+```
+
+— and the lane's metadata entry carries `group`, `group_index`,
+`sum_min` and `sum_max` beside the usual fields, which is what lets the
+dev app draw the lanes linked.
+
+Override values clamp to the declared range; a group is then projected
+back inside its sum bounds, so a hand-edited file cannot hand the
+program an infeasible group. Unknown names and
 malformed files are ignored (defaults apply). When a build declares any
 control, its `controls.json` is recorded as a build input — so a
 running watch daemon rebuilds whenever the dev app (or anything else)
 writes it. That file is dev-tool state, not part of the project: it
 lives in `_build/` and never fails a build.
+
+`controls.json` is a build input, but it is not where control values
+*live*. The dev app records them — along with its window layout — in
+`project.json` next to `build.json`, and treats that file as
+authoritative: on startup it writes `controls.json` to match, and
+thereafter keeps the two in step. So `_build/` stays disposable (a clean
+loses nothing you set), while the build keeps reading one small file it
+already knows how to hash as an input. Both writes are
+temp-then-rename, so a daemon polling mid-write never sees a torn file.
+
+`project.json` records only values that differ from their declared
+default, exactly as `controls.json` does — defaults live in the `.synth`
+source, and this file records departures from them. It is grouped by
+unit (`"."` for a standalone project, otherwise the root's rule path):
+
+```json
+{ "version": 1, "controls": { ".": { "cutoff": 2500, "gain": 0.31 } },
+  "ui": { "window": { "x": 40, "y": 50, "w": 1024, "h": 700 } } }
+```
+
+The build itself neither reads `project.json` nor knows it exists; only
+the dev app does. Note the name is deliberately not `metadata.json` —
+that name belongs to the build's own output under `_build/`.
 
 ## Incremental builds & caching
 

@@ -29,15 +29,37 @@ struct DiagnosticMeta {
   std::string rendered;
 };
 
-// A live control the build declared (Core.Control.slider/knob): the app
-// shows it as a slider or knob and writes overrides for the daemon.
+// A live control the build declared (Core.Control.slider/knob/
+// multi_slider): the app shows it as a slider, a knob or one lane of a
+// linked group, and writes overrides for the daemon.
 struct ControlMeta {
   std::string name;
-  std::string kind;  // "slider" | "knob"
+  std::string kind;  // "slider" | "knob" | "multi_slider"
   double min = 0, max = 1;
   double def = 0;    // the declaration's default
   double value = 0;  // the value the last build used
+  // "multi_slider" lanes only: which group this lane belongs to, where
+  // it sits in it, and the bounds the group's values sum into. Lanes of
+  // one group arrive consecutively, in declaration order.
+  std::string group;
+  int groupIndex = -1;
+  double sumMin = 0, sumMax = 0;
 };
+
+// The stretch of a group lane's own range that the sum budget actually
+// leaves reachable, given what the *other* lanes currently hold. Take
+// lane i out of the sum and the budget left over is what lane i may
+// spend:
+//
+//   lo = max(min_i, sum_min - rest)    hi = min(max_i, sum_max - rest)
+//
+// Clamping a drag to [lo, hi] keeps the group inside its sum bounds
+// without any other lane moving on its own. A lane the budget has
+// pinned comes back degenerate (lo == hi) rather than inverted.
+struct ControlBand {
+  double lo = 0, hi = 0;
+};
+ControlBand controlLaneBand(const ControlMeta& lane, double otherLanesSum);
 
 struct ProjectMeta {
   std::string project;
@@ -68,6 +90,13 @@ struct MetadataLayout {
   std::string rootDir;  // artifact paths in metadata are relative to this
   std::string manifestPath;  // re-resolve the layout when this changes
   std::vector<MetadataUnit> units;
+  // The project's settings file (see projectstate.hpp): `metadata.json`
+  // beside the `build.json` the app was pointed at. It is keyed to what
+  // the app was *pointed at*, not to a single unit, because one window
+  // shows every unit at once. Note this is a source-tree file and never
+  // the same path as a unit's build metadata, which always sits under
+  // _build/.
+  std::string projectStatePath;
 };
 
 // Maps a project directory to the metadata file(s) its builds write,
@@ -89,6 +118,18 @@ std::string controlsPathFor(const std::string& metadataPath);
 bool writeControlOverrides(const std::string& path,
                            const std::map<std::string, double>& overrides,
                            std::string& error);
+
+// The overrides currently on disk. The app compares these against the
+// project's own saved values to decide whether the build still needs to
+// be told about them. A missing or malformed file yields an empty map,
+// not an error.
+std::map<std::string, double> readControlOverrides(const std::string& path);
+
+// Write temp + rename, so a reader polling mid-write never sees a torn
+// file. With `createParents`, the containing directory is created first
+// (the dev app writes state for projects that have never been built).
+bool writeFileAtomically(const std::string& path, const std::string& text,
+                         bool createParents, std::string& error);
 
 // Change detection for live refresh (§9): the v1 mechanism is watching the
 // metadata file, per the design doc's "simplest v1" note.

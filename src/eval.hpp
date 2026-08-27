@@ -121,13 +121,35 @@ struct RenderTarget {
 // `value` is what this build used: the active override, clamped to
 // [min, max], or `def`.
 struct ControlDecl {
-  enum class Kind { Slider, Knob };
+  enum class Kind { Slider, Knob, MultiSlider };
   Kind kind = Kind::Slider;
   std::string name;  // stable identifier, unique project-wide
   double min = 0, max = 1;
   double def = 0;
   double value = 0;
+  // MultiSlider lanes only: the group this lane belongs to, its position
+  // in the group, and the bounds the whole group's sum satisfies. `name`
+  // is "<group>.<lane>", so lanes are ordinary controls downstream.
+  std::string group;
+  int groupIndex = -1;
+  double sumMin = 0, sumMax = 0;
   std::string file;  // source file that declared it (for diagnostics)
+  Span span{};
+};
+
+// A `multi_slider` call (Core.Control): several named Scalar lanes, each
+// with its own range and default, whose values additionally sum into
+// [sumMin, sumMax]. Declaring it yields one value per lane; each lane
+// becomes a ControlDecl named "<group>.<lane>".
+struct ControlGroupDecl {
+  struct Lane {
+    std::string name;
+    double min = 0, max = 1, def = 0;
+  };
+  std::string name;  // group identifier, unique project-wide
+  std::vector<Lane> lanes;
+  double sumMin = 0, sumMax = 1;
+  std::string file;
   Span span{};
 };
 

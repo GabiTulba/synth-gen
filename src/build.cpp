@@ -174,8 +174,15 @@ void writeMetadata(const std::string& path, const BuildResult& r,
       << jsonEscape(c.kind) << "\", \"min\": " << formatDouble(c.min)
       << ", \"max\": " << formatDouble(c.max)
       << ", \"default\": " << formatDouble(c.defaultValue)
-      << ", \"value\": " << formatDouble(c.value) << "}"
-      << (i + 1 < r.controls.size() ? "," : "") << "\n";
+      << ", \"value\": " << formatDouble(c.value);
+    // Group fields only for grouped lanes, so metadata for a project
+    // without any multi_slider stays byte-identical.
+    if (!c.group.empty())
+      j << ", \"group\": \"" << jsonEscape(c.group)
+        << "\", \"group_index\": " << c.groupIndex
+        << ", \"sum_min\": " << formatDouble(c.sumMin)
+        << ", \"sum_max\": " << formatDouble(c.sumMax);
+    j << "}" << (i + 1 < r.controls.size() ? "," : "") << "\n";
   }
   j << "  ]\n";
   j << "}\n";
@@ -582,11 +589,17 @@ static BuildResult buildUnitImpl(const std::string& projectDir,
   for (auto& c : controls) {
     ControlInfo ci;
     ci.name = c.name;
-    ci.kind = c.kind == ControlDecl::Kind::Knob ? "knob" : "slider";
+    ci.kind = c.kind == ControlDecl::Kind::Knob          ? "knob"
+              : c.kind == ControlDecl::Kind::MultiSlider ? "multi_slider"
+                                                         : "slider";
     ci.min = c.min;
     ci.max = c.max;
     ci.defaultValue = c.def;
     ci.value = c.value;
+    ci.group = c.group;
+    ci.groupIndex = c.groupIndex;
+    ci.sumMin = c.sumMin;
+    ci.sumMax = c.sumMax;
     r.controls.push_back(std::move(ci));
   }
   if (!r.controls.empty()) {

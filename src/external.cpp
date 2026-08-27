@@ -316,6 +316,16 @@ ExternalFn loadUserExternal(const std::string& cppPath,
       c.def = d.def;
       return svc.declareControl(std::move(c));
     };
+    ctx.controlGroup = [&svc](ext::ControlGroupDecl d) {
+      ControlGroupDecl g;
+      g.name = std::move(d.name);
+      g.sumMin = d.sumMin;
+      g.sumMax = d.sumMax;
+      for (auto& l : d.lanes)
+        g.lanes.push_back(
+            ControlGroupDecl::Lane{std::move(l.name), l.min, l.max, l.def});
+      return svc.declareControlGroup(std::move(g));
+    };
 
     std::vector<ext::Value> extArgs;
     extArgs.reserve(args.size());

@@ -911,6 +911,19 @@ val Control.slider: name:String -> min:Scalar -> max:Scalar
 val Control.knob: name:String -> min:Scalar -> max:Scalar
          -> default:Scalar -> Scalar  (* same semantics; shown as a knob *)
 
+(* A group of controls whose values are related: each lane sits in its
+   own [min, max] and the lane values sum into [sum_min, sum_max]. One
+   value per lane comes back, in lane order. Each lane is an ordinary
+   control named "<group>.<lane>", so it overrides and rebuilds like a
+   slider; the dev app draws the group as linked sliders that stop at
+   the sum budget. The declaration must be satisfiable (defaults in
+   range, their sum inside the bounds, ranges able to reach them); an
+   override that would break the sum is projected back onto it. *)
+type Control.Lane = { name : String; min : Scalar; max : Scalar;
+                      default : Scalar }
+val Control.multi_slider: name:String -> sum_min:Scalar -> sum_max:Scalar
+                 -> lanes:Control.Lane list -> Scalar list
+
 (* file import *)
 val Io.load_mono: path:String -> Scalar Signal
 val Io.load_multi: path:String -> Vector Signal

@@ -28,6 +28,7 @@
 #include "imgui_impl_sdlrenderer2.h"
 #include "metadata.hpp"
 #include "player.hpp"
+#include "projectstate.hpp"
 #include "wav.hpp"
 #include "waveform.hpp"
 
@@ -56,9 +57,47 @@ struct UnitState {
   MetadataLoadResult loaded;
   FileStamp stamp;
   std::map<std::string, ControlUi> controlUi;  // by control name
+  // What the project's project.json records for this unit. It seeds the
+  // UI the first time a control is seen, so a knob keeps its position
+  // across restarts whether or not a build ever picked the value up.
+  std::map<std::string, double> savedControls;
   std::string controlsError;  // last overrides-write failure, if any
   double lastControlWriteSec = 0;  // throttles mid-drag override writes
 };
+
+// How a unit is named in the project state file: the rule path under a
+// root, and a fixed stand-in for the single-unit case (whose label is
+// empty).
+std::string unitKey(const UnitState& u) {
+  return u.unit.label.empty() ? std::string(".") : u.unit.label;
+}
+
+// The control values worth recording: everything that differs from its
+// declaration's default. The same set goes to the project state file and
+// to the build's controls.json, so the two can be compared directly.
+std::map<std::string, double> unitOverrides(const UnitState& u) {
+  std::map<std::string, double> overrides;
+  for (auto& c : u.loaded.meta.controls) {
+    auto it = u.controlUi.find(c.name);
+    if (it == u.controlUi.end()) continue;
+    // The UI value is a float; record the shortest decimal that reads
+    // back as that same float, so the file says 0.42 and not
+    // 0.41999998688697815.
+    if (std::fabs(it->second.value - c.def) > 1e-6) {
+      char buf[40];
+      double v = it->second.value;
+      for (int prec = 3; prec < 9; prec++) {
+        std::snprintf(buf, sizeof buf, "%.*g", prec, v);
+        if (std::strtof(buf, nullptr) == it->second.value) {
+          v = std::strtod(buf, nullptr);
+          break;
+        }
+      }
+      overrides[c.name] = v;
+    }
+  }
+  return overrides;
+}
 
 // One open waveform panel - a floating, draggable window; any number can
 // be open at once, each with its own zoom window and selection. Holds the
@@ -82,6 +121,27 @@ struct WavePanel {
     targetName = name;
     stamp = stampFile(path);
     load();
+  }
+
+  // Reopens a panel from saved UI state: the artifact is loaded as
+  // usual, then the saved zoom window and selection are put back,
+  // clamped to whatever length the file has now. A range that no longer
+  // makes sense (the artifact was re-rendered shorter, say) falls back
+  // to the fitted view with no selection.
+  void restore(const std::string& path, const WavePanelState& st) {
+    open(path, st.target);
+    loop = st.loop;
+    if (!error.empty() || wav.frames() == 0) return;
+    if (st.viewEnd > st.viewStart) {
+      view.start = st.viewStart;
+      view.end = st.viewEnd;
+      view.clamp();
+    }
+    if (st.selStart >= 0 && st.selEnd > st.selStart) {
+      selStart = std::min(st.selStart, (double)wav.frames());
+      selEnd = std::min(st.selEnd, (double)wav.frames());
+      if (selEnd - selStart < 1) selStart = selEnd = -1;
+    }
   }
 
   void load() {
@@ -141,6 +201,22 @@ struct AppState {
   std::vector<WavePanel> waves;
   int waveSpawnCount = 0;  // cascades new wave windows' first positions
 
+  // The project's settings file (projectstate.hpp). `state` is the last
+  // snapshot written to disk; the live state lives in the members it
+  // mirrors (the wave panels, `sections`, `windowGeom`, each unit's
+  // controlUi) plus ImGui's own settings, which we only re-serialize when
+  // ImGui says they changed. Saving compares a freshly captured snapshot
+  // against `state`, so nothing is written while the user is only looking
+  // at the window.
+  std::string statePath;
+  bool persist = true;  // writes are off under --self-test; reads are not
+  ProjectState state;
+  std::map<std::string, bool> sections;  // collapsing headers we own
+  WindowGeometry windowGeom;
+  bool imguiIniDirty = false;
+  double sinceSaveMs = 0;
+  std::string stateError;  // last save failure, if any
+
   WavePanel* findWave(const std::string& path) {
     for (auto& w : waves)
       if (w.artifactPath == path) return &w;
@@ -164,15 +240,147 @@ struct AppState {
     MetadataLayout layout = resolveMetadataLayout(projectDir);
     rootDir = layout.rootDir;
     manifestPath = layout.manifestPath;
+    statePath = layout.projectStatePath;
     std::vector<UnitState> next;
     for (auto& u : layout.units) {
       UnitState s;
+      bool seen = false;
       for (auto& prev : units)
-        if (prev.unit.metadataPath == u.metadataPath) s = std::move(prev);
+        if (prev.unit.metadataPath == u.metadataPath) {
+          s = std::move(prev);
+          seen = true;
+        }
       s.unit = u;
+      // A unit that just appeared (first resolve, or a rule added to the
+      // root while running) takes its control values from the project
+      // file; `state` is empty on the very first pass, and loadState
+      // fills these in once it has been read.
+      if (!seen) {
+        auto it = state.controls.find(unitKey(s));
+        if (it != state.controls.end()) s.savedControls = it->second;
+      }
       next.push_back(std::move(s));
     }
     units = std::move(next);
+  }
+
+  // Puts the saved waveform windows back. Artifacts are stored relative
+  // to the layout root, so a panel survives the tree moving; one whose
+  // artifact is missing is still reopened - it shows its load error and
+  // heals itself the moment a build writes the file.
+  void restoreWaves(const std::vector<WavePanelState>& saved) {
+    for (const WavePanelState& st : saved) {
+      std::string path = (fs::path(rootDir) / st.artifact).string();
+      if (findWave(path)) continue;
+      WavePanel w;
+      w.restore(path, st);
+      w.spawnIndex = waveSpawnCount++;
+      waves.push_back(std::move(w));
+    }
+  }
+
+  // Reads the project's settings and adopts them. Called once, after the
+  // first layout resolve. Reading always happens - `persist` only gates
+  // the writes - so even the self-test reports the values the real app
+  // would show.
+  void loadState() {
+    if (statePath.empty()) return;
+    ProjectStateLoad r = loadProjectState(statePath);
+    state = std::move(r.state);
+    sections = state.ui.sections;
+    // Carry the saved placement forward even when this run never touches
+    // it (--fullscreen, or a window nobody moves): capturing the state
+    // would otherwise write the geometry back out empty.
+    windowGeom = state.ui.window;
+    adoptSavedControls(r.found);
+  }
+
+  // Pushes the project's recorded control values into the units, and
+  // makes the build agree: controls.json is what a `synthc watch` daemon
+  // actually reads, so a value the project remembers has to be written
+  // there too or it would never take effect. Only a real difference is
+  // written - launching the app must not kick off a rebuild on its own.
+  //
+  // `found` false means this project has no settings file yet (or an
+  // unreadable one). Then the direction reverses: whatever controls.json
+  // already holds is the truth, and the first save records it. Adopting
+  // an empty state instead would silently wipe the user's overrides.
+  void adoptSavedControls(bool found) {
+    for (UnitState& u : units) {
+      std::string controlsPath = controlsPathFor(u.unit.metadataPath);
+      std::map<std::string, double> onDisk = readControlOverrides(controlsPath);
+      if (!found) {
+        u.savedControls = std::move(onDisk);
+        continue;
+      }
+      auto it = state.controls.find(unitKey(u));
+      u.savedControls =
+          it == state.controls.end() ? std::map<std::string, double>{}
+                                     : it->second;
+      if (onDisk == u.savedControls) continue;
+      if (!persist) continue;  // the self-test never writes into a build
+      std::string err;
+      if (!writeControlOverrides(controlsPath, u.savedControls, err))
+        u.controlsError = err;
+    }
+  }
+
+  // The project as it stands right now, in the form that gets written
+  // out. Control values come straight from the live UI, so a knob the
+  // user just moved is recorded even before a build has echoed it back.
+  ProjectState capture() const {
+    ProjectState s;
+    for (const UnitState& u : units) {
+      std::map<std::string, double> overrides = unitOverrides(u);
+      // A unit whose metadata has not loaded yet declares no controls, so
+      // capturing it would read as "no overrides" and drop what the file
+      // already records. Keep the saved values until we know better.
+      if (!u.loaded.ok) overrides = u.savedControls;
+      if (!overrides.empty()) s.controls[unitKey(u)] = std::move(overrides);
+    }
+    s.ui.window = windowGeom;
+    s.ui.imguiIni = state.ui.imguiIni;  // refreshed by save() when dirty
+    s.ui.sections = sections;
+    for (const WavePanel& w : waves) {
+      WavePanelState p;
+      std::error_code ec;
+      fs::path rel = fs::relative(w.artifactPath, rootDir, ec);
+      p.artifact = (ec || rel.empty()) ? w.artifactPath : rel.string();
+      p.target = w.targetName;
+      p.viewStart = w.view.start;
+      p.viewEnd = w.view.end;
+      p.selStart = w.selStart;
+      p.selEnd = w.selEnd;
+      p.loop = w.loop;
+      s.ui.waves.push_back(std::move(p));
+    }
+    return s;
+  }
+
+  // Writes the state, but only when it actually changed. Called on a
+  // timer rather than per edit: dragging a window, a zoom or a knob would
+  // otherwise rewrite the file every frame.
+  void save() {
+    if (!persist || statePath.empty()) return;
+    if (imguiIniDirty) {
+      size_t n = 0;
+      const char* ini = ImGui::SaveIniSettingsToMemory(&n);
+      state.ui.imguiIni.assign(ini, n);
+      imguiIniDirty = false;
+    }
+    ProjectState cur = capture();
+    if (cur == state) return;
+    state = std::move(cur);
+    stateError.clear();
+    std::string err;
+    if (!saveProjectState(statePath, state, err)) stateError = err;
+  }
+
+  void maybeSave(double dtMs) {
+    sinceSaveMs += dtMs;
+    if (sinceSaveMs < 750.0) return;
+    sinceSaveMs = 0;
+    save();
   }
 
   // Pulls the build's control values into the UI. A control the user is
@@ -183,7 +391,20 @@ struct AppState {
     for (auto& c : u.loaded.meta.controls) {
       auto it = u.controlUi.find(c.name);
       if (it == u.controlUi.end()) {
-        next[c.name].value = (float)c.value;
+        // First sight of this control. The build's value is the truth,
+        // except when the project remembers one no build has picked up
+        // yet (set with no `synthc watch` attached, then restarted):
+        // show that one, still marked pending.
+        ControlUi fresh;
+        fresh.value = (float)c.value;
+        auto saved = u.savedControls.find(c.name);
+        double seedTol = std::max(1e-9, 1e-4 * (c.max - c.min));
+        if (saved != u.savedControls.end() &&
+            std::fabs(saved->second - c.value) > seedTol) {
+          fresh.value = (float)saved->second;
+          fresh.dirty = true;
+        }
+        next[c.name] = fresh;
         continue;
       }
       ControlUi ui = it->second;
@@ -237,13 +458,36 @@ std::string formatSeconds(double s) {
   return buf;
 }
 
-void drawDiagnostics(const ProjectMeta& meta) {
+// A section header whose open/closed state outlives the process. ImGui's
+// ini carries window geometry but deliberately not tree state, so the few
+// headers the app owns are tracked here and saved with the rest of the UI
+// state. `key` must be stable across rebuilds; `defOpen` only applies the
+// first time this run sees the header.
+bool persistentHeader(AppState& app, const std::string& key,
+                      const std::string& label, bool defOpen) {
+  auto [it, inserted] = app.sections.try_emplace(key, defOpen);
+  if (inserted) it->second = defOpen;
+  ImGui::SetNextItemOpen(it->second, ImGuiCond_Once);
+  bool open = ImGui::CollapsingHeader(label.c_str());
+  it->second = open;
+  return open;
+}
+
+// A unit's key prefix for `sections`: the rule label under a root, and a
+// fixed stand-in for the single-unit case (where labels are empty).
+std::string sectionKey(const UnitState& u, const char* section) {
+  return (u.unit.label.empty() ? std::string(".") : u.unit.label) + "/" +
+         section;
+}
+
+void drawDiagnostics(AppState& app, const UnitState& u) {
+  const ProjectMeta& meta = u.loaded.meta;
   if (meta.diagnostics.empty()) return;
   ImGui::PushStyleColor(ImGuiCol_Text, ImVec4(1.0f, 0.45f, 0.45f, 1.0f));
-  bool open = ImGui::CollapsingHeader(
-      ("diagnostics (" + std::to_string(meta.diagnostics.size()) + ")###diags")
-          .c_str(),
-      ImGuiTreeNodeFlags_DefaultOpen);
+  bool open = persistentHeader(
+      app, sectionKey(u, "diags"),
+      "diagnostics (" + std::to_string(meta.diagnostics.size()) + ")###diags",
+      true);
   ImGui::PopStyleColor();
   if (!open) return;
   for (auto& d : meta.diagnostics) {
@@ -366,18 +610,91 @@ bool knobFloat(const char* id, float* v, float vmin, float vmax,
   return edited;
 }
 
+// One lane of a multi_slider group. The lane's own range spans the whole
+// track, but the group's sum budget usually puts part of that range out
+// of reach, so the track is drawn in three bands: what the lane has
+// taken, the headroom it can still take, and the stretch the other lanes
+// have spoken for. Dragging stops at [lo, hi] - no other lane ever moves
+// on its own. Returns true while the drag is changing the value.
+bool laneSliderFloat(const char* id, float* v, float vmin, float vmax,
+                     float lo, float hi, float width, float height) {
+  ImGui::PushID(id);
+  ImVec2 pos = ImGui::GetCursorScreenPos();
+  ImGui::InvisibleButton("lane", ImVec2(width, height));
+  bool edited = false;
+  float span = vmax - vmin;
+  if (ImGui::IsItemActive() && span > 0) {
+    // Absolute positioning, like ImGui's own slider: the value follows
+    // the cursor across the track, then clamps to the reachable band.
+    float t = (ImGui::GetIO().MousePos.x - pos.x) / width;
+    float want = vmin + std::clamp(t, 0.0f, 1.0f) * span;
+    float next = std::clamp(want, lo, hi);
+    if (next != *v) {
+      *v = next;
+      edited = true;
+    }
+  }
+
+  ImDrawList* dl = ImGui::GetWindowDrawList();
+  auto atX = [&](float value) {
+    float t = span > 0 ? (value - vmin) / span : 0.0f;
+    return pos.x + std::clamp(t, 0.0f, 1.0f) * width;
+  };
+  float y0 = pos.y, y1 = pos.y + height;
+  // Out of reach (the other lanes' share), then reachable, then taken.
+  dl->AddRectFilled(pos, ImVec2(pos.x + width, y1), IM_COL32(34, 34, 44, 255));
+  dl->AddRectFilled(ImVec2(atX(lo), y0), ImVec2(atX(hi), y1),
+                    IM_COL32(70, 70, 88, 255));
+  dl->AddRectFilled(ImVec2(atX(*v), y0), ImVec2(atX(hi), y1),
+                    IM_COL32(74, 108, 92, 255));
+  dl->AddRectFilled(ImVec2(pos.x, y0), ImVec2(atX(*v), y1),
+                    IM_COL32(110, 205, 160, 255));
+  // The limits themselves: where the sum budget stops this lane.
+  if (hi < vmax - 1e-6f)
+    dl->AddLine(ImVec2(atX(hi), y0), ImVec2(atX(hi), y1),
+                IM_COL32(235, 200, 110, 230), 2.0f);
+  if (lo > vmin + 1e-6f)
+    dl->AddLine(ImVec2(atX(lo), y0), ImVec2(atX(lo), y1),
+                IM_COL32(235, 200, 110, 230), 2.0f);
+  bool hot = ImGui::IsItemHovered() || ImGui::IsItemActive();
+  dl->AddLine(ImVec2(atX(*v), y0 - 1), ImVec2(atX(*v), y1 + 1),
+              hot ? IM_COL32(245, 245, 250, 255) : IM_COL32(205, 205, 215, 255),
+              2.0f);
+  dl->AddRect(pos, ImVec2(pos.x + width, y1), IM_COL32(90, 90, 110, 255));
+  ImGui::PopID();
+  return edited;
+}
+
+// How much of the group's budget is spent, drawn as a bar: the filled
+// part is the current sum against sum_max, and the tick (when there is
+// one) is the sum_min the group must stay above.
+void groupBudgetBar(double sum, double sumMin, double sumMax, float width,
+                    float height) {
+  ImVec2 pos = ImGui::GetCursorScreenPos();
+  ImGui::Dummy(ImVec2(width, height));
+  ImDrawList* dl = ImGui::GetWindowDrawList();
+  ImVec2 end(pos.x + width, pos.y + height);
+  dl->AddRectFilled(pos, end, IM_COL32(34, 34, 44, 255));
+  double t = sumMax > 0 ? std::clamp(sum / sumMax, 0.0, 1.0) : 0.0;
+  bool full = sumMax > 0 && sum >= sumMax - 1e-6;
+  dl->AddRectFilled(pos, ImVec2(pos.x + width * (float)t, end.y),
+                    full ? IM_COL32(235, 200, 110, 255)
+                         : IM_COL32(110, 205, 160, 255));
+  if (sumMin > 0 && sumMax > 0) {
+    float x = pos.x + width * (float)std::clamp(sumMin / sumMax, 0.0, 1.0);
+    dl->AddLine(ImVec2(x, pos.y), ImVec2(x, end.y), IM_COL32(150, 170, 235, 255),
+                2.0f);
+  }
+  dl->AddRect(pos, end, IM_COL32(90, 90, 110, 255));
+}
+
 // Writes the unit's override file from the UI values: every control that
 // differs from its declared default. Also called with everything back at
 // defaults - the (empty) overrides object still reaches the daemon and
 // rebuilds. The write is atomic, so a mid-write daemon poll never parses
 // a torn file.
 void writeUnitOverrides(UnitState& u) {
-  std::map<std::string, double> overrides;
-  for (auto& c : u.loaded.meta.controls) {
-    auto it = u.controlUi.find(c.name);
-    if (it != u.controlUi.end() && std::fabs(it->second.value - c.def) > 1e-6)
-      overrides[c.name] = it->second.value;
-  }
+  std::map<std::string, double> overrides = unitOverrides(u);
   u.controlsError.clear();
   std::string err;
   if (!writeControlOverrides(controlsPathFor(u.unit.metadataPath), overrides,
@@ -385,22 +702,145 @@ void writeUnitOverrides(UnitState& u) {
     u.controlsError = err;
 }
 
+// Marks a control edited and pushes it to the daemon. Mid-drag writes
+// make the sound track the drag; the throttle keeps a fast drag from
+// flooding the daemon with rebuilds, and the release write always lands.
+void noteControlEdit(UnitState& u, ControlUi& ui, bool released) {
+  ui.dirty = true;
+  if (released) {
+    ui.editing = false;
+    writeUnitOverrides(u);
+    u.lastControlWriteSec = ImGui::GetTime();
+    return;
+  }
+  ui.editing = true;
+  if (ImGui::GetTime() - u.lastControlWriteSec > 0.1) {
+    writeUnitOverrides(u);
+    u.lastControlWriteSec = ImGui::GetTime();
+  }
+}
+
+// The pending-rebuild marker and the per-control reset button, shared by
+// plain controls and group lanes.
+bool drawControlTail(UnitState& u, ControlUi& ui, const ControlMeta& c) {
+  bool dirty = ui.dirty;
+  if (dirty) {
+    ImGui::SameLine();
+    ImGui::TextColored(ImVec4(0.95f, 0.85f, 0.5f, 1.0f), "*");
+    if (ImGui::IsItemHovered())
+      ImGui::SetTooltip("waiting for a rebuild with this value\n"
+                        "(leave `synthc watch` running)");
+  }
+  ImGui::SameLine();
+  if (ImGui::SmallButton("reset")) {
+    ui.value = (float)c.def;
+    ui.editing = false;
+    ui.dirty = true;
+    writeUnitOverrides(u);
+  }
+  return dirty;
+}
+
+// One multi_slider group: lanes that share a budget for their sum. Each
+// lane is drawn against the band the other lanes leave it
+// (controlLaneBand), and dragging clamps to that band - so the group
+// invariant holds after every drag without any lane moving on its own.
+// Returns true if any lane is waiting on a rebuild.
+bool drawControlGroup(UnitState& u, const std::vector<ControlMeta>& controls,
+                      size_t first, size_t count) {
+  const ControlMeta& head = controls[first];
+  double sum = 0;
+  for (size_t k = 0; k < count; k++)
+    sum += u.controlUi[controls[first + k].name].value;
+
+  ImGui::PushID(head.group.c_str());
+  float width = std::max(200.0f * gUiScale,
+                         ImGui::GetContentRegionAvail().x * 0.45f);
+  ImGui::AlignTextToFramePadding();
+  ImGui::TextColored(ImVec4(0.7f, 0.8f, 1.0f, 1.0f), "%s", head.group.c_str());
+  ImGui::SameLine();
+  if (head.sumMin > 0)
+    ImGui::TextDisabled("sum %.4g of %.4g (at least %.4g)", sum, head.sumMax,
+                        head.sumMin);
+  else
+    ImGui::TextDisabled("sum %.4g of %.4g", sum, head.sumMax);
+  groupBudgetBar(sum, head.sumMin, head.sumMax, width, 6.0f * gUiScale);
+
+  bool anyDirty = false;
+  for (size_t k = 0; k < count; k++) {
+    const ControlMeta& c = controls[first + k];
+    ControlUi& ui = u.controlUi[c.name];
+    ControlBand band = controlLaneBand(c, sum - ui.value);
+    float lo = (float)band.lo, hi = (float)band.hi;
+    ImGui::PushID((int)k);
+    bool edited = laneSliderFloat("##lane", &ui.value, (float)c.min,
+                                  (float)c.max, lo, hi, width,
+                                  16.0f * gUiScale);
+    bool released = ImGui::IsItemDeactivated() && ui.editing;
+    if (edited || released) {
+      sum = 0;
+      for (size_t j = 0; j < count; j++)
+        sum += u.controlUi[controls[first + j].name].value;
+      noteControlEdit(u, ui, released);
+    }
+    ImGui::SameLine();
+    ImGui::AlignTextToFramePadding();
+    // The lane's own name; the group already named itself above.
+    const char* lane = c.name.c_str() + head.group.size() + 1;
+    ImGui::Text("%s  %.4g", lane, (double)ui.value);
+    if (hi < c.max - 1e-6) {
+      ImGui::SameLine();
+      ImGui::TextDisabled("(<= %.4g)", (double)hi);
+      if (ImGui::IsItemHovered())
+        ImGui::SetTooltip("the other lanes have spoken for the rest of the "
+                          "budget;\nlower one of them to take more here");
+    }
+    anyDirty |= drawControlTail(u, ui, c);
+    ImGui::PopID();
+  }
+
+  if (ImGui::SmallButton("group defaults")) {
+    for (size_t k = 0; k < count; k++) {
+      ControlUi& ui = u.controlUi[controls[first + k].name];
+      ui.value = (float)controls[first + k].def;
+      ui.editing = false;
+      ui.dirty = true;
+    }
+    writeUnitOverrides(u);
+  }
+  ImGui::PopID();
+  return anyDirty;
+}
+
 // The live controls of one unit: a slider or knob per Core.Control
-// declaration. Edits write the unit's controls.json live while dragging
-// (throttled to ~10 writes/second) and once more on release; an attached
-// `synthc watch` picks each write up and rebuilds, and the pending
-// marker clears once the new metadata echoes the final value back.
-void drawControls(UnitState& u) {
+// declaration, and one linked block per multi_slider group. Edits write
+// the unit's controls.json live while dragging (throttled to ~10
+// writes/second) and once more on release; an attached `synthc watch`
+// picks each write up and rebuilds, and the pending marker clears once
+// the new metadata echoes the final value back.
+void drawControls(AppState& app, UnitState& u) {
   auto& controls = u.loaded.meta.controls;
   if (controls.empty()) return;
-  if (!ImGui::CollapsingHeader(
-          ("controls (" + std::to_string(controls.size()) + ")###controls")
-              .c_str(),
-          ImGuiTreeNodeFlags_DefaultOpen))
+  if (!persistentHeader(
+          app, sectionKey(u, "controls"),
+          "controls (" + std::to_string(controls.size()) + ")###controls",
+          true))
     return;
 
   bool anyDirty = false;
-  for (auto& c : controls) {
+  for (size_t i = 0; i < controls.size();) {
+    // Lanes of one group arrive consecutively (declaration order); they
+    // are drawn together because each lane's limits depend on the rest.
+    if (!controls[i].group.empty()) {
+      size_t n = 1;
+      while (i + n < controls.size() &&
+             controls[i + n].group == controls[i].group)
+        n++;
+      anyDirty |= drawControlGroup(u, controls, i, n);
+      i += n;
+      continue;
+    }
+    const ControlMeta& c = controls[i++];
     ControlUi& ui = u.controlUi[c.name];
     ImGui::PushID(c.name.c_str());
     bool edited = false, released = false;
@@ -421,36 +861,8 @@ void drawControls(UnitState& u) {
       ImGui::SameLine();
       ImGui::TextUnformatted(c.name.c_str());
     }
-    if (edited) {
-      ui.editing = true;
-      ui.dirty = true;
-      // Mid-drag writes make the sound track the drag; the throttle keeps
-      // a fast drag from flooding the daemon with rebuilds.
-      if (ImGui::GetTime() - u.lastControlWriteSec > 0.1) {
-        writeUnitOverrides(u);
-        u.lastControlWriteSec = ImGui::GetTime();
-      }
-    }
-    if (released) {
-      ui.editing = false;
-      writeUnitOverrides(u);
-      u.lastControlWriteSec = ImGui::GetTime();
-    }
-    if (ui.dirty) {
-      ImGui::SameLine();
-      ImGui::TextColored(ImVec4(0.95f, 0.85f, 0.5f, 1.0f), "*");
-      if (ImGui::IsItemHovered())
-        ImGui::SetTooltip("waiting for a rebuild with this value\n"
-                          "(leave `synthc watch` running)");
-      anyDirty = true;
-    }
-    ImGui::SameLine();
-    if (ImGui::SmallButton("reset")) {
-      ui.value = (float)c.def;
-      ui.editing = false;
-      ui.dirty = true;
-      writeUnitOverrides(u);
-    }
+    if (edited || released) noteControlEdit(u, ui, released);
+    anyDirty |= drawControlTail(u, ui, c);
     ImGui::PopID();
   }
   if (controls.size() > 1) {
@@ -681,9 +1093,9 @@ void drawFrame(AppState& app) {
     ImGui::TextDisabled("metadata: %s", u.unit.metadataPath.c_str());
     ImGui::Separator();
 
-    drawDiagnostics(meta);
+    drawDiagnostics(app, u);
     drawTargets(app, u);
-    drawControls(u);
+    drawControls(app, u);
     ImGui::PopID();
   }
   if (anyMissing) {
@@ -698,6 +1110,11 @@ void drawFrame(AppState& app) {
     ImGui::Spacing();
     ImGui::TextColored(ImVec4(1.0f, 0.45f, 0.45f, 1.0f), "playback: %s",
                        app.playError.c_str());
+  }
+  if (!app.stateError.empty()) {
+    ImGui::Spacing();
+    ImGui::TextColored(ImVec4(1.0f, 0.45f, 0.45f, 1.0f), "project state: %s",
+                       app.stateError.c_str());
   }
   if (app.player.playing()) {
     ImGui::Spacing();
@@ -726,6 +1143,18 @@ void drawFrame(AppState& app) {
     else
       app.waves.erase(app.waves.begin() + i);
   }
+}
+
+// A saved window position is only reused when it still lands on a
+// connected display: unplugging the monitor it was on would otherwise
+// reopen the app somewhere no one can see it.
+bool positionOnSomeDisplay(int x, int y) {
+  for (int i = 0, n = SDL_GetNumVideoDisplays(); i < n; i++) {
+    SDL_Rect b{};
+    if (SDL_GetDisplayBounds(i, &b) != 0) continue;
+    if (x >= b.x && x < b.x + b.w && y >= b.y && y < b.y + b.h) return true;
+  }
+  return false;
 }
 
 int usage() {
@@ -763,9 +1192,32 @@ int main(int argc, char** argv) {
     std::fprintf(stderr, "SDL_Init failed: %s\n", SDL_GetError());
     return 1;
   }
+  AppState app;
+  app.projectDir = projectDir;
+  app.resolveLayout();
+  app.manifestStamp = stampFile(app.manifestPath);
+
+  // The settings have to be read before the window is created - they
+  // carry the window's own placement. The self-test runs headless against
+  // a dummy driver and auto-opens every panel, so it neither reads nor
+  // writes the file: it must not leave a layout behind for the next real
+  // run to restore, nor touch the project's control values.
+  app.persist = !selfTest;
+  app.loadState();
+
   Uint32 windowFlags = SDL_WINDOW_RESIZABLE | (selfTest ? SDL_WINDOW_HIDDEN : 0);
   int winX = SDL_WINDOWPOS_CENTERED, winY = SDL_WINDOWPOS_CENTERED;
   int winW = 900, winH = 600;
+  // A saved size always applies; a saved position only when it is still
+  // on-screen. --fullscreen wins over both.
+  if (app.windowGeom.valid && !fullscreen && !selfTest) {
+    winW = app.windowGeom.w;
+    winH = app.windowGeom.h;
+    if (positionOnSomeDisplay(app.windowGeom.x, app.windowGeom.y)) {
+      winX = app.windowGeom.x;
+      winY = app.windowGeom.y;
+    }
+  }
   if (fullscreen && !selfTest) {
     // SDL's fullscreen-desktop mode is an EWMH request that only a window
     // manager honors, and window-manager-less X servers (termux-x11) drop
@@ -792,9 +1244,26 @@ int main(int argc, char** argv) {
   if (!renderer)
     renderer = SDL_CreateRenderer(window, -1, SDL_RENDERER_SOFTWARE);
 
+  if (app.persist && !fullscreen) {
+    // Where the window actually landed - the window manager gets the
+    // final say, and no move/resize event is guaranteed at creation.
+    WindowGeometry g;
+    SDL_GetWindowPosition(window, &g.x, &g.y);
+    SDL_GetWindowSize(window, &g.w, &g.h);
+    g.valid = g.w > 0 && g.h > 0;
+    if (g.valid) app.windowGeom = g;
+  }
+
   IMGUI_CHECKVERSION();
   ImGui::CreateContext();
-  ImGui::GetIO().IniFilename = nullptr;  // no imgui.ini litter
+  // ImGui's own ini is disabled: its settings ride along in the project's
+  // UI state file instead of an imgui.ini in whatever directory the app
+  // happened to be started from. WantSaveIniSettings tells us when to
+  // re-serialize them.
+  ImGui::GetIO().IniFilename = nullptr;
+  if (!app.state.ui.imguiIni.empty())
+    ImGui::LoadIniSettingsFromMemory(app.state.ui.imguiIni.c_str(),
+                                     app.state.ui.imguiIni.size());
   ImGui::StyleColorsDark();
   if (gUiScale != 1.0f) {
     ImGui::GetStyle().ScaleAllSizes(gUiScale);
@@ -803,10 +1272,12 @@ int main(int argc, char** argv) {
   ImGui_ImplSDL2_InitForSDLRenderer(window, renderer);
   ImGui_ImplSDLRenderer2_Init(renderer);
 
-  AppState app;
-  app.projectDir = projectDir;
-  app.resolveLayout();
-  app.manifestStamp = stampFile(app.manifestPath);
+  // Reopening the saved waveform windows here (rather than on the first
+  // metadata load) keeps them independent of the build: a panel comes
+  // back even when the project has not been rebuilt yet. The self-test
+  // opens every target itself and must stay deterministic, so it skips
+  // whatever a real run happened to leave behind.
+  if (!selfTest) app.restoreWaves(app.state.ui.waves);
 
   // Pace the loop to the display's refresh rate: with vsync,
   // SDL_RenderPresent blocks until vblank and no sleep is needed; on the
@@ -832,6 +1303,17 @@ int main(int argc, char** argv) {
     while (SDL_PollEvent(&e)) {
       ImGui_ImplSDL2_ProcessEvent(&e);
       if (e.type == SDL_QUIT) done = true;
+      // Only sample the OS window's geometry when it actually changed:
+      // on X11 these are round trips, too costly to poll every frame.
+      if (app.persist && !fullscreen && e.type == SDL_WINDOWEVENT &&
+          (e.window.event == SDL_WINDOWEVENT_MOVED ||
+           e.window.event == SDL_WINDOWEVENT_SIZE_CHANGED)) {
+        WindowGeometry g;
+        SDL_GetWindowPosition(window, &g.x, &g.y);
+        SDL_GetWindowSize(window, &g.w, &g.h);
+        g.valid = g.w > 0 && g.h > 0;
+        app.windowGeom = g;
+      }
     }
     Uint64 now = SDL_GetPerformanceCounter();
     double dtMs =
@@ -865,6 +1347,14 @@ int main(int argc, char** argv) {
     ImGui_ImplSDLRenderer2_RenderDrawData(ImGui::GetDrawData(), renderer);
     SDL_RenderPresent(renderer);
 
+    // ImGui batches its own settings changes behind this flag; everything
+    // else the app persists is compared by value inside save().
+    if (ImGui::GetIO().WantSaveIniSettings) {
+      ImGui::GetIO().WantSaveIniSettings = false;
+      app.imguiIniDirty = true;
+    }
+    app.maybeSave(dtMs);
+
     if (selfTest && ++frames >= 5) done = true;
     if (!selfTest && !vsync) {
       double frameMs = (double)(SDL_GetPerformanceCounter() - now) * 1000.0 /
@@ -886,6 +1376,15 @@ int main(int argc, char** argv) {
         "self-test: metadata %zu/%zu loaded, %zu target(s), "
         "%zu diagnostic(s), %zu control(s)\n",
         loadedCount, app.units.size(), targetCount, diagCount, controlCount);
+    for (auto& u : app.units)
+      for (auto& c : u.loaded.meta.controls) {
+        auto it = u.controlUi.find(c.name);
+        bool pending = it != u.controlUi.end() && it->second.dirty;
+        double shown =
+            it == u.controlUi.end() ? c.value : (double)it->second.value;
+        std::printf("self-test: control '%s' = %.6g%s\n", c.name.c_str(),
+                    shown, pending ? " (pending rebuild)" : "");
+      }
     for (auto& w : app.waves) {
       if (w.error.empty())
         std::printf("self-test: waveform '%s' %lld frame(s), %zu channel(s)\n",
@@ -896,6 +1395,11 @@ int main(int argc, char** argv) {
                     w.targetName.c_str(), w.error.c_str());
     }
   }
+
+  // Last chance to catch edits made since the previous tick; the ImGui
+  // context has to outlive this, so it runs before the shutdown calls.
+  // Nothing is written unless something actually changed.
+  app.save();
 
   app.player.stop();
   ImGui_ImplSDLRenderer2_Shutdown();

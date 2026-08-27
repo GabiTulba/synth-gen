@@ -37,7 +37,7 @@ idioms that tie them together.
 | `Core.Arrange` | Combination and arrangement: `mix_all`, `channels`, `channel`, `sample`, `place`, `place_multi` | `stdlib/core/sampling.cpp` |
 | `Core.Fx` | Envelopes (`exp_decay`, `adsr`), filters (`lowpass`, `highpass`, the modulated `lowpass_mod`/`highpass_mod`, the resonant `resonant`), control (`follow`), distortion (`hard_clip`, `soft_clip`), time effects (`delay`, `feedback`, `resample`, `reverb`), and the voice sugar (`gated`, `echoes`) | `stdlib/core/effects.cpp` + SynthGraph sugar |
 | `Core.Render` | The effects: `render`, `render_vis`, `render_stems`, `render_vis_stems` | `stdlib/core/render.cpp` |
-| `Core.Control` | Live controls: `slider`, `knob` — named build-time Scalar parameters the dev app can override between rebuilds | `stdlib/core/control.cpp` |
+| `Core.Control` | Live controls: `slider`, `knob`, `multi_slider` — named build-time Scalar parameters the dev app can override between rebuilds | `stdlib/core/control.cpp` |
 | `Core.Io` | Audio import: `load_mono`, `load_multi` | `stdlib/core/io.cpp` |
 | `Core.Sig` | Signal constructors: `constant`, `constant_multi`, `time`, `signal`, `signal_multi`, `select` | `stdlib/core/signals.cpp` |
 | `Core.Groove` | The sequencing tier: `pattern`, `humanized`, `mask`, `euclid` | written in SynthGraph (`lib.synth`) |
@@ -313,6 +313,43 @@ computed render names (see `Str`).
   not a modulation (use signals for that). The worked example is
   `examples/controls`; the file format and daemon wiring live in
   [`build-system.md`](build-system.md).
+
+- **`multi_slider name sum_min sum_max lanes`** declares several
+  controls whose values are *related*: each lane is a named Scalar in
+  its own `[min, max]`, and the lane values additionally sum into
+  `[sum_min, sum_max]`. It evaluates to one value per lane, in lane
+  order — index them with `List.nth`. The shape an envelope wants,
+  where each duration has its own range and the total has a budget:
+
+  ```
+  open Core.Control
+  let env : Scalar list =
+    Control.multi_slider ~name:"env" ~sum_min:0.0 ~sum_max:1.0
+      ~lanes:[{ name = "attack"; min = 0.0; max = 0.4; default = 0.02 };
+               { name = "decay"; min = 0.0; max = 0.5; default = 0.18 }] ;;
+  let attack : Scalar = List.nth ~xs:env ~i:0 ~default:0.0 ;;
+  ```
+
+  A lane is a `Control.Lane` record — a record literal resolves against
+  the innermost visible declaration, so the lanes need `open
+  Core.Control` (the way `{ pc = C; oct = 4 }` needs `open Core.Pitch`).
+
+  Each lane becomes an ordinary control named **`"<group>.<lane>"`**
+  (`env.attack`), so lanes override, rebuild and appear in the metadata
+  exactly like sliders. A group name shares the same project-wide space
+  as a plain control's, with the same rule: redeclaring a group with
+  identical lanes and bounds yields the same values, and a conflicting
+  redeclaration is a build error.
+
+  The declaration must be satisfiable — every lane's default in its own
+  range, the defaults' sum inside `[sum_min, sum_max]`, and lane ranges
+  that can reach those bounds at all — otherwise the build fails.
+  Overrides are applied per lane, clamped to that lane's range, and then
+  the group is put back inside its sum bounds by giving up (or taking
+  up) the difference in proportion to each lane's remaining room. That
+  projection is what makes a hand-edited `controls.json` safe;
+  `synth-dev` never needs it, because it stops each lane at the budget
+  while you drag.
 
 ### `Core.Sig`
 

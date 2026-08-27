@@ -65,10 +65,16 @@ struct TargetInfo {
 // writes it.
 struct ControlInfo {
   std::string name;
-  std::string kind = "slider";  // "slider" | "knob"
+  std::string kind = "slider";  // "slider" | "knob" | "multi_slider"
   double min = 0, max = 1;
   double defaultValue = 0;
   double value = 0;  // what this build used: override (clamped) or default
+  // "multi_slider" lanes only: the group this lane belongs to, its
+  // position in it, and the bounds the group's sum satisfies. `name` is
+  // "<group>.<lane>", so a lane overrides like any other control.
+  std::string group;
+  int groupIndex = -1;
+  double sumMin = 0, sumMax = 0;
 };
 
 // Cross-build cache (Epic 8). Purely automatic: keys are content hashes of

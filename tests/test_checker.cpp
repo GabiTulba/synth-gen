@@ -2864,9 +2864,9 @@ TEST(checker_core_is_a_real_library_of_externals) {
   // external modules carry beside their bindings.
   std::set<std::string> inSynthGraph = {"List",  "Pitch", "Tempo", "Scale",
                                         "Score", "Groove", "Mix",  "Dsp"};
-  std::set<std::string> sugar = {"Math.pi",   "Math.min",  "Math.max",
+  std::set<std::string> sugar = {"Math.pi",    "Math.min",  "Math.max",
                                  "Math.clamp", "Math.lerp", "Fx.gated",
-                                 "Fx.echoes"};
+                                 "Fx.echoes",  "Control.multi_slider"};
   std::function<bool(const std::string&, const std::vector<TopDef>&)>
       allExternal = [&](const std::string& prefix,
                         const std::vector<TopDef>& ds) {

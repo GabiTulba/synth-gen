@@ -36,6 +36,10 @@ struct ExtServices {
   // Record a render target; the caller fills declaration attribution
   // (file, span, declaring module/def) before pushing.
   std::function<void(RenderTarget)> declareTarget;
+  // Record a live control and return its value for this build (the
+  // active override or the default); the caller fills declaration
+  // attribution before registering.
+  std::function<double(ControlDecl)> declareControl;
 };
 
 using ExternalFn =

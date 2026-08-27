@@ -18,7 +18,7 @@ namespace synth {
 
 // Salts the cache key alongside the API header contents, so stale objects
 // are recompiled rather than loaded after an incompatible change.
-static constexpr int kExternalApiVersion = 3;
+static constexpr int kExternalApiVersion = 4;
 
 namespace {
 
@@ -305,6 +305,16 @@ ExternalFn loadUserExternal(const std::string& cppPath,
       if (d.kind != ext::RenderDecl::Kind::VisualStems && !d.sample.signal)
         throw std::runtime_error("render: target has no sample");
       svc.declareTarget(fromDecl(std::move(d)));
+    };
+    ctx.control = [&svc](ext::ControlDecl d) -> double {
+      ControlDecl c;
+      c.kind = d.kind == ext::ControlDecl::Kind::Knob ? ControlDecl::Kind::Knob
+                                                      : ControlDecl::Kind::Slider;
+      c.name = std::move(d.name);
+      c.min = d.min;
+      c.max = d.max;
+      c.def = d.def;
+      return svc.declareControl(std::move(c));
     };
 
     std::vector<ext::Value> extArgs;

@@ -363,6 +363,21 @@ module Render = struct
       ~stems:(String, 'a Sample) list : unit = external "render.cpp" ;;
 end ;;
 
+(* --- Live controls (control.cpp) - named build-time Scalar parameters
+   with a range and a default. The dev app shows each one as a slider or
+   knob; moving it writes an override into the unit's controls.json and
+   an attached `synthc watch` rebuilds with the new value (clamped to
+   [min, max]). Control names share one project-wide name space:
+   redeclaring a name with the same kind and range yields the same
+   value; a conflicting redeclaration is a build error. ---------------- *)
+
+module Control = struct
+  let slider ~name:String ~min:Scalar ~max:Scalar ~default:Scalar
+      : Scalar = external "control.cpp" ;;
+  let knob ~name:String ~min:Scalar ~max:Scalar ~default:Scalar
+      : Scalar = external "control.cpp" ;;
+end ;;
+
 (* --- Audio import (io.cpp) - build inputs, resolved relative to the
    source file that names them. --------------------------------------- *)
 
@@ -1275,6 +1290,13 @@ module Dsp = struct
     Render.render ~name:name ~rate:rate ~sample:sample ;;
   let render_vis ~name:String ~rate:Scalar ~sample:'a Sample : unit =
     Render.render_vis ~name:name ~rate:rate ~sample:sample ;;
+  (* live controls *)
+  let slider ~name:String ~min:Scalar ~max:Scalar ~default:Scalar
+      : Scalar =
+    Control.slider ~name:name ~min:min ~max:max ~default:default ;;
+  let knob ~name:String ~min:Scalar ~max:Scalar ~default:Scalar
+      : Scalar =
+    Control.knob ~name:name ~min:min ~max:max ~default:default ;;
   (* time conversions *)
   let to_sec ~x:Scalar : Timestamp = Time.to_sec ~x:x ;;
   let to_ms ~x:Scalar : Timestamp = Time.to_ms ~x:x ;;

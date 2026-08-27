@@ -1,0 +1,33 @@
+(* tone.synth — live controls: a filtered saw whose cutoff, gain and
+   decay are sliders/knobs in `synth-dev`. Run `synthc watch` here,
+   open the dev app next to it, and drag the controls: every release
+   writes an override into the build's controls.json and the daemon
+   rebuilds with the new values. *)
+
+open Core
+open Core.Osc
+open Core.Fx
+open Core.Arrange
+open Core.Render
+
+let cutoff : Scalar =
+  Control.slider ~name:"cutoff" ~min:100.0 ~max:4000.0 ~default:900.0
+;;
+
+let decay : Scalar =
+  Control.slider ~name:"decay" ~min:0.5 ~max:12.0 ~default:4.0
+;;
+
+let gain : Scalar =
+  Control.knob ~name:"gain" ~min:0.0 ~max:1.0 ~default:0.6
+;;
+
+let voice : Scalar Signal =
+  saw_bl 110.0 *. exp_decay decay |> lowpass ~cutoff:cutoff
+;;
+
+let _ =
+  voice *. gain
+  |> sample ~from:0s ~to:2s
+  |> render ~name:"tone" ~rate:48000.0
+;;

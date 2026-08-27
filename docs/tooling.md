@@ -89,11 +89,27 @@ compiler internals:
 - Lists targets with duration, rate, channels, and build status
   (including visual targets; playback is audio-only).
 - Plays artifacts through SDL audio.
+- Opens each audio target's waveform in its own floating window — drag
+  it anywhere, resize it, close it from the title bar. Inside: wheel
+  zoom, right-drag pan, left-drag range selection, playback of the
+  selection or visible range, and a **loop** toggle that replays the
+  played range indefinitely (toggling mid-play applies immediately).
+- Shows the build's live controls (`Core.Control.slider` / `knob`) as
+  sliders and rotary knobs. Releasing a drag writes the value into the
+  unit's `controls.json` (atomically); with `synthc watch` running next
+  door, that write triggers a rebuild with the override applied — this
+  is how the app *attaches* to a watch instance. A `*` marks values
+  still waiting for their rebuild; `reset` / `all defaults` clear
+  overrides. See [`build-system.md`](build-system.md) for the file
+  format.
 - Shows build diagnostics, including for failed builds (the metadata is
   emitted either way).
 - Live-refreshes by watching the metadata file, so pairing it with
   `synthc watch` gives save → rebuild → the app reflects the new
-  artifacts.
+  artifacts. Because metadata is written after the artifacts, a
+  metadata change also forces every open waveform window to reload —
+  even when an artifact was rewritten with the same size inside the
+  filesystem's mtime granularity.
 - `--self-test` exercises the metadata reader and player headlessly.
 
 SDL2 is the dev app's only external dependency

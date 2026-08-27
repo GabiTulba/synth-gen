@@ -1,5 +1,6 @@
 #pragma once
 #include <cstdint>
+#include <map>
 #include <stdexcept>
 #include <string>
 #include <variant>
@@ -114,6 +115,22 @@ struct RenderTarget {
   const TopDef* declDef = nullptr;
 };
 
+// A live control collected from a `slider`/`knob` call (Core.Control): a
+// named build-time Scalar parameter with a range and a default, which the
+// dev app can override between rebuilds through the unit's controls.json.
+// `value` is what this build used: the active override, clamped to
+// [min, max], or `def`.
+struct ControlDecl {
+  enum class Kind { Slider, Knob };
+  Kind kind = Kind::Slider;
+  std::string name;  // stable identifier, unique project-wide
+  double min = 0, max = 1;
+  double def = 0;
+  double value = 0;
+  std::string file;  // source file that declared it (for diagnostics)
+  Span span{};
+};
+
 // Evaluates every module of a checked program in dependency order and
 // collects all render targets. Runtime errors (bad file, channel mismatch,
 // invalid windows) become diagnostics attached to the declaring top-level
@@ -124,9 +141,15 @@ struct RenderTarget {
 // `externalCacheDir` is where user `external "file.cpp"` implementations
 // are compiled and cached (a build's `_build/externals`); when empty a
 // per-user temp directory is used.
+// `controlOverrides`, when non-null, maps control names to the values an
+// attached dev tool set; `controls`, when non-null, receives every
+// control the program declared, in declaration order.
 bool evaluateProgram(const Program& prog, std::vector<RenderTarget>& targets,
                      DiagnosticBag& diags,
                      std::vector<std::string>* loadedFiles = nullptr,
-                     const std::string& externalCacheDir = {});
+                     const std::string& externalCacheDir = {},
+                     const std::map<std::string, double>* controlOverrides =
+                         nullptr,
+                     std::vector<ControlDecl>* controls = nullptr);
 
 }  // namespace synth

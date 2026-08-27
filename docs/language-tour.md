@@ -335,6 +335,17 @@ per-channel forms). The math primitives `exp`, `sqrt`, `log`, and
 `pow ~x ~y` work on plain Scalars and elementwise on Signals —
 `pow (sine 220.0) 3.0` is a waveshaper, `sqrt time` a fade-in curve.
 
+## Live controls
+
+`Control.slider ~name:"cutoff" ~min:100.0 ~max:4000.0 ~default:900.0`
+(and `Control.knob`, drawn as a rotary dial) declares a named tweakable
+parameter and evaluates to an ordinary Scalar: the default, or the
+override the `synth-dev` app wrote while you dragged its slider with a
+`synthc watch` daemon running. The value is fixed for one whole build —
+evaluation stays pure and renders stay deterministic; moving a slider
+is a rebuild, not a modulation (use signals for movement *within* a
+render). `examples/controls` is the worked example.
+
 ## Rhythm and humanization
 
 `time_steps ~start ~step ~count` builds arithmetic timestamp sequences —

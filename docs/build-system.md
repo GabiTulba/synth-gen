@@ -133,15 +133,38 @@ root manifest determines where a subdirectory build's outputs land.
 Stale per-project `build/` directories from older versions can be
 removed with `git clean -Xdf examples`.
 
+## Live controls
+
+`Core.Control.slider` / `Core.Control.knob` declare named build-time
+Scalar parameters with a range and a default; each declaration
+evaluates to the control's current value. Declared controls appear in
+the unit's metadata under `"controls"` (name, kind, range, default, and
+the value this build used), and the build reads overrides from
+`controls.json` next to the metadata:
+
+```json
+{ "overrides": { "cutoff": 900.0 } }
+```
+
+Override values clamp to the declared range; unknown names and
+malformed files are ignored (defaults apply). When a build declares any
+control, its `controls.json` is recorded as a build input — so a
+running watch daemon rebuilds whenever the dev app (or anything else)
+writes it. That file is dev-tool state, not part of the project: it
+lives in `_build/` and never fails a build.
+
 ## Incremental builds & caching
 
 Caching is fully automatic, with no user-facing controls.
 
 - **Target keying.** Each render target is keyed by a Merkle-style
   content hash of its declaring definition's dependency closure (across
-  modules), salted with the stamps of all audio inputs and an
-  engine-version constant (`src/incremental.*`). An edit re-renders only
-  the targets whose closure actually changed.
+  modules), salted with the stamps of all audio inputs, the values of
+  all live controls, and an engine-version constant
+  (`src/incremental.*`). An edit re-renders only the targets whose
+  closure actually changed; a moved slider invalidates conservatively
+  (every target), with the sample-window cache still skipping the
+  windows the control doesn't reach.
 - **Bounded by construction.** The cache holds one in-memory entry per
   live target (artifacts live on disk); entries for removed targets are
   pruned each build.
@@ -172,9 +195,10 @@ byte-identical output.
 ## The watch daemon
 
 `synthc watch` runs the build in a loop, watching sources, the
-`build.json` manifest, imported audio files, and user-external `.cpp`
-files, rebuilding on change (polling-based, whole-project rebuild in
-v1). Partial-failure error surfacing goes through the same metadata file
+`build.json` manifest, imported audio files, user-external `.cpp`
+files, and — when the build declares live controls — the unit's
+`controls.json`, rebuilding on change (polling-based, whole-project
+rebuild in v1). Partial-failure error surfacing goes through the same metadata file
 as one-shot builds, so the dev app shows diagnostics live. The daemon
 keeps both the target cache and the cross-build sample cache across
 rebuilds; the verbose log reports reuse (`samples: 92 window(s) cached

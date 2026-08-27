@@ -1,0 +1,5 @@
+{
+  "project": "controls-demo",
+  "description": "Live controls: sliders and knobs the dev app can turn while a watch daemon rebuilds.",
+  "sources": ["tone.synth"]
+}

@@ -57,6 +57,20 @@ struct TargetInfo {
   std::string error;    // per-target failure, if any
 };
 
+// A live control declared by the build (Core.Control.slider/knob): a
+// named build-time Scalar parameter the dev app can override between
+// rebuilds. Overrides live in the unit's controls.json (next to its
+// metadata.json, format {"overrides": {"name": value, ...}}); the file
+// is a build input, so a running daemon rebuilds when the dev app
+// writes it.
+struct ControlInfo {
+  std::string name;
+  std::string kind = "slider";  // "slider" | "knob"
+  double min = 0, max = 1;
+  double defaultValue = 0;
+  double value = 0;  // what this build used: override (clamped) or default
+};
+
 // Cross-build cache (Epic 8). Purely automatic: keys are content hashes of
 // each target's dependency closure (plus audio-input stamps and an engine
 // version salt); a target whose key is unchanged and whose artifact still
@@ -75,8 +89,10 @@ struct BuildResult {
   bool ok = false;  // front-end + validation succeeded and all targets wrote
   Manifest manifest;
   std::vector<TargetInfo> targets;
+  std::vector<ControlInfo> controls;  // declaration order
   DiagnosticBag diags;
   std::string metadataPath;
+  std::string controlsPath;  // where control overrides are read from
   // Every file this build depended on: the manifest, all source modules
   // (listed and imported), and all loaded audio files. This is what the
   // daemon watches (§8.3).

@@ -25,17 +25,24 @@ class AudioPlayer {
   // Starts playing `wavPath`; stops any current playback first. Returns
   // false (with `error` set) if the file can't be read or no audio device
   // is available. playRange plays only [fromFrame, toFrame) (a negative
-  // toFrame means end of file).
+  // toFrame means end of file); with `loop` the range replays
+  // indefinitely until stop() or setLooping(false).
   bool play(const std::string& wavPath, std::string& error);
   bool playRange(const std::string& wavPath, int64_t fromFrame,
-                 int64_t toFrame, std::string& error);
+                 int64_t toFrame, std::string& error, bool loop = false);
   void stop();
 
-  // Call once per UI frame: releases the device when playback finishes.
+  // Toggle looping of the currently playing range; turning it off lets
+  // the already-queued audio drain and then stops as usual.
+  void setLooping(bool loop) { loop_ = loop; }
+  bool looping() const { return loop_; }
+
+  // Call once per UI frame: keeps a looping range's queue topped up, and
+  // releases the device when (non-looping) playback finishes.
   void update();
 
   bool playing() const { return dev_ != 0; }
-  double progress() const;  // 0..1 of the queued audio consumed
+  double progress() const;  // 0..1 through the range (wraps when looping)
   const std::string& currentPath() const { return path_; }
 
   // The playing range in file time, for drawing a playhead: position
@@ -49,7 +56,10 @@ class AudioPlayer {
 
  private:
   uint32_t dev_ = 0;  // SDL_AudioDeviceID
-  size_t totalBytes_ = 0;
+  size_t totalBytes_ = 0;   // one copy of the playing range
+  size_t queuedBytes_ = 0;  // total ever queued (grows while looping)
+  bool loop_ = false;
+  std::vector<float> data_;  // the range, kept for loop re-queueing
   std::string path_;
   double rangeStartSec_ = 0;
   double rangeEndSec_ = 0;

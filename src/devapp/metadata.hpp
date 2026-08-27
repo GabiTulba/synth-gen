@@ -1,5 +1,6 @@
 #pragma once
 #include <cstdint>
+#include <map>
 #include <string>
 #include <vector>
 
@@ -28,11 +29,22 @@ struct DiagnosticMeta {
   std::string rendered;
 };
 
+// A live control the build declared (Core.Control.slider/knob): the app
+// shows it as a slider or knob and writes overrides for the daemon.
+struct ControlMeta {
+  std::string name;
+  std::string kind;  // "slider" | "knob"
+  double min = 0, max = 1;
+  double def = 0;    // the declaration's default
+  double value = 0;  // the value the last build used
+};
+
 struct ProjectMeta {
   std::string project;
   std::string status;  // "ok" | "error"
   std::vector<DiagnosticMeta> diagnostics;
   std::vector<TargetMeta> targets;
+  std::vector<ControlMeta> controls;
 };
 
 struct MetadataLoadResult {
@@ -64,6 +76,19 @@ struct MetadataLayout {
 // _build/<rule>/metadata.json per rule, file rules dropping their
 // extension.
 MetadataLayout resolveMetadataLayout(const std::string& projectDir);
+
+// The unit's control-overrides file, next to its metadata.json. The app
+// writes it, the build reads it, and - because the build records it as an
+// input - an attached `synthc watch` instance rebuilds on every write.
+std::string controlsPathFor(const std::string& metadataPath);
+
+// Atomically (write temp + rename, so a mid-write daemon poll never sees
+// a torn file) writes {"overrides": {"name": value, ...}}. An empty map
+// still writes the file: that is how "back to defaults" reaches the
+// daemon. Returns false with `error` set when the write fails.
+bool writeControlOverrides(const std::string& path,
+                           const std::map<std::string, double>& overrides,
+                           std::string& error);
 
 // Change detection for live refresh (§9): the v1 mechanism is watching the
 // metadata file, per the design doc's "simplest v1" note.

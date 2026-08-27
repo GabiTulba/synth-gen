@@ -63,8 +63,58 @@ MetadataLoadResult loadProjectMetadata(const std::string& path) {
       r.meta.targets.push_back(std::move(m));
     }
   }
+  if (const json::Value* controls = root.get("controls");
+      controls && controls->kind == json::Value::Kind::Array) {
+    for (auto& c : controls->array) {
+      ControlMeta m;
+      m.name = c.getString("name");
+      m.kind = c.getString("kind", "slider");
+      m.min = c.getNumber("min");
+      m.max = c.getNumber("max", 1);
+      m.def = c.getNumber("default");
+      m.value = c.getNumber("value", m.def);
+      if (!m.name.empty()) r.meta.controls.push_back(std::move(m));
+    }
+  }
   r.ok = true;
   return r;
+}
+
+std::string controlsPathFor(const std::string& metadataPath) {
+  return (fs::path(metadataPath).parent_path() / "controls.json").string();
+}
+
+bool writeControlOverrides(const std::string& path,
+                           const std::map<std::string, double>& overrides,
+                           std::string& error) {
+  json::Value ov = json::makeObject();
+  for (auto& [name, value] : overrides) ov.set(name, json::makeNumber(value));
+  json::Value root = json::makeObject();
+  root.set("overrides", std::move(ov));
+
+  fs::path target(path);
+  fs::path tmp = target;
+  tmp += ".tmp";
+  {
+    std::ofstream out(tmp, std::ios::binary | std::ios::trunc);
+    if (!out) {
+      error = "cannot write '" + tmp.string() + "'";
+      return false;
+    }
+    out << json::serialize(root) << "\n";
+    if (!out) {
+      error = "write to '" + tmp.string() + "' failed";
+      return false;
+    }
+  }
+  std::error_code ec;
+  fs::rename(tmp, target, ec);
+  if (ec) {
+    error = "cannot rename '" + tmp.string() + "': " + ec.message();
+    fs::remove(tmp, ec);
+    return false;
+  }
+  return true;
 }
 
 MetadataLayout resolveMetadataLayout(const std::string& projectDir) {

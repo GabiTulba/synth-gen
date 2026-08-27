@@ -747,12 +747,27 @@ int main(int argc, char** argv) {
     return 1;
   }
   Uint32 windowFlags = SDL_WINDOW_RESIZABLE | (selfTest ? SDL_WINDOW_HIDDEN : 0);
-  // Borderless fullscreen at the display's own resolution - no mode
-  // switch, so it behaves on window-manager-less X servers (termux-x11).
-  if (fullscreen && !selfTest) windowFlags |= SDL_WINDOW_FULLSCREEN_DESKTOP;
-  SDL_Window* window = SDL_CreateWindow(
-      "SynthGraph", SDL_WINDOWPOS_CENTERED, SDL_WINDOWPOS_CENTERED, 900, 600,
-      windowFlags);
+  int winX = SDL_WINDOWPOS_CENTERED, winY = SDL_WINDOWPOS_CENTERED;
+  int winW = 900, winH = 600;
+  if (fullscreen && !selfTest) {
+    // SDL's fullscreen-desktop mode is an EWMH request that only a window
+    // manager honors, and window-manager-less X servers (termux-x11) drop
+    // it on the floor. A borderless window covering the display's bounds
+    // is fullscreen with no one's cooperation, so prefer that and keep the
+    // flag only as a fallback when the bounds can't be queried.
+    SDL_Rect bounds{};
+    if (SDL_GetDisplayBounds(0, &bounds) == 0) {
+      winX = bounds.x;
+      winY = bounds.y;
+      winW = bounds.w;
+      winH = bounds.h;
+      windowFlags = SDL_WINDOW_BORDERLESS | (selfTest ? SDL_WINDOW_HIDDEN : 0);
+    } else {
+      windowFlags |= SDL_WINDOW_FULLSCREEN_DESKTOP;
+    }
+  }
+  SDL_Window* window =
+      SDL_CreateWindow("SynthGraph", winX, winY, winW, winH, windowFlags);
   SDL_Renderer* renderer = SDL_CreateRenderer(
       window, -1,
       selfTest ? SDL_RENDERER_SOFTWARE

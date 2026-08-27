@@ -64,10 +64,14 @@ synth_dev=$(find_tool synth-dev)
 
 # --- X display: reuse a live termux-x11, else start one and wait for its
 # socket. The Termux:X11 *app* renders the screen; this is the server side.
+# The socket file alone is not proof of life: Android kills the server
+# process freely (session ended, reboot, memory pressure) and the stale
+# socket survives it, so check for the process too.
 xsocket="${PREFIX:-/data/data/com.termux/files/usr}/tmp/.X11-unix/X$display"
-if [ ! -S "$xsocket" ]; then
+if ! pgrep -f "termux.x11.*:$display" >/dev/null; then
   command -v termux-x11 >/dev/null ||
     { echo "error: termux-x11 not installed (pkg install termux-x11-nightly)" >&2; exit 1; }
+  rm -f "$xsocket"
   echo "starting termux-x11 on display :$display ..."
   termux-x11 ":$display" >/dev/null 2>&1 &
   for _ in $(seq 1 50); do
@@ -100,5 +104,10 @@ watch_pid=$!
 trap 'kill "$watch_pid" 2>/dev/null || true' EXIT
 
 echo "open the Termux:X11 app to see the UI (project: $project)"
+# Mesa prints "ZINK: failed to choose pdev" / "libEGL warning" noise while
+# SDL probes for (unavailable) GPU rendering before settling on the
+# software renderer we asked for; filter those known-harmless lines so
+# they don't read as a failure. Everything else on stderr passes through.
 DISPLAY=":$display" PULSE_SERVER=127.0.0.1 SDL_RENDER_DRIVER=software \
-  "$synth_dev" $fullscreen --scale "$scale" "$project"
+  "$synth_dev" $fullscreen --scale "$scale" "$project" \
+  2> >(grep -vE 'MESA: error: ZINK|libEGL warning' >&2)

@@ -17,6 +17,7 @@
 #include <algorithm>
 #include <cmath>
 #include <cstdio>
+#include <cstdlib>
 #include <filesystem>
 #include <map>
 #include <string>
@@ -34,6 +35,11 @@ namespace fs = std::filesystem;
 using namespace synth::devapp;
 
 namespace {
+
+// UI scale factor (--scale). ImGui's style/font scaling covers most of the
+// layout; this covers the few sizes the app picks in raw pixels (knob
+// diameter, slider width, wave-window defaults).
+float gUiScale = 1.0f;
 
 // The app's editing state for one live control: `value` is what the UI
 // shows, `editing` is true while the user is actively changing it, and
@@ -394,14 +400,15 @@ void drawControls(UnitState& u) {
     bool edited = false, released = false;
     if (c.kind == "knob") {
       edited = knobFloat("##knob", &ui.value, (float)c.min, (float)c.max,
-                         36.0f);
+                         36.0f * gUiScale);
       released = ImGui::IsItemDeactivated() && ui.editing;
       ImGui::SameLine();
       ImGui::AlignTextToFramePadding();
       ImGui::Text("%s  %.4g", c.name.c_str(), (double)ui.value);
     } else {
       ImGui::SetNextItemWidth(
-          std::max(160.0f, ImGui::GetContentRegionAvail().x * 0.45f));
+          std::max(160.0f * gUiScale,
+                   ImGui::GetContentRegionAvail().x * 0.45f));
       edited = ImGui::SliderFloat("##slider", &ui.value, (float)c.min,
                                   (float)c.max, "%.4g");
       released = ImGui::IsItemDeactivatedAfterEdit();
@@ -528,8 +535,8 @@ void drawWaveContent(AppState& app, WavePanel& p) {
   // The canvas fills the rest of the window, so resizing the window
   // resizes the lanes.
   float availY = ImGui::GetContentRegionAvail().y;
-  float laneH =
-      std::max(48.0f, (availY - (channels - 1) * laneGap) / channels);
+  float laneH = std::max(48.0f * gUiScale,
+                         (availY - (channels - 1) * laneGap) / channels);
   ImVec2 canvasSize(std::max(120.0f, ImGui::GetContentRegionAvail().x),
                     channels * laneH + (channels - 1) * laneGap);
   ImVec2 pos = ImGui::GetCursorScreenPos();
@@ -687,8 +694,9 @@ void drawFrame(AppState& app) {
   // window (and its position) stable across rebuilds and renames.
   for (size_t i = 0; i < app.waves.size();) {
     WavePanel& p = app.waves[i];
-    float cascade = 28.0f * (float)(p.spawnIndex % 8);
-    ImGui::SetNextWindowSize(ImVec2(660, 300), ImGuiCond_FirstUseEver);
+    float cascade = 28.0f * gUiScale * (float)(p.spawnIndex % 8);
+    ImGui::SetNextWindowSize(ImVec2(660 * gUiScale, 300 * gUiScale),
+                             ImGuiCond_FirstUseEver);
     ImGui::SetNextWindowPos(ImVec2(vp->WorkPos.x + 80 + cascade,
                                    vp->WorkPos.y + 90 + cascade),
                             ImGuiCond_FirstUseEver);
@@ -706,8 +714,12 @@ void drawFrame(AppState& app) {
 int usage() {
   std::fprintf(stderr,
                "synth-dev - SynthGraph artifact browser/player\n\n"
-               "Usage: synth-dev [PROJECT_DIR]   (defaults to '.')\n"
-               "       synth-dev --self-test [PROJECT_DIR]\n");
+               "Usage: synth-dev [OPTIONS] [PROJECT_DIR]   (defaults to '.')\n"
+               "       synth-dev --self-test [PROJECT_DIR]\n\n"
+               "Options:\n"
+               "  --fullscreen  fill the whole display (borderless)\n"
+               "  --scale N     scale the UI by N, e.g. 2 on a small/dense "
+               "screen\n");
   return 2;
 }
 
@@ -715,10 +727,16 @@ int usage() {
 
 int main(int argc, char** argv) {
   bool selfTest = false;
+  bool fullscreen = false;
   std::string projectDir = ".";
   for (int i = 1; i < argc; i++) {
     std::string a = argv[i];
     if (a == "--self-test") selfTest = true;
+    else if (a == "--fullscreen") fullscreen = true;
+    else if (a == "--scale" && i + 1 < argc) {
+      gUiScale = std::strtof(argv[++i], nullptr);
+      if (!(gUiScale >= 0.5f && gUiScale <= 8.0f)) return usage();
+    }
     else if (a == "--help" || a[0] == '-') return usage();
     else projectDir = a;
   }
@@ -728,9 +746,13 @@ int main(int argc, char** argv) {
     std::fprintf(stderr, "SDL_Init failed: %s\n", SDL_GetError());
     return 1;
   }
+  Uint32 windowFlags = SDL_WINDOW_RESIZABLE | (selfTest ? SDL_WINDOW_HIDDEN : 0);
+  // Borderless fullscreen at the display's own resolution - no mode
+  // switch, so it behaves on window-manager-less X servers (termux-x11).
+  if (fullscreen && !selfTest) windowFlags |= SDL_WINDOW_FULLSCREEN_DESKTOP;
   SDL_Window* window = SDL_CreateWindow(
       "SynthGraph", SDL_WINDOWPOS_CENTERED, SDL_WINDOWPOS_CENTERED, 900, 600,
-      SDL_WINDOW_RESIZABLE | (selfTest ? SDL_WINDOW_HIDDEN : 0));
+      windowFlags);
   SDL_Renderer* renderer = SDL_CreateRenderer(
       window, -1,
       selfTest ? SDL_RENDERER_SOFTWARE
@@ -742,6 +764,10 @@ int main(int argc, char** argv) {
   ImGui::CreateContext();
   ImGui::GetIO().IniFilename = nullptr;  // no imgui.ini litter
   ImGui::StyleColorsDark();
+  if (gUiScale != 1.0f) {
+    ImGui::GetStyle().ScaleAllSizes(gUiScale);
+    ImGui::GetIO().FontGlobalScale = gUiScale;
+  }
   ImGui_ImplSDL2_InitForSDLRenderer(window, renderer);
   ImGui_ImplSDLRenderer2_Init(renderer);
 

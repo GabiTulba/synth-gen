@@ -100,5 +100,10 @@ watch_pid=$!
 trap 'kill "$watch_pid" 2>/dev/null || true' EXIT
 
 echo "open the Termux:X11 app to see the UI (project: $project)"
+# Mesa prints "ZINK: failed to choose pdev" / "libEGL warning" noise while
+# SDL probes for (unavailable) GPU rendering before settling on the
+# software renderer we asked for; filter those known-harmless lines so
+# they don't read as a failure. Everything else on stderr passes through.
 DISPLAY=":$display" PULSE_SERVER=127.0.0.1 SDL_RENDER_DRIVER=software \
-  "$synth_dev" $fullscreen --scale "$scale" "$project"
+  "$synth_dev" $fullscreen --scale "$scale" "$project" \
+  2> >(grep -vE 'MESA: error: ZINK|libEGL warning' >&2)

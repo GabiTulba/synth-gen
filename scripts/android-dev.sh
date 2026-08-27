@@ -64,10 +64,14 @@ synth_dev=$(find_tool synth-dev)
 
 # --- X display: reuse a live termux-x11, else start one and wait for its
 # socket. The Termux:X11 *app* renders the screen; this is the server side.
+# The socket file alone is not proof of life: Android kills the server
+# process freely (session ended, reboot, memory pressure) and the stale
+# socket survives it, so check for the process too.
 xsocket="${PREFIX:-/data/data/com.termux/files/usr}/tmp/.X11-unix/X$display"
-if [ ! -S "$xsocket" ]; then
+if ! pgrep -f "termux.x11.*:$display" >/dev/null; then
   command -v termux-x11 >/dev/null ||
     { echo "error: termux-x11 not installed (pkg install termux-x11-nightly)" >&2; exit 1; }
+  rm -f "$xsocket"
   echo "starting termux-x11 on display :$display ..."
   termux-x11 ":$display" >/dev/null 2>&1 &
   for _ in $(seq 1 50); do

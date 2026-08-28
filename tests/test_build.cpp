@@ -5001,6 +5001,98 @@ let _ = Ui.panel ~name:"P" ~controls:[gain.ui; bend.ui] ~targets:["demo"] ;;
   CHECK(curved.panels[0].controls[2].depth == 1);
 }
 
+// The source every reservation test builds on: a component of two
+// controls (gain with trim under it) plus a loose one, and whatever
+// panel the case wants.
+static std::string keySource(const std::string& panels) {
+  return "\nopen Core open Core.Control open Core.Arrange open Core.Render "
+         "open Core.Sig\n"
+         "let gain : Scalar Control = Control.knob ~name:\"gain\" "
+         "~min:0.0 ~max:1.0 ~default:0.5 ;;\n"
+         "let trim : Scalar Control = Control.slider ~name:\"trim\" "
+         "~min:0.0 ~max:1.0 ~default:0.5 ;;\n"
+         "let trim2 : Scalar Control = Control.slider ~name:\"trim2\" "
+         "~min:0.0 ~max:1.0 ~default:0.5 ;;\n"
+         "let pair : Scalar Control = Control.nest ~value:gain.value "
+         "~parts:[gain.ui; trim.ui] ;;\n"
+         "let _ = render \"demo\" 8000.0 (sample (constant pair.value) "
+         "0s 50ms) ;;\n" +
+         panels + "\n";
+}
+
+static bool saidThat(const BuildResult& r, const std::string& text) {
+  for (const auto& d : r.diags.items)
+    if (d.message.find(text) != std::string::npos) return true;
+  return false;
+}
+
+static BuildResult buildKeys(const std::string& panels) {
+  TempDir tp;
+  tp.write("a.synth", keySource(panels));
+  tp.write("build.json", projectManifest("keys", {"a.synth"}));
+  return buildProject(tp.dir.string());
+}
+
+TEST(build_a_panel_reserves_a_key_for_a_controller) {
+  // Core.Ui.key pins the label a panel's window reaches a row by. It is
+  // written where the panel lists the controller, not where the control
+  // is declared, so the same control can answer to a different key in
+  // another panel.
+  BuildResult r = buildKeys(
+      "let _ = Ui.panel ~name:\"P\" "
+      "~controls:[Ui.key ~k:\"g\" ~c:pair.ui; trim2.ui] "
+      "~targets:[\"demo\"] ;;");
+  CHECK(r.ok);
+  CHECK(r.panels.size() == 1);
+  const PanelInfo& p = r.panels[0];
+  CHECK(p.controls.size() == 3);
+  // It lands on the component's head row - the one the panel shows it
+  // by - and its parts are left to take what is free.
+  CHECK(p.controls[0].name == "gain" && p.controls[0].key == "g");
+  CHECK(p.controls[1].name == "trim" && p.controls[1].key.empty());
+  CHECK(p.controls[2].name == "trim2" && p.controls[2].key.empty());
+}
+
+TEST(build_a_panel_refuses_the_same_key_twice) {
+  BuildResult r = buildKeys(
+      "let _ = Ui.panel ~name:\"P\" "
+      "~controls:[Ui.key ~k:\"g\" ~c:pair.ui; Ui.key ~k:\"g\" ~c:trim2.ui] "
+      "~targets:[\"demo\"] ;;");
+  CHECK(!r.ok);
+  CHECK(saidThat(r, "reserves the key 'g' twice"));
+}
+
+TEST(build_a_panel_refuses_two_keys_for_one_controller) {
+  BuildResult r = buildKeys(
+      "let _ = Ui.panel ~name:\"P\" "
+      "~controls:[Ui.key ~k:\"g\" ~c:(Ui.key ~k:\"t\" ~c:pair.ui); trim2.ui] "
+      "~targets:[\"demo\"] ;;");
+  CHECK(!r.ok);
+  CHECK(saidThat(r, "is given more than one key"));
+}
+
+TEST(build_a_panel_key_is_one_character) {
+  BuildResult r = buildKeys(
+      "let _ = Ui.panel ~name:\"P\" "
+      "~controls:[Ui.key ~k:\"go\" ~c:pair.ui; trim2.ui] "
+      "~targets:[\"demo\"] ;;");
+  CHECK(!r.ok);
+  CHECK(saidThat(r, "is not a single character"));
+}
+
+TEST(build_the_same_key_in_another_panel_is_fine) {
+  // The labels are a window's, so two windows may each use "g".
+  BuildResult r = buildKeys(
+      "let _ = Ui.panel ~name:\"P\" ~controls:[Ui.key ~k:\"g\" ~c:pair.ui] "
+      "~targets:[\"demo\"] ;;\n"
+      "let _ = Ui.panel ~name:\"Q\" ~controls:[Ui.key ~k:\"g\" ~c:trim2.ui] "
+      "~targets:[] ;;");
+  CHECK(r.ok);
+  CHECK(r.panels.size() == 2);
+  CHECK(r.panels[0].controls[0].key == "g");
+  CHECK(r.panels[1].controls[0].key == "g");
+}
+
 TEST(build_panel_takes_controllers_not_names) {
   // A panel member is a controller a declaration handed back, so a
   // mistyped name is a type error long before it is a missing control -

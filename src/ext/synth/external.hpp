@@ -156,9 +156,10 @@ struct ControlGroupDecl {
 // the project's live controls with some of its render targets, so the
 // dev app can show them together instead of as two flat lists.
 //
-// A control member is a name and a nesting depth: Core.Ui.panel takes a
-// tree of `Controller`s and flattens it here, because a variant cannot
-// cross this boundary with its structure intact. Depth 0 is a control
+// A control member is a name, a nesting depth and any keys reserved for
+// it: Core.Ui.panel takes a tree of `Controller`s and flattens it here,
+// because a variant cannot cross this boundary with its structure
+// intact. Depth 0 is a control
 // the panel names directly; deeper members are the parts of a composite
 // and are drawn as one indented block. A member may name a whole
 // multi_slider group rather than each of its lanes. Targets stay bare
@@ -171,6 +172,11 @@ struct PanelDecl {
   struct Member {
     std::string name;
     int depth = 0;
+    // The keys Core.Ui.key reserved for this member: the letter its
+    // window answers to once its rows are labelled. Normally none or
+    // one - two is a controller that was given a key twice, which the
+    // host refuses by name rather than silently dropping one.
+    std::vector<std::string> keys;
   };
   std::string name;  // panel identifier and title, unique project-wide
   std::vector<Member> controls;

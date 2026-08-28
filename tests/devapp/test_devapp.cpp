@@ -627,6 +627,30 @@ TEST(metadata_without_panels_reports_none) {
   CHECK(m.meta.panels.empty());
 }
 
+TEST(metadata_reads_a_reserved_key_from_a_real_build) {
+  TempDir tp;
+  tp.write("a.synth", R"(
+open Core open Core.Control open Core.Arrange open Core.Render open Core.Sig
+let gain : Scalar Control =
+  Control.knob ~name:"gain" ~min:0.0 ~max:1.0 ~default:0.5 ;;
+let trim : Scalar Control =
+  Control.slider ~name:"trim" ~min:0.0 ~max:1.0 ~default:0.5 ;;
+let _ = render "demo" 8000.0 (sample (constant gain.value) 0s 50ms) ;;
+let _ = Ui.panel ~name:"Voice"
+                 ~controls:[Ui.key ~k:"g" ~c:gain.ui; trim.ui]
+                 ~targets:["demo"] ;;
+)");
+  tp.write("build.json", projectManifest("keyed-panel", {"a.synth"}));
+  BuildResult r = buildProject(tp.dir.string());
+  CHECK(r.ok);
+  MetadataLoadResult m = loadProjectMetadata(r.metadataPath);
+  CHECK(m.ok);
+  CHECK(m.meta.panels.size() == 1);
+  CHECK(m.meta.panels[0].controls[0].name == "gain");
+  CHECK(m.meta.panels[0].controls[0].key == "g");
+  CHECK(m.meta.panels[0].controls[1].key.empty());  // takes what is free
+}
+
 TEST(metadata_reads_panel_members_written_as_bare_names) {
   // Metadata from before panels carried depth: a bare string is a
   // member at depth 0.

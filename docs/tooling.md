@@ -191,8 +191,12 @@ from it, so it cannot drift out of date.
   element result focuses its window *and* selects that element, so
   `Alt+d`, `sust`, `Enter`, `l` finds a knob and turns it up.
 - **Hints** (`f`) put a letter on every row of the focused window;
-  typing it selects that row. Labels are all the same length, so no
-  label is a prefix of another and the typing is never ambiguous.
+  typing it selects that row. A panel can reserve the letter for a row
+  with `Core.Ui.key` where it lists the controller, and that row then
+  always answers to it; everything else takes the first free letter in
+  panel order, so a reservation costs no other row its label. Automatic
+  labels are all the same length and never start with a reserved
+  letter, so the typing is never ambiguous.
 - A keyboard edit goes through exactly the same path as a drag: it
   writes the unit's `controls.json` and shows the same pending `*`.
 

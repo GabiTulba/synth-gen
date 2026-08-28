@@ -24,6 +24,9 @@ struct WindowElement {
   // one called "Kick".
   std::string name;
   int depth = 0;  // the panel member's depth, for the indent
+  // The key the panel reserved for this row (Core.Ui.key), or empty for
+  // the rows that take whatever is left.
+  std::string key;
   bool operator==(const WindowElement&) const = default;
 };
 
@@ -76,6 +79,14 @@ std::vector<Match> searchItems(const std::vector<SearchItem>& items,
 // same length, so no label is a prefix of another and typing is never
 // ambiguous.
 std::vector<std::string> hintLabels(size_t n);
+
+// The same, honouring what the panel reserved: a row with a key keeps
+// it, and the rest take the labels left over, in order. A reservation
+// therefore costs no other row its label, and the panel's own order
+// still decides who gets what among the unkeyed. Reservations are
+// unique by the time they are here - the build refuses a panel that
+// asks for one twice - so nothing here has to arbitrate.
+std::vector<std::string> hintLabelsFor(const std::vector<WindowElement>& es);
 
 // What the letters typed so far amount to: one label exactly, the start
 // of at least one, or nothing that can ever match. On Exact, `index` is

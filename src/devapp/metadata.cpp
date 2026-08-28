@@ -110,12 +110,13 @@ MetadataLoadResult loadProjectMetadata(const std::string& path) {
           cs && cs->kind == json::Value::Kind::Array)
         for (auto& c : cs->array) {
           if (c.kind == json::Value::Kind::String && !c.string.empty())
-            m.controls.push_back(PanelMember{c.string, 0});
+            m.controls.push_back(PanelMember{c.string, 0, {}});
           else if (c.kind == json::Value::Kind::Object) {
             std::string n = c.getString("name");
             if (!n.empty())
-              m.controls.push_back(
-                  PanelMember{std::move(n), (int)c.getNumber("depth", 0)});
+              m.controls.push_back(PanelMember{std::move(n),
+                                               (int)c.getNumber("depth", 0),
+                                               c.getString("key")});
           }
         }
       m.targets = names(p, "targets");
@@ -145,7 +146,7 @@ std::vector<PanelMeta> resolvePanels(const ProjectMeta& meta) {
     const std::string& key = c.group.empty() ? c.name : c.group;
     if (claimedControls.count(key) || claimedControls.count(c.name)) continue;
     if (!c.group.empty() && !seenGroups.insert(c.group).second) continue;
-    rest.controls.push_back(PanelMember{key, 0});
+    rest.controls.push_back(PanelMember{key, 0, {}});
   }
   for (auto& t : meta.targets)
     if (!claimedTargets.count(t.name)) rest.targets.push_back(t.name);

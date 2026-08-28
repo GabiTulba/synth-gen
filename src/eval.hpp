@@ -186,6 +186,12 @@ struct PanelDecl {
   struct Member {
     std::string name;
     int depth = 0;
+    // The keys Core.Ui.key reserved for this member: the letter its
+    // window answers to. As declared this may hold two - a controller
+    // given a key twice - which registerPanel refuses by name; past
+    // registration it holds none or one, and none means the dev app
+    // gives the row the first free key.
+    std::vector<std::string> keys;
   };
   std::string name;  // panel identifier and title, unique project-wide
   std::vector<Member> controls;

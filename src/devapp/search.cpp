@@ -2,6 +2,7 @@
 
 #include <algorithm>
 #include <cctype>
+#include <set>
 
 namespace synth::devapp {
 
@@ -65,15 +66,16 @@ std::vector<WindowElement> windowElements(const PanelMeta& panel,
       if (c.group == m.name) group = true;
     }
     if (plain)
-      out.push_back(WindowElement{WindowElement::Kind::Control, m.name,
-                                  m.depth});
+      out.push_back(
+          WindowElement{WindowElement::Kind::Control, m.name, m.depth, m.key});
     else if (group)
-      out.push_back(WindowElement{WindowElement::Kind::Group, m.name, m.depth});
+      out.push_back(
+          WindowElement{WindowElement::Kind::Group, m.name, m.depth, m.key});
   }
   for (const std::string& t : panel.targets)
     for (const TargetMeta& m : meta.targets)
       if (m.name == t)
-        out.push_back(WindowElement{WindowElement::Kind::Target, t, 0});
+        out.push_back(WindowElement{WindowElement::Kind::Target, t, 0, {}});
   return out;
 }
 
@@ -86,7 +88,8 @@ std::vector<WindowElement> overviewElements(
       ref.kind = WindowRef::Kind::Panel;
       ref.unit = u.unit;
       ref.panel = p.name;
-      out.push_back(WindowElement{WindowElement::Kind::Panel, windowId(ref), 0});
+      out.push_back(
+          WindowElement{WindowElement::Kind::Panel, windowId(ref), 0, {}});
     }
   return out;
 }
@@ -187,6 +190,41 @@ std::vector<Match> searchItems(const std::vector<SearchItem>& items,
                      if (rx != ry) return rx < ry;
                      return x.label < y.label;
                    });
+  return out;
+}
+
+std::vector<std::string> hintLabelsFor(const std::vector<WindowElement>& es) {
+  std::vector<std::string> out(es.size());
+  std::set<std::string> taken;
+  size_t needed = 0;
+  for (size_t i = 0; i < es.size(); i++) {
+    if (es[i].key.empty()) {
+      needed++;
+      continue;
+    }
+    out[i] = es[i].key;
+    taken.insert(es[i].key);
+  }
+
+  // Enough labels that `needed` of them survive striking out the
+  // reserved ones - and, once the automatic labels are two characters
+  // long, striking out any that start with a reserved letter too: `g`
+  // and `ga` in one window would make `ga` unreachable, since `g`
+  // matches first.
+  std::vector<std::string> pool;
+  for (size_t ask = needed + taken.size();
+       pool.size() < needed && ask <= needed + taken.size() + 64; ask++) {
+    pool.clear();
+    for (const std::string& l : hintLabels(ask)) {
+      if (taken.count(l)) continue;
+      if (l.size() > 1 && taken.count(l.substr(0, 1))) continue;
+      pool.push_back(l);
+    }
+  }
+
+  size_t next = 0;
+  for (size_t i = 0; i < es.size(); i++)
+    if (out[i].empty() && next < pool.size()) out[i] = pool[next++];
   return out;
 }
 

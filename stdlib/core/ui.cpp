@@ -6,7 +6,10 @@
 // and every target flat. Purely presentational - the declaration never
 // reaches the engine and never changes a rendered artifact.
 //
-// Controls reach here as (name, depth) pairs and targets as plain names.
+// Controls reach here as (name, depth, keys) triples and targets as
+// plain names. `keys` is what Core.Ui.key reserved for that row: none,
+// one, or - for a controller given a key twice - both, which the host
+// refuses by name.
 // Core.Ui.panel takes a tree of `Controller`s, but a variant cannot cross
 // this boundary with its structure intact, so the public entry point
 // flattens the tree first - the same move multi_slider makes with its
@@ -32,12 +35,15 @@ static std::vector<std::string> names(const Value& v, const char* what) {
 static std::vector<PanelDecl::Member> members(const Value& v) {
   std::vector<PanelDecl::Member> out;
   for (const Value& item : v.asList()) {
-    const std::vector<Value>& pair = item.asTuple();
-    if (pair.size() != 2)
+    const std::vector<Value>& triple = item.asTuple();
+    if (triple.size() != 3)
       throw std::runtime_error("panel: malformed control member");
-    const std::string& n = pair[0].asString();
+    const std::string& n = triple[0].asString();
     if (n.empty()) throw std::runtime_error("panel: empty control name");
-    out.push_back(PanelDecl::Member{n, (int)pair[1].asInt()});
+    std::vector<std::string> keys;
+    for (const Value& k : triple[2].asList()) keys.push_back(k.asString());
+    out.push_back(
+        PanelDecl::Member{n, (int)triple[1].asInt(), std::move(keys)});
   }
   return out;
 }

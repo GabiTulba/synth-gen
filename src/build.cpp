@@ -210,10 +210,15 @@ void writeMetadata(const std::string& path, const BuildResult& r,
       // A member carries the depth it had in the panel's controller
       // tree, which is what lets the dev app draw a composite's parts as
       // one indented block.
-      for (size_t k = 0; k < p.controls.size(); k++)
+      for (size_t k = 0; k < p.controls.size(); k++) {
         j << "{\"name\": \"" << jsonEscape(p.controls[k].name)
-          << "\", \"depth\": " << p.controls[k].depth << "}"
-          << (k + 1 < p.controls.size() ? ", " : "");
+          << "\", \"depth\": " << p.controls[k].depth;
+        // Only when one was reserved: a panel that names no keys writes
+        // exactly what it wrote before they existed.
+        if (!p.controls[k].key.empty())
+          j << ", \"key\": \"" << jsonEscape(p.controls[k].key) << "\"";
+        j << "}" << (k + 1 < p.controls.size() ? ", " : "");
+      }
       j << "]";
       j << ", \"targets\": ";
       nameList(p.targets);
@@ -647,7 +652,9 @@ static BuildResult buildUnitImpl(const std::string& projectDir,
     PanelInfo pi;
     pi.name = p.name;
     for (auto& m : p.controls)
-      pi.controls.push_back(PanelInfo::Member{m.name, m.depth});
+      // Registration has already refused anything but none or one.
+      pi.controls.push_back(PanelInfo::Member{
+          m.name, m.depth, m.keys.empty() ? std::string() : m.keys.front()});
     pi.targets = p.targets;
     r.panels.push_back(std::move(pi));
   }

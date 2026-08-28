@@ -802,8 +802,38 @@ class Interp {
     for (auto& m : p.controls) controlNames.push_back(m.name);
     dupe(controlNames, "control");
     dupe(p.targets, "target");
+    validateKeys(p);
     panelsByName_.emplace(p.name, p);
     if (panels_) panels_->push_back(std::move(p));
+  }
+
+  // A panel's reserved keys are the labels its window shows, so each one
+  // can only ever reach one row. Refusing here - rather than letting the
+  // dev app pick a winner - keeps what the source says and what the
+  // window does the same thing.
+  static void validateKeys(PanelDecl& p) {
+    std::map<std::string, std::string> byKey;  // key -> the member holding it
+    for (PanelDecl::Member& m : p.controls) {
+      if (m.keys.empty()) continue;
+      if (m.keys.size() > 1) {
+        std::string all;
+        for (const std::string& k : m.keys)
+          all += (all.empty() ? "'" : "' and '") + k;
+        throw EvalError("panel '" + p.name + "': '" + m.name +
+                        "' is given more than one key (" + all +
+                        "') - a row answers to one");
+      }
+      const std::string& k = m.keys.front();
+      if (k.size() != 1)
+        throw EvalError("panel '" + p.name + "': the key '" + k +
+                        "' reserved for '" + m.name +
+                        "' is not a single character");
+      auto [it, fresh] = byKey.emplace(k, m.name);
+      if (!fresh)
+        throw EvalError("panel '" + p.name + "' reserves the key '" + k +
+                        "' twice: for '" + it->second + "' and for '" +
+                        m.name + "'");
+    }
   }
 
   // The kinds whose value is a whole number: an integer slider's step, a

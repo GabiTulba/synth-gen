@@ -171,7 +171,11 @@ dev app draw the lanes linked.
 A panel's `"controls"` are members, not bare names:
 `{"name": "decay curve rate", "depth": 1}`. Depth 0 is a control the
 panel names directly; a deeper member is part of a component
-(`Nested_controller`) and is drawn indented under the member above it.
+(`Nested_controller`) and is drawn indented under the member above it. A
+member the panel reserved a key for (`Core.Ui.key`) carries it as
+`"key": "d"` — the letter the dev app's row labels give that row instead
+of the next free one. The field is absent where nothing was reserved, so
+a panel that names no keys writes what it always wrote.
 
 Override values clamp to the declared range; a group is then projected
 back inside its sum bounds, so a hand-edited file cannot hand the

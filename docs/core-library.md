@@ -358,7 +358,9 @@ Every control here yields an **`'a Control`** — a record pairing the value
 this build resolved with the controller a panel shows it with:
 
 ```
-type Controller = | Widget of String | Nested_controller of Controller list
+type Controller = | Widget of String
+                  | Keyed of (String, Controller)
+                  | Nested_controller of Controller list
 type 'a Control = { value : 'a; ui : Controller }
 ```
 
@@ -527,6 +529,43 @@ panel to name.
   waveform — and that check runs after evaluation, so a panel may name a
   target declared further down the file. A hand-built `Widget "name"`
   member is checked the same way.
+
+- **`key k c`** reserves the key the panel's window reaches a
+  controller by. With that window focused, `f` labels its rows and this
+  one always answers to `k`, wherever it sits in the list and whatever
+  is added above it.
+
+  ```
+  let _ = Ui.panel ~name:"Kick"
+            ~controls:[ Ui.key ~k:"e" ~c:env.ui ;
+                        Ui.key ~k:"s" ~c:sustain.ui ;
+                        decay_curve.ui ;
+                        noise_amp.ui ]
+            ~targets:["kick"] ;;
+  ```
+
+  It is written **where the panel lists the controller**, not where the
+  control is declared: the key is a fact about the window showing it, so
+  the same control listed in two panels can answer to a different key in
+  each, and a control's declaration says nothing about the layout.
+
+  `k` is one character. On a component it lands on the head row — the
+  one the panel shows the component by. Rows nobody has spoken for take
+  the first free key in panel order, so reserving one never costs
+  another row its label, and a window with no reservations labels
+  exactly as it did before they existed.
+
+  A panel that reserves one key twice, or gives one controller two keys,
+  is a build error — the labels are what its window shows, so each can
+  only reach one row:
+
+  ```
+  error: panel 'Kick' reserves the key 'd' twice: for 'adsr decay curve'
+         and for 'adsr release curve'
+  ```
+
+  Two different panels may each use `d`, since the labels belong to a
+  window.
 
   Panel names have their own project-wide name space, separate from
   controls and targets. Unlike a control, redeclaring a panel is always

@@ -156,6 +156,7 @@ struct AppState {
   // hint badges and the focus ring can be drawn over them.
   std::map<std::string, std::map<std::string, Rect>> elementRects;
   std::vector<std::string> hintOrder;  // the focused window's elements
+  std::vector<std::string> hintKeys;   // ...and the label each answers to
   std::string hintTyped;
   std::vector<SearchItem> index;
   std::vector<Match> matches;
@@ -1233,7 +1234,8 @@ void drawHints(AppState& app, const Placement& p) {
   if (!focused) return;
   auto rects = app.elementRects.find(windowId(focused->window));
   if (rects == app.elementRects.end()) return;
-  std::vector<std::string> labels = hintLabels(app.hintOrder.size());
+  const std::vector<std::string>& labels = app.hintKeys;
+  if (labels.size() != app.hintOrder.size()) return;
   ImDrawList* dl = ImGui::GetForegroundDrawList();
   for (size_t i = 0; i < app.hintOrder.size(); i++) {
     auto r = rects->second.find(app.hintOrder[i]);
@@ -1577,13 +1579,16 @@ Chord readChord() {
 }
 
 // The rows of the focused window, in draw order: what Tab steps through
-// and what the hints label.
+// and what the hints label - together with the label each one answers
+// to, which is the panel's reservation where it made one.
 void refreshHintOrder(AppState& app) {
   app.hintOrder.clear();
+  app.hintKeys.clear();
   auto w = focusedWindow(app.tab());
   if (!w) return;
-  for (const WindowElement& e : app.elementsOf(*w))
-    app.hintOrder.push_back(e.name);
+  std::vector<WindowElement> es = app.elementsOf(*w);
+  app.hintKeys = hintLabelsFor(es);
+  for (const WindowElement& e : es) app.hintOrder.push_back(e.name);
 }
 
 unsigned contextBits(AppState& app) {
@@ -1768,7 +1773,7 @@ void applyAction(AppState& app, const KeyMachine::Step& s) {
 // when a key was consumed here - it must not go on to the map as well,
 // or one press of `f` picks the label `f` and then reopens the labels.
 bool typeHints(AppState& app) {
-  std::vector<std::string> labels = hintLabels(app.hintOrder.size());
+  const std::vector<std::string>& labels = app.hintKeys;
   bool consumed = false;
   for (int i = 0; i < 26; i++) {
     if (!ImGui::IsKeyPressed((ImGuiKey)(ImGuiKey_A + i), false)) continue;

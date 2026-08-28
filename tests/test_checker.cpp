@@ -3029,6 +3029,7 @@ TEST(checker_core_is_a_real_library_of_externals) {
                                  "Control.choice",
                                  "Control.opt",
                                  "Control.multi_slider",
+                                 "Ui.key",
                                  "Ui.panel"};
   std::function<bool(const std::string&, const std::vector<TopDef>&)>
       allExternal = [&](const std::string& prefix,

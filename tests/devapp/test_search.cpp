@@ -223,6 +223,58 @@ TEST(search_tabs_report_how_much_they_hold) {
   CHECK(buildSearchIndex(tabs, {})[0].detail == "2 windows");
 }
 
+TEST(search_reserved_keys_are_kept_and_the_rest_fill_in_around_them) {
+  auto row = [](const char* name, const char* key) {
+    return WindowElement{WindowElement::Kind::Control, name, 0, key};
+  };
+  // "s" is spoken for, so the automatic labels skip it rather than
+  // handing it out twice - and no other row loses its place in the
+  // order because of the reservation.
+  std::vector<WindowElement> es = {row("attack", ""), row("sustain", "s"),
+                                   row("release", ""), row("amount", "z")};
+  std::vector<std::string> labels = hintLabelsFor(es);
+  CHECK(labels.size() == 4);
+  CHECK(labels[1] == "s");
+  CHECK(labels[3] == "z");
+  CHECK(labels[0] == "a");  // the first free one, in panel order
+  CHECK(labels[2] == "d");  // "s" is taken, so this one skips it
+  std::set<std::string> seen;
+  for (const std::string& l : labels) CHECK(seen.insert(l).second);
+}
+
+TEST(search_a_reserved_key_is_never_a_prefix_of_an_automatic_one) {
+  // Past 26 rows the automatic labels are pairs. A single reserved "a"
+  // beside an automatic "as" would make "as" unreachable, since "a"
+  // matches first.
+  std::vector<WindowElement> es;
+  for (int i = 0; i < 30; i++)
+    es.push_back(WindowElement{WindowElement::Kind::Control,
+                               "c" + std::to_string(i), 0, ""});
+  es[0].key = "a";
+  std::vector<std::string> labels = hintLabelsFor(es);
+  CHECK(labels[0] == "a");
+  std::set<std::string> seen;
+  for (const std::string& l : labels) {
+    CHECK(!l.empty());
+    CHECK(seen.insert(l).second);
+    if (l != "a") CHECK(l.rfind("a", 0) != 0 || l.size() == 1);
+  }
+  // ...and every label still resolves to exactly the row it belongs to.
+  for (size_t i = 0; i < labels.size(); i++) {
+    size_t at = 999;
+    CHECK(matchHint(labels, labels[i], at) == HintMatch::Exact);
+    CHECK(at == i);
+  }
+}
+
+TEST(search_unkeyed_rows_label_exactly_as_before) {
+  std::vector<WindowElement> es;
+  for (int i = 0; i < 6; i++)
+    es.push_back(WindowElement{WindowElement::Kind::Control,
+                               "c" + std::to_string(i), 0, ""});
+  CHECK(hintLabelsFor(es) == hintLabels(6));
+}
+
 TEST(search_hint_matching_tells_a_pick_from_a_dead_end) {
   std::vector<std::string> single = hintLabels(6);  // a s d f g h
   size_t at = 99;

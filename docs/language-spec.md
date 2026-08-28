@@ -244,11 +244,13 @@ the built-in names, needing no import to write in an annotation:
   so `s.from` projects and `{ s with to = 1s }` re-windows a sample.
 - `Controller` and `'a Control` — what a live control declaration hands
   back: `type 'a Control = { value : 'a; ui : Controller }`, where
-  `type Controller = | Widget of String | Nested_controller of Controller
-  list`. `c.value` is the value this build resolved; `c.ui` is what
-  `Ui.panel` takes, so a control's name is written once. A component is
-  a `Nested_controller`: its first part is the head, the rest draw one
-  level in (§6, `Core.Control`).
+  `type Controller = | Widget of String | Keyed of (String, Controller)
+  | Nested_controller of Controller list`. `c.value` is the value this
+  build resolved; `c.ui` is what `Ui.panel` takes, so a control's name
+  is written once. A component is a `Nested_controller`: its first part
+  is the head, the rest draw one level in. A `Keyed` wrapper is the key
+  a panel reserved for it, made by `Ui.key` where the panel lists it
+  (§6, `Core.Control`, `Core.Ui`).
 - `'a Option` — an ordinary variant for a value that may be absent,
   `type 'a Option = | None | Some of 'a`. It is what an optional
   parameter without a default delivers to its body, what a `?x:`

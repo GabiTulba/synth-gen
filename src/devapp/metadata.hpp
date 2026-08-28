@@ -78,6 +78,9 @@ ControlBand controlLaneBand(const ControlMeta& lane, double otherLanesSum);
 struct PanelMember {
   std::string name;
   int depth = 0;
+  // The key this row answers to when the window labels them, reserved
+  // by Core.Ui.key. Empty means it takes the first one left over.
+  std::string key;
 };
 
 struct PanelMeta {

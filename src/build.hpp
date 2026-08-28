@@ -96,6 +96,9 @@ struct PanelInfo {
   struct Member {
     std::string name;
     int depth = 0;
+    // The key the panel reserved for this row (Core.Ui.key), or empty
+    // for the rows the dev app labels with the first free one.
+    std::string key;
   };
   std::string name;
   std::vector<Member> controls;

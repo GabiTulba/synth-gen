@@ -50,6 +50,7 @@ type 'a Option = | None | Some of 'a ;;
    a controller no panel can name. *)
 
 type Controller = | Widget of String
+                  | Keyed of (String, Controller)
                   | Nested_controller of Controller list ;;
 type 'a Control = { value : 'a; ui : Controller } ;;
 
@@ -620,16 +621,43 @@ end ;;
    redeclaring one is a build error. --------------------------------- *)
 
 module Ui = struct
+  (* Reserves the key a panel's window reaches this controller by: with
+     the window focused, `f` labels its rows and this one always answers
+     to `k`, wherever it happens to sit in the list. It belongs here
+     rather than on the control because it is about the panel showing
+     it - the same control listed in two panels can answer to a
+     different key in each.
+
+     `k` is one character. On a component it lands on the head row, the
+     one the panel shows the component by. Rows nobody has spoken for
+     take the first free key, so reserving one key never costs the
+     others theirs. Two reservations of one key in a panel, or two keys
+     for one controller, is a build error. *)
+  let key ~k:String ~c:Controller : Controller = Keyed (k, c) ;;
+
   (* The boundary-crossing form of panel: a variant keeps no structure
-     across it, so `panel` flattens its controller tree to (name, depth)
-     pairs first - the move multi_slider makes with its lane records. *)
-  let panel_members ~name:String ~members:(String, Int) list
+     across it, so `panel` flattens its controller tree to
+     (name, depth, keys) triples first - the move multi_slider makes
+     with its lane records. `keys` is what `key` reserved for that row:
+     none, or one, or - for a controller given a key twice - both, so
+     the host can name them when it refuses. *)
+  let panel_members ~name:String ~members:(String, Int, String list) list
       ~targets:String list : unit = external "ui.cpp" ;;
   let panel ~name:String ~controls:Controller list ~targets:String list
       : unit =
-    let rec flatten ~c:Controller ~depth:Int : (String, Int) list =
+    let rec flatten ~c:Controller ~depth:Int
+        : (String, Int, String list) list =
       match c with
-      | Widget n -> [(n, depth)]
+      | Widget n -> [(n, depth, [])]
+      (* The reservation lands on the head row of whatever it wraps, and
+         keeps any already there: a controller given two keys arrives
+         with both, which is how the host can refuse it by name. *)
+      | Keyed (k, inner) ->
+          (match flatten ~c:inner ~depth:depth with
+           | Nil -> []
+           | Cons ((n, d, ks), rest) ->
+               List.append ~xs:[(n, d, List.append ~xs:[k] ~ys:ks)]
+                           ~ys:rest)
       (* A component's first part is its head and keeps the depth the
          panel gave it; the rest belong to that head and sit one level
          in. So a component of one part draws exactly like the plain
@@ -1578,9 +1606,10 @@ module Dsp = struct
       ~lanes:Control.Lane list : Scalar list Control =
     Control.multi_slider ~name:name ~sum_min:sum_min ~sum_max:sum_max
                          ~lanes:lanes ;;
-  (* dev-app panels *)
+  (* dev-app panels, and the key one reserves for a controller *)
   let panel ~name:String ~controls:Controller list ~targets:String list
       : unit = Ui.panel ~name:name ~controls:controls ~targets:targets ;;
+  let key ~k:String ~c:Controller : Controller = Ui.key ~k:k ~c:c ;;
   (* time conversions *)
   let to_sec ~x:Scalar : Timestamp = Time.to_sec ~x:x ;;
   let to_ms ~x:Scalar : Timestamp = Time.to_ms ~x:x ;;

@@ -378,7 +378,8 @@ ExternalFn loadUserExternal(const std::string& cppPath,
       PanelDecl p;
       p.name = std::move(d.name);
       for (auto& m : d.controls)
-        p.controls.push_back(PanelDecl::Member{std::move(m.name), m.depth});
+        p.controls.push_back(
+            PanelDecl::Member{std::move(m.name), m.depth, std::move(m.keys)});
       p.targets = std::move(d.targets);
       svc.declarePanel(std::move(p));
     };

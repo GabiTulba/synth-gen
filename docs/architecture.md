@@ -112,7 +112,7 @@ before reading any of them:
 | `src/lsp.*` | `synthc lsp`: an LSP server over the front-end (diagnostics, completion, go-to-definition, hover, find-references, rename, outline, formatting), with unsaved-buffer overlays |
 | `src/main.cpp` | `synthc` CLI (`build`, `watch`, `lint`, `lsp`) |
 | `editor/vscode/` | VS Code extension: TextMate grammar for `.synth` plus a thin client that launches `synthc lsp` |
-| `src/devapp/` | `synth-dev`: JSON/metadata reader, SDL audio player, ImGui shell with live refresh and `--self-test` |
+| `src/devapp/` | `synth-dev`: JSON/metadata reader, SDL audio player, i3-style tiling shell (tabs, container tree, keymap state machine, search) with live refresh and `--self-test` |
 | `tests/` | Unit + end-to-end tests (assert-based, run via CTest) |
 | `examples/` | A buildable project root: per-primitive demos, reusable libraries, and full arranged tracks (see the README) |
 | `outputs/` | Committed renders of the showcase projects; refresh with `scripts/render-outputs.sh` |

@@ -1,0 +1,287 @@
+{
+  "version": 1,
+  "controls": {
+    "controls": {
+      "bright": 1,
+      "cutoff": 724,
+      "decay curve": 1,
+      "gain": 0.52
+    }
+  },
+  "ui": {
+    "window": {
+      "x": 66,
+      "y": 69,
+      "w": 1854,
+      "h": 1011
+    },
+    "imgui": "[Window][synthgraph]\nPos=0,0\nSize=1854,1011\n\n[Window][Debug##Default]\nPos=60,60\nSize=400,400\n\n[Window][###panel basic/Basic]\nPos=37,498\nSize=720,560\nCollapsed=1\n\n[Window][###panel pluck/pluck-demo]\nPos=248,340\nSize=720,560\nCollapsed=1\n\n[Window][###panel primitives/primitives]\nPos=33,524\nSize=720,560\nCollapsed=1\n\n[Window][###panel advanced/advanced]\nPos=59,599\nSize=720,560\nCollapsed=1\n\n[Window][###panel sampling/sampling]\nPos=38,561\nSize=720,560\nCollapsed=1\n\n[Window][###panel song/stereo-song]\nPos=39,639\nSize=720,736\nCollapsed=1\n\n[Window][###panel darksynth/darksynth]\nPos=10,434\nSize=720,560\nCollapsed=1\n\n[Window][###panel controls/Tone]\nPos=1038,32\nSize=720,560\n\n[Window][###panel controls/Envelope]\nPos=43,705\nSize=720,560\nCollapsed=1\n\n",
+    "waves": [
+      {
+        "artifact": "_build/advanced/artifacts/doppler.wav",
+        "target": "doppler",
+        "viewStart": 0,
+        "viewEnd": 96000,
+        "selStart": -1,
+        "selEnd": -1,
+        "loop": false
+      },
+      {
+        "artifact": "_build/basic/artifacts/bass-drum-harsh.wav",
+        "target": "bass-drum-harsh",
+        "viewStart": 0,
+        "viewEnd": 14400,
+        "selStart": -1,
+        "selEnd": -1,
+        "loop": false
+      },
+      {
+        "artifact": "_build/basic/artifacts/bass-drum.wav",
+        "target": "bass-drum",
+        "viewStart": 0,
+        "viewEnd": 14400,
+        "selStart": -1,
+        "selEnd": -1,
+        "loop": false
+      },
+      {
+        "artifact": "_build/basic/artifacts/bitonal-saw.wav",
+        "target": "bitonal-saw",
+        "viewStart": 0,
+        "viewEnd": 480000,
+        "selStart": -1,
+        "selEnd": -1,
+        "loop": false
+      },
+      {
+        "artifact": "_build/basic/artifacts/snare.wav",
+        "target": "snare",
+        "viewStart": 0,
+        "viewEnd": 16800,
+        "selStart": -1,
+        "selEnd": -1,
+        "loop": false
+      },
+      {
+        "artifact": "_build/controls/artifacts/tone.wav",
+        "target": "tone",
+        "viewStart": 0,
+        "viewEnd": 48000,
+        "selStart": -1,
+        "selEnd": -1,
+        "loop": true
+      },
+      {
+        "artifact": "_build/darksynth/artifacts/darksynth-bass.wav",
+        "target": "darksynth-bass",
+        "viewStart": 0,
+        "viewEnd": 5760000,
+        "selStart": -1,
+        "selEnd": -1,
+        "loop": false
+      },
+      {
+        "artifact": "_build/darksynth/artifacts/darksynth-drums.wav",
+        "target": "darksynth-drums",
+        "viewStart": 3001569.8974930313,
+        "viewEnd": 3544735.566837637,
+        "selStart": 626086.9565217391,
+        "selEnd": 1510956.5217391306,
+        "loop": false
+      },
+      {
+        "artifact": "_build/darksynth/artifacts/darksynth-fx.wav",
+        "target": "darksynth-fx",
+        "viewStart": 0,
+        "viewEnd": 5760000,
+        "selStart": 1126956.5217391304,
+        "selEnd": 2061913.043478261,
+        "loop": false
+      },
+      {
+        "artifact": "_build/darksynth/artifacts/darksynth-guitar.wav",
+        "target": "darksynth-guitar",
+        "viewStart": 764789.297658863,
+        "viewEnd": 5195558.528428093,
+        "selStart": -1,
+        "selEnd": -1,
+        "loop": false
+      },
+      {
+        "artifact": "_build/darksynth/artifacts/darksynth-pads.wav",
+        "target": "darksynth-pads",
+        "viewStart": 0,
+        "viewEnd": 5760000,
+        "selStart": -1,
+        "selEnd": -1,
+        "loop": false
+      },
+      {
+        "artifact": "_build/darksynth/artifacts/darksynth.wav",
+        "target": "darksynth",
+        "viewStart": 0,
+        "viewEnd": 5760000,
+        "selStart": -1,
+        "selEnd": -1,
+        "loop": false
+      },
+      {
+        "artifact": "_build/pluck/artifacts/demo.wav",
+        "target": "demo",
+        "viewStart": 0,
+        "viewEnd": 96000,
+        "selStart": -1,
+        "selEnd": -1,
+        "loop": false
+      },
+      {
+        "artifact": "_build/primitives/artifacts/saw.wav",
+        "target": "saw",
+        "viewStart": 0,
+        "viewEnd": 48000,
+        "selStart": -1,
+        "selEnd": -1,
+        "loop": false
+      },
+      {
+        "artifact": "_build/primitives/artifacts/sine.wav",
+        "target": "sine",
+        "viewStart": 0,
+        "viewEnd": 48000,
+        "selStart": -1,
+        "selEnd": -1,
+        "loop": false
+      },
+      {
+        "artifact": "_build/primitives/artifacts/square.wav",
+        "target": "square",
+        "viewStart": 0,
+        "viewEnd": 48000,
+        "selStart": -1,
+        "selEnd": -1,
+        "loop": false
+      },
+      {
+        "artifact": "_build/sampling/artifacts/sampling.wav",
+        "target": "sampling",
+        "viewStart": 0,
+        "viewEnd": 192000,
+        "selStart": -1,
+        "selEnd": -1,
+        "loop": false
+      },
+      {
+        "artifact": "_build/song/artifacts/library-preview.wav",
+        "target": "library-preview",
+        "viewStart": 0,
+        "viewEnd": 57600,
+        "selStart": -1,
+        "selEnd": -1,
+        "loop": false
+      },
+      {
+        "artifact": "_build/song/artifacts/song-drums.wav",
+        "target": "song-drums",
+        "viewStart": 0,
+        "viewEnd": 792000,
+        "selStart": -1,
+        "selEnd": -1,
+        "loop": false
+      },
+      {
+        "artifact": "_build/song/artifacts/song-guitar.wav",
+        "target": "song-guitar",
+        "viewStart": 0,
+        "viewEnd": 792000,
+        "selStart": 361565.2173913043,
+        "selEnd": 792000,
+        "loop": false
+      },
+      {
+        "artifact": "_build/song/artifacts/song-pad.wav",
+        "target": "song-pad",
+        "viewStart": 0,
+        "viewEnd": 791999.9999999998,
+        "selStart": -1,
+        "selEnd": -1,
+        "loop": false
+      },
+      {
+        "artifact": "_build/song/artifacts/song-piano.wav",
+        "target": "song-piano",
+        "viewStart": 0,
+        "viewEnd": 792000,
+        "selStart": -1,
+        "selEnd": -1,
+        "loop": false
+      },
+      {
+        "artifact": "_build/song/artifacts/song.wav",
+        "target": "song",
+        "viewStart": 0,
+        "viewEnd": 792000,
+        "selStart": -1,
+        "selEnd": -1,
+        "loop": false
+      }
+    ],
+    "sections": {},
+    "panels": {
+      "@overview": true,
+      "basic/Basic": true,
+      "controls/Envelope": true,
+      "controls/Tone": true
+    },
+    "tabs": [
+      {
+        "index": 1,
+        "focused": [],
+        "root": {
+          "window": {
+            "kind": "panel",
+            "unit": "basic",
+            "panel": "Basic"
+          }
+        }
+      },
+      {
+        "index": 2,
+        "focused": [
+          1
+        ],
+        "root": {
+          "split": "h",
+          "fractions": [
+            0.33333333333333337,
+            0.3333333333333333,
+            0.3333333333333333
+          ],
+          "children": [
+            {
+              "window": {
+                "kind": "overview"
+              }
+            },
+            {
+              "window": {
+                "kind": "panel",
+                "unit": "controls",
+                "panel": "Envelope"
+              }
+            },
+            {
+              "window": {
+                "kind": "panel",
+                "unit": "controls",
+                "panel": "Tone"
+              }
+            }
+          ]
+        }
+      }
+    ],
+    "activeTab": 2,
+    "outline": true,
+    "whichKey": true
+  }
+}

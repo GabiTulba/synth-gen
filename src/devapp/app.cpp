@@ -1,16 +1,19 @@
-// synth-dev — the SynthGraph dev app (design doc §9, §10).
+// synth-dev - the SynthGraph dev app (design doc §9, §10).
 //
 // A pure consumer of build outputs: it reads the project's metadata.json
 // from <root>/_build/<project>/ (where <root> is the enclosing project
-// root, or the project dir itself when standalone), lists render targets
-// with their basic facts, plays artifacts, and live-refreshes when the
-// metadata changes (i.e. whenever the daemon or a one-shot build rewrites
-// it). Pointed at a root, it shows every `build` rule's metadata as its
-// own section. Each audio target opens an interactive waveform panel:
-// per-channel min/max envelopes (the same picture the .svg vis renders),
-// wheel zoom about the cursor, right-drag pan, left-drag range selection,
-// and range playback with a playhead. Beyond root/manifest resolution it
-// never talks to compiler internals.
+// root, or the project dir itself when standalone) and live-refreshes
+// whenever the daemon or a one-shot build rewrites it. Pointed at a
+// root, it shows every `build` rule's metadata at once. Beyond
+// root/manifest resolution it never talks to compiler internals.
+//
+// The shell is a tiling window manager modelled on i3, and this file is
+// all of it: numbered tabs, a tree of split containers per tab, keyboard
+// focus and movement, search, hint labels, the `?` help overlay and the
+// which-key pane. The tree lives in layout.hpp, the shortcut table and
+// its state machine in keymap.hpp, the search index and hints in
+// search.hpp - all headless and unit-tested. What goes *inside* a window
+// (controls, waveforms) is widgets.cpp.
 
 #include <SDL.h>
 
@@ -27,167 +30,96 @@
 #include "imgui.h"
 #include "imgui_impl_sdl2.h"
 #include "imgui_impl_sdlrenderer2.h"
+#include "keymap.hpp"
+#include "layout.hpp"
 #include "metadata.hpp"
 #include "player.hpp"
 #include "projectstate.hpp"
+#include "search.hpp"
 #include "wav.hpp"
 #include "waveform.hpp"
+#include "widgets.hpp"
 
 namespace fs = std::filesystem;
 using namespace synth::devapp;
 
 namespace {
 
-// UI scale factor (--scale). ImGui's style/font scaling covers most of the
-// layout; this covers the few sizes the app picks in raw pixels (knob
-// diameter, slider width, wave-window defaults).
-float gUiScale = 1.0f;
+// The font atlas bakes one pixel size per font, so text drawn at any
+// other size is a stretched bitmap - and shrinking an already small
+// font is what turns it to mush. Baking a ladder of sizes lets a scaled
+// window pick one near what it needs, leaving only a sliver for the
+// window's own font scale to cover, so a window at 80% is about as
+// sharp as one at 100%.
+struct FontLadder {
+  std::vector<std::pair<float, ImFont*>> steps;  // baked size -> font
+  float base = 13.0f;                            // what 100% asks for
 
-// The app's editing state for one live control: `value` is what the UI
-// shows, `editing` is true while the user is actively changing it, and
-// `dirty` is true from the first edit until the daemon's rebuild echoes
-// the value back through the metadata (shown as a pending marker).
-struct ControlUi {
-  float value = 0;
-  bool editing = false;
-  bool dirty = false;
+  void bake(ImGuiIO& io, float uiScale) {
+    static const float kSteps[] = {6,  7,  8,  9,  10, 11, 12, 13, 14,
+                                   16, 18, 20, 23, 26, 30, 34, 39};
+    base = std::max(6.0f, std::floor(13.0f * uiScale));
+    for (float px : kSteps) {
+      ImFontConfig cfg;
+      // Whole pixels: a pixel font is at its best on them.
+      cfg.SizePixels = std::max(6.0f, std::floor(px * uiScale));
+      if (!steps.empty() && steps.back().first == cfg.SizePixels) continue;
+      if (ImFont* f = io.Fonts->AddFontDefault(&cfg))
+        steps.push_back({cfg.SizePixels, f});
+    }
+    io.FontDefault = pick(base, nullptr);
+  }
+
+  int indexNear(float wanted) const {
+    int best = -1;
+    float bestErr = 1e9f;
+    for (size_t i = 0; i < steps.size(); i++)
+      if (std::fabs(steps[i].first - wanted) < bestErr) {
+        bestErr = std::fabs(steps[i].first - wanted);
+        best = (int)i;
+      }
+    return best;
+  }
+
+  int baseIndex() const { return indexNear(base); }
+  int count() const { return (int)steps.size(); }
+  float sizeAt(int i) const {
+    return i >= 0 && i < count() ? steps[(size_t)i].first : base;
+  }
+  ImFont* fontAt(int i) const {
+    return i >= 0 && i < count() ? steps[(size_t)i].second : nullptr;
+  }
+  // The scale a step of the ladder amounts to. A window is only ever at
+  // one of these, so its glyphs are drawn at a size they were baked at:
+  // one texel per pixel, and no resampling to soften them.
+  float scaleAt(int i) const { return sizeAt(i) / base; }
+
+  ImFont* pick(float wanted, float* residual) const {
+    int i = indexNear(wanted);
+    if (residual) *residual = 1.0f;
+    return fontAt(i);
+  }
+};
+FontLadder gFonts;
+
+// What the keyboard has hold of inside the focused window. Named rather
+// than indexed, so a rebuild that adds a control above it does not move
+// the selection out from under you.
+struct Selection {
+  WindowRef window;
+  std::string element;
+  bool active() const { return !element.empty(); }
+  void clear() { element.clear(); }
 };
 
-struct UnitState {
-  MetadataUnit unit;
-  MetadataLoadResult loaded;
-  FileStamp stamp;
-  std::map<std::string, ControlUi> controlUi;  // by control name
-  // What the project's project.json records for this unit. It seeds the
-  // UI the first time a control is seen, so a knob keeps its position
-  // across restarts whether or not a build ever picked the value up.
-  std::map<std::string, double> savedControls;
-  std::string controlsError;  // last overrides-write failure, if any
-  double lastControlWriteSec = 0;  // throttles mid-drag override writes
-};
-
-// How a unit is named in the project state file: the rule path under a
-// root, and a fixed stand-in for the single-unit case (whose label is
-// empty).
-std::string unitKey(const UnitState& u) {
-  return u.unit.label.empty() ? std::string(".") : u.unit.label;
-}
-
-// The control values worth recording: everything that differs from its
-// declaration's default. The same set goes to the project state file and
-// to the build's controls.json, so the two can be compared directly.
-std::map<std::string, double> unitOverrides(const UnitState& u) {
-  std::map<std::string, double> overrides;
-  for (auto& c : u.loaded.meta.controls) {
-    auto it = u.controlUi.find(c.name);
-    if (it == u.controlUi.end()) continue;
-    // The UI value is a float; record the shortest decimal that reads
-    // back as that same float, so the file says 0.42 and not
-    // 0.41999998688697815.
-    if (std::fabs(it->second.value - c.def) > 1e-6) {
-      char buf[40];
-      double v = it->second.value;
-      for (int prec = 3; prec < 9; prec++) {
-        std::snprintf(buf, sizeof buf, "%.*g", prec, v);
-        if (std::strtof(buf, nullptr) == it->second.value) {
-          v = std::strtod(buf, nullptr);
-          break;
-        }
-      }
-      overrides[c.name] = v;
-    }
-  }
-  return overrides;
-}
-
-// One artifact's waveform: the decoded WAV, per-channel peak bins, and
-// the view state (zoom, selection, loop) laid over them. Drawn inside
-// whichever panel names its target - there is one of these per artifact,
-// not per panel - and reloaded automatically when a rebuild rewrites the
-// file.
-struct WavePanel {
-  std::string artifactPath;  // empty = closed
-  std::string targetName;
-  FileStamp stamp;
-  std::string error;  // decode failure, shown in place of the canvas
-  synth::WavData wav;
-  std::vector<PeakBins> bins;  // per channel
-  WaveView view;
-  double selStart = -1, selEnd = -1;  // selection in frames; -1 = none
-  double dragAnchor = -1;             // frame where a selection drag began
-  bool loop = false;   // replay the played range indefinitely
-
-  void open(const std::string& path, const std::string& name) {
-    artifactPath = path;
-    targetName = name;
-    stamp = stampFile(path);
-    load();
-  }
-
-  // Reopens a panel from saved UI state: the artifact is loaded as
-  // usual, then the saved zoom window and selection are put back,
-  // clamped to whatever length the file has now. A range that no longer
-  // makes sense (the artifact was re-rendered shorter, say) falls back
-  // to the fitted view with no selection.
-  void restore(const std::string& path, const WavePanelState& st) {
-    open(path, st.target);
-    loop = st.loop;
-    if (!error.empty() || wav.frames() == 0) return;
-    if (st.viewEnd > st.viewStart) {
-      view.start = st.viewStart;
-      view.end = st.viewEnd;
-      view.clamp();
-    }
-    if (st.selStart >= 0 && st.selEnd > st.selStart) {
-      selStart = std::min(st.selStart, (double)wav.frames());
-      selEnd = std::min(st.selEnd, (double)wav.frames());
-      if (selEnd - selStart < 1) selStart = selEnd = -1;
-    }
-  }
-
-  void load() {
-    error.clear();
-    bins.clear();
-    selStart = selEnd = -1;
-    dragAnchor = -1;
-    try {
-      wav = synth::readWav(artifactPath);
-    } catch (const std::exception& e) {
-      wav = synth::WavData{};
-      error = e.what();
-      view.reset(0);
-      return;
-    }
-    for (auto& ch : wav.channels) bins.push_back(buildPeakBins(ch));
-    view.reset(wav.frames());
-  }
-
-  // A rebuild rewrote (or removed) the artifact: reload, keeping the
-  // current zoom window and selection clamped to the new length. `force`
-  // reloads even when the stamp looks unchanged - a rebuild that rewrites
-  // a same-sized artifact within the filesystem's mtime granularity is
-  // invisible to the stamp, so metadata changes force the panels fresh.
-  void reloadIfChanged(bool force) {
-    if (artifactPath.empty()) return;
-    FileStamp now = stampFile(artifactPath);
-    if (!force && now == stamp) return;
-    stamp = now;
-    WaveView old = view;
-    double oldSelStart = selStart, oldSelEnd = selEnd;
-    load();
-    if (error.empty() && old.frames > 0) {
-      view = old;
-      view.frames = wav.frames();
-      view.clamp();
-      if (oldSelStart >= 0) {
-        selStart = std::min(oldSelStart, (double)wav.frames());
-        selEnd = std::min(oldSelEnd, (double)wav.frames());
-        if (selEnd - selStart < 1) selStart = selEnd = -1;
-      }
-    }
-  }
-
-  bool hasSelection() const { return selStart >= 0 && selEnd > selStart; }
+// An action that can only be carried out while the window it applies to
+// is being drawn (it needs the ImGui window, or the decoded waveform).
+struct Deferred {
+  float scrollLines = 0;
+  float scrollPages = 0;
+  Action wave = Action::None;
+  double waveStep = 0;
+  void clear() { *this = Deferred{}; }
 };
 
 struct AppState {
@@ -200,44 +132,206 @@ struct AppState {
   AudioPlayer player;
   std::string playError;
   // Decoded audio and view state per artifact. Waveforms live inside
-  // panels now, so there is exactly one view per artifact however many
-  // panels name it, and it is dropped when no open panel is showing it -
-  // a stem of a full-length song costs tens of megabytes decoded.
+  // windows, so there is exactly one view per artifact however many
+  // windows name it, and it is dropped when none is showing it - a stem
+  // of a full-length song costs tens of megabytes decoded.
   std::map<std::string, WavePanel> waves;
+  // What resolvePanels() made of each unit, refreshed when its metadata
+  // is. Windows are named after these, and both the search index and
+  // every draw walk them.
+  std::map<std::string, std::vector<PanelMeta>> panels;
+
+  // --- the shell ------------------------------------------------------
+  std::vector<Tab> tabs;
+  int activeTab = 1;
+  bool outline = false;   // the tree, written out beside the layout
+  bool whichKey = true;   // the shortcut pane that narrows as you type
+  // How big each window draws its own contents. A window not in the map
+  // is at 1; nothing else in the shell is affected by it.
+  std::map<std::string, float> windowScales;
+  KeyMachine keys;
+  Selection sel;
+  Deferred deferred;
+  // Where each window's rows landed this frame, by element name, so the
+  // hint badges and the focus ring can be drawn over them.
+  std::map<std::string, std::map<std::string, Rect>> elementRects;
+  std::vector<std::string> hintOrder;  // the focused window's elements
+  std::string hintTyped;
+  std::vector<SearchItem> index;
+  std::vector<Match> matches;
+  std::string searchQuery;
+  int searchPick = 0;
+  bool captureFocus = false;  // put the caret in the search/rename field
+  char textBuf[160] = {};   // what the search and rename fields edit
+  double pendingSince = 0;  // when the held prefix started, for which-key
+  double altSince = 0;      // ...and when Alt went down, for the same reason
+  bool altHeld = false;
+  bool altArmed = false;    // Alt is down and nothing else has been pressed
+  // A settings file written before tabs existed says only which panels
+  // were open; the tabs are built from that once the metadata says what
+  // the panels are.
+  bool migratePending = false;
 
   // The project's settings file (projectstate.hpp). `state` is the last
   // snapshot written to disk; the live state lives in the members it
-  // mirrors (the wave panels, `sections`, `windowGeom`, each unit's
-  // controlUi) plus ImGui's own settings, which we only re-serialize when
-  // ImGui says they changed. Saving compares a freshly captured snapshot
-  // against `state`, so nothing is written while the user is only looking
-  // at the window.
+  // mirrors (the tabs, the wave views, `sections`, `windowGeom`, each
+  // unit's controlUi) plus ImGui's own settings, which we only
+  // re-serialize when ImGui says they changed. Saving compares a freshly
+  // captured snapshot against `state`, so nothing is written while the
+  // user is only looking at the window.
   std::string statePath;
   bool persist = true;  // writes are off under --self-test; reads are not
   ProjectState state;
   std::map<std::string, bool> sections;  // collapsing headers we own
-  // Which panel windows are open, by "<unit>/<panel>", and whether each
-  // unit's flat lists hide what a panel already covers. Where a panel
-  // window sits is ImGui's business, carried in its ini blob; only
-  // whether it is on screen at all is ours to remember.
-  std::map<std::string, bool> panelsOpen;
   WindowGeometry windowGeom;
   bool imguiIniDirty = false;
   double sinceSaveMs = 0;
   std::string stateError;  // last save failure, if any
 
-  std::string panelKey(const UnitState& u, const std::string& panel) {
-    return unitKey(u) + "/" + panel;
+  // The tab on screen. Asking for it creates it: switching to a tab that
+  // does not exist yet is how you get an empty one, as in i3.
+  Tab& tab() { return ensureTab(tabs, activeTab); }
+
+  UnitState* unitFor(const std::string& key) {
+    for (UnitState& u : units)
+      if (unitKey(u.unit) == key) return &u;
+    return nullptr;
   }
 
-  // A panel a project bothered to declare is worth showing, so one the
-  // user has never touched opens by default; closing it persists.
-  bool& panelOpen(const UnitState& u, const std::string& panel) {
-    return panelsOpen.try_emplace(panelKey(u, panel), true).first->second;
+  const PanelMeta* panelFor(const WindowRef& w) {
+    auto it = panels.find(w.unit);
+    if (it == panels.end()) return nullptr;
+    for (const PanelMeta& p : it->second)
+      if (p.name == w.panel) return &p;
+    return nullptr;
   }
 
-  std::vector<PanelMeta> panelsFor(const UnitState& u) {
-    return resolvePanels(u.loaded.meta);
+  std::vector<UnitIndex> unitIndexes() {
+    std::vector<UnitIndex> out;
+    for (UnitState& u : units) {
+      UnitIndex ui;
+      ui.unit = unitKey(u.unit);
+      ui.meta = &u.loaded.meta;
+      ui.panels = panels[ui.unit];
+      out.push_back(std::move(ui));
+    }
+    return out;
+  }
+
+  // The rows of a window, in the order it draws them - the same list the
+  // hints label, the search index carries and Tab steps through. The
+  // overview's rows are the panel tickboxes, which are as selectable as
+  // any control.
+  std::vector<WindowElement> elementsOf(const WindowRef& w) {
+    if (w.kind == WindowRef::Kind::Overview) return overviewElements(unitIndexes());
+    UnitState* u = unitFor(w.unit);
+    const PanelMeta* p = panelFor(w);
+    if (!u || !p) return {};
+    return windowElements(*p, u->loaded.meta);
+  }
+
+  // The panel a row of the overview ticks.
+  std::optional<WindowRef> panelRowTarget(const std::string& id) {
+    for (const WindowRef& w : allWindows())
+      if (w.kind == WindowRef::Kind::Panel && windowId(w) == id) return w;
+    return std::nullopt;
+  }
+
+  // Rebuilt whenever the metadata changes: the panel lists every other
+  // part of the shell names windows from.
+  void refreshPanels() {
+    panels.clear();
+    for (UnitState& u : units)
+      panels[unitKey(u.unit)] = resolvePanels(u.loaded.meta);
+  }
+
+  // Every window a project could show, in a stable order.
+  std::vector<WindowRef> allWindows() {
+    std::vector<WindowRef> out{overviewWindow()};
+    for (UnitState& u : units) {
+      std::string key = unitKey(u.unit);
+      for (const PanelMeta& p : panels[key]) {
+        WindowRef w;
+        w.kind = WindowRef::Kind::Panel;
+        w.unit = key;
+        w.panel = p.name;
+        out.push_back(std::move(w));
+      }
+    }
+    return out;
+  }
+
+  // The area the tiled windows are laid out in, kept from the last
+  // frame so a window can be opened knowing how much room there is.
+  Rect contentArea{0, 0, 1200, 800};
+
+  // A window lives in exactly one tab, as in i3: opening it here takes
+  // it out of wherever it was.
+  void openWindow(const WindowRef& w, int intoTab = 0) {
+    closeWindowEverywhere(tabs, w);
+    insertWindowAuto(ensureTab(tabs, intoTab ? intoTab : activeTab), w,
+                     contentArea);
+  }
+
+  // Showing or hiding a panel, from the tickbox or from the keyboard.
+  // The overview keeps the focus either way: ticking is usually the
+  // first of several, and the new window is on screen regardless.
+  void togglePanel(const WindowRef& w) {
+    Path was = tab().focused;
+    if (tabHolding(tabs, w))
+      closeWindowEverywhere(tabs, w);
+    else
+      openWindow(w);
+    if (!focusWindow(tab(), overviewWindow()) && at(tab().root, was))
+      tab().focused = was;
+  }
+
+  float windowScale(const std::string& id) const {
+    auto it = windowScales.find(id);
+    return it == windowScales.end() ? 1.0f : it->second;
+  }
+
+  // Ctrl+= / Ctrl+- / Ctrl+0 on the focused window. The steps are the
+  // ladder's own sizes, so every one of them is a size the font was
+  // actually rasterised at; `by` of 0 is back to the base step.
+  void scaleFocusedWindow(int by) {
+    auto w = focusedWindow(tab());
+    if (!w) return;
+    std::string id = windowId(*w);
+    int base = gFonts.baseIndex();
+    int at = by == 0 ? base
+                     : std::clamp(gFonts.indexNear(gFonts.base *
+                                                   windowScale(id)) + by,
+                                  0, gFonts.count() - 1);
+    if (at == base)
+      windowScales.erase(id);
+    else
+      windowScales[id] = gFonts.scaleAt(at);
+  }
+
+  void gotoTab(int index) {
+    if (index < 1) return;
+    ensureTab(tabs, index);
+    activeTab = index;
+    sel.clear();
+  }
+
+  // Windows whose panel the build no longer declares have nothing to
+  // draw, so they go; the saved tree keeps naming one until then, which
+  // is what brings a panel back where it was when its declaration
+  // returns.
+  void pruneMissingWindows() {
+    if (units.empty()) return;
+    // Only a build that succeeded says what the panels are. A failed one
+    // declares none - it never got that far - and taking it at its word
+    // would throw the layout away over a typo.
+    for (UnitState& u : units)
+      if (!u.loaded.ok || u.loaded.meta.status != "ok") return;
+    std::set<std::string> live;
+    for (const WindowRef& w : allWindows()) live.insert(windowId(w));
+    for (Tab& t : tabs)
+      for (const WindowRef& w : windowsIn(t))
+        if (!live.count(windowId(w))) removeWindow(t, w);
   }
 
   // The view for one artifact, decoded on first sight. Panels ask for it
@@ -274,7 +368,7 @@ struct AppState {
       // file; `state` is empty on the very first pass, and loadState
       // fills these in once it has been read.
       if (!seen) {
-        auto it = state.controls.find(unitKey(s));
+        auto it = state.controls.find(unitKey(s.unit));
         if (it != state.controls.end()) s.savedControls = it->second;
       }
       next.push_back(std::move(s));
@@ -303,8 +397,8 @@ struct AppState {
     ProjectStateLoad r = loadProjectState(statePath);
     state = std::move(r.state);
     sections = state.ui.sections;
-    panelsOpen = state.ui.panels;
     adoptSavedWaves(state.ui.waves);
+    adoptTabs();
     // Carry the saved placement forward even when this run never touches
     // it (--fullscreen, or a window nobody moves): capturing the state
     // would otherwise write the geometry back out empty.
@@ -330,7 +424,7 @@ struct AppState {
         u.savedControls = std::move(onDisk);
         continue;
       }
-      auto it = state.controls.find(unitKey(u));
+      auto it = state.controls.find(unitKey(u.unit));
       u.savedControls =
           it == state.controls.end() ? std::map<std::string, double>{}
                                      : it->second;
@@ -353,12 +447,20 @@ struct AppState {
       // capturing it would read as "no overrides" and drop what the file
       // already records. Keep the saved values until we know better.
       if (!u.loaded.ok) overrides = u.savedControls;
-      if (!overrides.empty()) s.controls[unitKey(u)] = std::move(overrides);
+      if (!overrides.empty()) s.controls[unitKey(u.unit)] = std::move(overrides);
     }
     s.ui.window = windowGeom;
     s.ui.imguiIni = state.ui.imguiIni;  // refreshed by save() when dirty
     s.ui.sections = sections;
-    s.ui.panels = panelsOpen;
+    s.ui.tabs = tabs;
+    s.ui.activeTab = activeTab;
+    s.ui.outline = outline;
+    s.ui.whichKey = whichKey;
+    for (auto& [id, v] : windowScales) s.ui.windowScales[id] = v;
+    // Which panels are on screen is now a fact about the tabs. It is
+    // written out all the same: it is what an older build of the app,
+    // and the migration below, read.
+    for (const WindowRef& w : windowsIn(tabs)) s.ui.panels[windowId(w)] = true;
     // Every view currently decoded, plus the ones recorded earlier whose
     // panel is closed right now: closing a panel must not throw away the
     // zoom you set inside it.
@@ -463,6 +565,11 @@ struct AppState {
       syncControls(u);
       if (changed) rebuilt = true;
     }
+    if (rebuilt || panels.empty()) {
+      refreshPanels();
+      maybeMigrateTabs();
+      pruneMissingWindows();
+    }
     // Metadata is written after the artifacts, so a metadata change means
     // a build just finished: force every open panel fresh - an artifact
     // rewritten with the same size within the mtime granularity would
@@ -475,19 +582,68 @@ struct AppState {
     // in-memory copy forever.
     if (rebuilt) player.reloadIfLooping();
   }
+
+  // The tabs a previous run left. A project whose settings predate them
+  // gets one tab, and its windows are filled in by maybeMigrateTabs()
+  // as soon as the build says which panels there are.
+  void adoptTabs() {
+    tabs = state.ui.tabs;
+    activeTab = state.ui.activeTab > 0 ? state.ui.activeTab : 1;
+    outline = state.ui.outline;
+    whichKey = state.ui.whichKey;
+    windowScales.clear();
+    for (auto& [id, v] : state.ui.windowScales)
+      windowScales[id] = (float)v;
+    if (!tabs.empty()) {
+      ensureTab(tabs, activeTab);
+      return;
+    }
+    insertWindow(ensureTab(tabs, 1), overviewWindow());
+    migratePending = true;
+  }
+
+  // The old shell kept a flat row of panel checkboxes and a map of which
+  // were open; a panel it had never heard of opened by default. Tab 1
+  // starts out as that same set of windows, tiled.
+  void maybeMigrateTabs() {
+    if (!migratePending) return;
+    bool anyLoaded = false;
+    for (UnitState& u : units) anyLoaded |= u.loaded.ok;
+    if (!anyLoaded) return;
+    migratePending = false;
+    Tab& t = ensureTab(tabs, 1);
+    t = migratedTab(allWindows(), state.ui.panels, contentArea);
+    t.index = 1;
+  }
 };
 
-std::string formatSeconds(double s) {
-  char buf[32];
-  std::snprintf(buf, sizeof(buf), "%.3fs", s);
-  return buf;
+// ---------------------------------------------------------------------
+// Drawing: the tab bar, the tiled windows, and what goes inside them.
+// ---------------------------------------------------------------------
+
+const ImVec4 kBlue(0.70f, 0.80f, 1.00f, 1.0f);
+const ImVec4 kRed(1.00f, 0.45f, 0.45f, 1.0f);
+const ImVec4 kGreen(0.50f, 0.90f, 0.50f, 1.0f);
+const ImU32 kAccent = IM_COL32(110, 205, 160, 255);
+
+ImVec2 v2(const Rect& r) { return ImVec2(r.x, r.y); }
+ImVec2 v2end(const Rect& r) { return ImVec2(r.x + r.w, r.y + r.h); }
+
+// One tone per level of nesting, so the borders say how deep a container
+// sits without anyone having to open the outline.
+ImU32 depthColor(int depth, int alpha) {
+  static const ImU32 rgb[] = {IM_COL32(90, 110, 150, 255),
+                              IM_COL32(150, 120, 90, 255),
+                              IM_COL32(110, 150, 110, 255),
+                              IM_COL32(140, 100, 150, 255)};
+  ImU32 c = rgb[depth % 4];
+  return (c & 0x00FFFFFF) | ((ImU32)alpha << IM_COL32_A_SHIFT);
 }
 
 // A section header whose open/closed state outlives the process. ImGui's
 // ini carries window geometry but deliberately not tree state, so the few
 // headers the app owns are tracked here and saved with the rest of the UI
-// state. `key` must be stable across rebuilds; `defOpen` only applies the
-// first time this run sees the header.
+// state.
 bool persistentHeader(AppState& app, const std::string& key,
                       const std::string& label, bool defOpen) {
   auto [it, inserted] = app.sections.try_emplace(key, defOpen);
@@ -498,35 +654,14 @@ bool persistentHeader(AppState& app, const std::string& key,
   return open;
 }
 
-// A unit's key prefix for `sections`: the rule label under a root, and a
-// fixed stand-in for the single-unit case (where labels are empty).
 std::string sectionKey(const UnitState& u, const char* section) {
-  return (u.unit.label.empty() ? std::string(".") : u.unit.label) + "/" +
-         section;
-}
-
-// The unit's panel switches: one checkbox per declared panel, plus the
-// toggle that hides panel-covered controls and targets from the flat
-// lists below. This row is the whole point of panels - it is what lets
-// you show the two you are working on and put the rest away.
-void drawPanelBar(AppState& app, UnitState& u) {
-  const std::vector<PanelMeta>& panels = u.loaded.meta.panels;
-  if (panels.empty()) return;
-  ImGui::AlignTextToFramePadding();
-  ImGui::TextUnformatted("panels:");
-  for (const PanelMeta& p : panels) {
-    ImGui::SameLine();
-    bool open = app.panelOpen(u, p.name);
-    if (ImGui::Checkbox(p.name.c_str(), &open))
-      app.panelOpen(u, p.name) = open;
-  }
-  ImGui::Separator();
+  return unitKey(u.unit) + "/" + section;
 }
 
 void drawDiagnostics(AppState& app, const UnitState& u) {
   const ProjectMeta& meta = u.loaded.meta;
   if (meta.diagnostics.empty()) return;
-  ImGui::PushStyleColor(ImGuiCol_Text, ImVec4(1.0f, 0.45f, 0.45f, 1.0f));
+  ImGui::PushStyleColor(ImGuiCol_Text, kRed);
   bool open = persistentHeader(
       app, sectionKey(u, "diags"),
       "diagnostics (" + std::to_string(meta.diagnostics.size()) + ")###diags",
@@ -542,555 +677,75 @@ void drawDiagnostics(AppState& app, const UnitState& u) {
   }
 }
 
-
-// A rotary knob: drag vertically to change the value (hold Shift for
-// fine adjustment). Returns true while the drag is changing the value.
-bool knobFloat(const char* id, float* v, float vmin, float vmax,
-               float diameter) {
-  ImGui::PushID(id);
-  ImVec2 pos = ImGui::GetCursorScreenPos();
-  ImGui::InvisibleButton("knob", ImVec2(diameter, diameter));
-  bool edited = false;
-  ImGuiIO& io = ImGui::GetIO();
-  if (ImGui::IsItemActive() && io.MouseDelta.y != 0.0f) {
-    // Full range over ~200 px of travel; 10x finer with Shift.
-    float perPixel = (vmax - vmin) / 200.0f;
-    if (io.KeyShift) perPixel *= 0.1f;
-    *v = std::clamp(*v - io.MouseDelta.y * perPixel, vmin, vmax);
-    edited = true;
-  }
-
-  // The dial: a 270-degree arc from lower-left to lower-right, with the
-  // indicator line at the value's angle.
-  ImDrawList* dl = ImGui::GetWindowDrawList();
-  ImVec2 center(pos.x + diameter * 0.5f, pos.y + diameter * 0.5f);
-  float radius = diameter * 0.5f - 2.0f;
-  float t = vmax > vmin ? (*v - vmin) / (vmax - vmin) : 0.0f;
-  const float start = 0.75f * 3.14159265f;  // lower-left
-  const float sweep = 1.5f * 3.14159265f;   // 270 degrees
-  bool hovered = ImGui::IsItemHovered() || ImGui::IsItemActive();
-  dl->PathArcTo(center, radius, start, start + sweep, 24);
-  dl->PathStroke(IM_COL32(70, 70, 88, 255), 0, 2.0f);
-  dl->PathArcTo(center, radius, start, start + sweep * t, 24);
-  dl->PathStroke(IM_COL32(110, 205, 160, 255), 0, 2.0f);
-  float angle = start + sweep * t;
-  dl->AddLine(center,
-              ImVec2(center.x + std::cos(angle) * radius * 0.75f,
-                     center.y + std::sin(angle) * radius * 0.75f),
-              hovered ? IM_COL32(235, 235, 245, 255)
-                      : IM_COL32(200, 200, 210, 255),
-              2.0f);
-  ImGui::PopID();
-  return edited;
+// The bar along the top: one entry per tab, the one on screen
+// highlighted, then what mode the keyboard is in. Clicking a tab is the
+// mouse's Alt+<n>.
+float tabBarHeight() {
+  return ImGui::GetFrameHeight() + ImGui::GetStyle().WindowPadding.y * 2;
 }
 
-// One lane of a multi_slider group. The lane's own range spans the whole
-// track, but the group's sum budget usually puts part of that range out
-// of reach, so the track is drawn in three bands: what the lane has
-// taken, the headroom it can still take, and the stretch the other lanes
-// have spoken for. Dragging stops at [lo, hi] - no other lane ever moves
-// on its own. Returns true while the drag is changing the value.
-bool laneSliderFloat(const char* id, float* v, float vmin, float vmax,
-                     float lo, float hi, float width, float height) {
-  ImGui::PushID(id);
-  ImVec2 pos = ImGui::GetCursorScreenPos();
-  ImGui::InvisibleButton("lane", ImVec2(width, height));
-  bool edited = false;
-  float span = vmax - vmin;
-  if (ImGui::IsItemActive() && span > 0) {
-    // Absolute positioning, like ImGui's own slider: the value follows
-    // the cursor across the track, then clamps to the reachable band.
-    float t = (ImGui::GetIO().MousePos.x - pos.x) / width;
-    float want = vmin + std::clamp(t, 0.0f, 1.0f) * span;
-    float next = std::clamp(want, lo, hi);
-    if (next != *v) {
-      *v = next;
-      edited = true;
-    }
-  }
-
-  ImDrawList* dl = ImGui::GetWindowDrawList();
-  auto atX = [&](float value) {
-    float t = span > 0 ? (value - vmin) / span : 0.0f;
-    return pos.x + std::clamp(t, 0.0f, 1.0f) * width;
-  };
-  float y0 = pos.y, y1 = pos.y + height;
-  // Out of reach (the other lanes' share), then reachable, then taken.
-  dl->AddRectFilled(pos, ImVec2(pos.x + width, y1), IM_COL32(34, 34, 44, 255));
-  dl->AddRectFilled(ImVec2(atX(lo), y0), ImVec2(atX(hi), y1),
-                    IM_COL32(70, 70, 88, 255));
-  dl->AddRectFilled(ImVec2(atX(*v), y0), ImVec2(atX(hi), y1),
-                    IM_COL32(74, 108, 92, 255));
-  dl->AddRectFilled(ImVec2(pos.x, y0), ImVec2(atX(*v), y1),
-                    IM_COL32(110, 205, 160, 255));
-  // The limits themselves: where the sum budget stops this lane.
-  if (hi < vmax - 1e-6f)
-    dl->AddLine(ImVec2(atX(hi), y0), ImVec2(atX(hi), y1),
-                IM_COL32(235, 200, 110, 230), 2.0f);
-  if (lo > vmin + 1e-6f)
-    dl->AddLine(ImVec2(atX(lo), y0), ImVec2(atX(lo), y1),
-                IM_COL32(235, 200, 110, 230), 2.0f);
-  bool hot = ImGui::IsItemHovered() || ImGui::IsItemActive();
-  dl->AddLine(ImVec2(atX(*v), y0 - 1), ImVec2(atX(*v), y1 + 1),
-              hot ? IM_COL32(245, 245, 250, 255) : IM_COL32(205, 205, 215, 255),
-              2.0f);
-  dl->AddRect(pos, ImVec2(pos.x + width, y1), IM_COL32(90, 90, 110, 255));
-  ImGui::PopID();
-  return edited;
-}
-
-// How much of the group's budget is spent, drawn as a bar: the filled
-// part is the current sum against sum_max, and the tick (when there is
-// one) is the sum_min the group must stay above.
-void groupBudgetBar(double sum, double sumMin, double sumMax, float width,
-                    float height) {
-  ImVec2 pos = ImGui::GetCursorScreenPos();
-  ImGui::Dummy(ImVec2(width, height));
-  ImDrawList* dl = ImGui::GetWindowDrawList();
-  ImVec2 end(pos.x + width, pos.y + height);
-  dl->AddRectFilled(pos, end, IM_COL32(34, 34, 44, 255));
-  double t = sumMax > 0 ? std::clamp(sum / sumMax, 0.0, 1.0) : 0.0;
-  bool full = sumMax > 0 && sum >= sumMax - 1e-6;
-  dl->AddRectFilled(pos, ImVec2(pos.x + width * (float)t, end.y),
-                    full ? IM_COL32(235, 200, 110, 255)
-                         : IM_COL32(110, 205, 160, 255));
-  if (sumMin > 0 && sumMax > 0) {
-    float x = pos.x + width * (float)std::clamp(sumMin / sumMax, 0.0, 1.0);
-    dl->AddLine(ImVec2(x, pos.y), ImVec2(x, end.y), IM_COL32(150, 170, 235, 255),
-                2.0f);
-  }
-  dl->AddRect(pos, end, IM_COL32(90, 90, 110, 255));
-}
-
-// Writes the unit's override file from the UI values: every control that
-// differs from its declared default. Also called with everything back at
-// defaults - the (empty) overrides object still reaches the daemon and
-// rebuilds. The write is atomic, so a mid-write daemon poll never parses
-// a torn file.
-void writeUnitOverrides(UnitState& u) {
-  std::map<std::string, double> overrides = unitOverrides(u);
-  u.controlsError.clear();
-  std::string err;
-  if (!writeControlOverrides(controlsPathFor(u.unit.metadataPath), overrides,
-                             err))
-    u.controlsError = err;
-}
-
-// Marks a control edited and pushes it to the daemon. Mid-drag writes
-// make the sound track the drag; the throttle keeps a fast drag from
-// flooding the daemon with rebuilds, and the release write always lands.
-void noteControlEdit(UnitState& u, ControlUi& ui, bool released) {
-  ui.dirty = true;
-  if (released) {
-    ui.editing = false;
-    writeUnitOverrides(u);
-    u.lastControlWriteSec = ImGui::GetTime();
-    return;
-  }
-  ui.editing = true;
-  if (ImGui::GetTime() - u.lastControlWriteSec > 0.1) {
-    writeUnitOverrides(u);
-    u.lastControlWriteSec = ImGui::GetTime();
-  }
-}
-
-// The pending-rebuild marker and the per-control reset button, shared by
-// plain controls and group lanes.
-bool drawControlTail(UnitState& u, ControlUi& ui, const ControlMeta& c) {
-  bool dirty = ui.dirty;
-  if (dirty) {
+void drawTabBar(AppState& app, float width) {
+  ImGui::SetNextWindowPos(ImVec2(0, 0));
+  ImGui::SetNextWindowSize(ImVec2(width, tabBarHeight()));
+  ImGui::Begin("###tabbar", nullptr,
+               ImGuiWindowFlags_NoDecoration | ImGuiWindowFlags_NoSavedSettings |
+                   ImGuiWindowFlags_NoBringToFrontOnFocus |
+                   ImGuiWindowFlags_NoNavFocus);
+  for (const Tab& t : app.tabs) {
+    bool active = t.index == app.activeTab;
+    ImGui::PushStyleColor(ImGuiCol_Button,
+                          active ? ImVec4(0.20f, 0.34f, 0.28f, 1.0f)
+                                 : ImVec4(0.16f, 0.16f, 0.20f, 1.0f));
+    ImGui::PushStyleColor(ImGuiCol_Text,
+                          active ? ImVec4(0.85f, 1.0f, 0.90f, 1.0f)
+                                 : ImVec4(0.70f, 0.70f, 0.76f, 1.0f));
+    std::string label = tabLabel(t);
+    if (t.empty()) label += " (empty)";
+    if (ImGui::Button((label + "###tab" + std::to_string(t.index)).c_str()))
+      app.gotoTab(t.index);
+    ImGui::PopStyleColor(2);
     ImGui::SameLine();
-    ImGui::TextColored(ImVec4(0.95f, 0.85f, 0.5f, 1.0f), "*");
-    if (ImGui::IsItemHovered())
-      ImGui::SetTooltip("waiting for a rebuild with this value\n"
-                        "(leave `synthc watch` running)");
   }
-  ImGui::SameLine();
-  if (ImGui::SmallButton("reset")) {
-    ui.value = (float)c.def;
-    ui.editing = false;
-    ui.dirty = true;
-    writeUnitOverrides(u);
+  if (ImGui::Button("+")) app.gotoTab(nextFreeTabIndex(app.tabs));
+  if (ImGui::IsItemHovered()) ImGui::SetTooltip("new tab (Alt+n)");
+
+  // The right-hand end: what mode we are in, and how to find the rest.
+  std::string right = app.keys.mode == Mode::Normal
+                          ? std::string("? for shortcuts")
+                          : std::string("-- ") + modeName(app.keys.mode) +
+                                " -- (Esc)";
+  if (!app.keys.prefixLabel().empty())
+    right = app.keys.prefixLabel() + "  (Esc cancels)";
+  if (app.keys.mode == Mode::Select) {
+    Run r = focusedRun(app.tab());
+    int n = r.valid ? r.count() : 1;
+    right = "-- select: " + std::to_string(n) +
+            (n == 1 ? " window -- (Esc)" : " windows -- (Esc)");
+    if (focusIsContainer(app.tab())) right = "-- select: container -- (Esc)";
   }
-  return dirty;
-}
-
-// One multi_slider group: lanes that share a budget for their sum. Each
-// lane is drawn against the band the other lanes leave it
-// (controlLaneBand), and dragging clamps to that band - so the group
-// invariant holds after every drag without any lane moving on its own.
-// Returns true if any lane is waiting on a rebuild.
-bool drawControlGroup(UnitState& u, const std::vector<ControlMeta>& controls,
-                      size_t first, size_t count) {
-  const ControlMeta& head = controls[first];
-  double sum = 0;
-  for (size_t k = 0; k < count; k++)
-    sum += u.controlUi[controls[first + k].name].value;
-
-  ImGui::PushID(head.group.c_str());
-  float width = std::max(200.0f * gUiScale,
-                         ImGui::GetContentRegionAvail().x * 0.45f);
+  float w = ImGui::CalcTextSize(right.c_str()).x;
+  ImGui::SameLine(std::max(ImGui::GetCursorPosX(),
+                           width - w - ImGui::GetStyle().WindowPadding.x * 2));
   ImGui::AlignTextToFramePadding();
-  ImGui::TextColored(ImVec4(0.7f, 0.8f, 1.0f, 1.0f), "%s", head.group.c_str());
-  ImGui::SameLine();
-  if (head.sumMin > 0)
-    ImGui::TextDisabled("sum %.4g of %.4g (at least %.4g)", sum, head.sumMax,
-                        head.sumMin);
+  if (app.keys.mode == Mode::Normal)
+    ImGui::TextDisabled("%s", right.c_str());
   else
-    ImGui::TextDisabled("sum %.4g of %.4g", sum, head.sumMax);
-  groupBudgetBar(sum, head.sumMin, head.sumMax, width, 6.0f * gUiScale);
-
-  bool anyDirty = false;
-  for (size_t k = 0; k < count; k++) {
-    const ControlMeta& c = controls[first + k];
-    ControlUi& ui = u.controlUi[c.name];
-    ControlBand band = controlLaneBand(c, sum - ui.value);
-    float lo = (float)band.lo, hi = (float)band.hi;
-    ImGui::PushID((int)k);
-    bool edited = laneSliderFloat("##lane", &ui.value, (float)c.min,
-                                  (float)c.max, lo, hi, width,
-                                  16.0f * gUiScale);
-    bool released = ImGui::IsItemDeactivated() && ui.editing;
-    if (edited || released) {
-      sum = 0;
-      for (size_t j = 0; j < count; j++)
-        sum += u.controlUi[controls[first + j].name].value;
-      noteControlEdit(u, ui, released);
-    }
-    ImGui::SameLine();
-    ImGui::AlignTextToFramePadding();
-    // The lane's own name; the group already named itself above.
-    const char* lane = c.name.c_str() + head.group.size() + 1;
-    ImGui::Text("%s  %.4g", lane, (double)ui.value);
-    if (hi < c.max - 1e-6) {
-      ImGui::SameLine();
-      ImGui::TextDisabled("(<= %.4g)", (double)hi);
-      if (ImGui::IsItemHovered())
-        ImGui::SetTooltip("the other lanes have spoken for the rest of the "
-                          "budget;\nlower one of them to take more here");
-    }
-    anyDirty |= drawControlTail(u, ui, c);
-    ImGui::PopID();
-  }
-
-  if (ImGui::SmallButton("group defaults")) {
-    for (size_t k = 0; k < count; k++) {
-      ControlUi& ui = u.controlUi[controls[first + k].name];
-      ui.value = (float)controls[first + k].def;
-      ui.editing = false;
-      ui.dirty = true;
-    }
-    writeUnitOverrides(u);
-  }
-  ImGui::PopID();
-  return anyDirty;
+    ImGui::TextColored(ImGui::ColorConvertU32ToFloat4(kAccent), "%s",
+                       right.c_str());
+  ImGui::End();
 }
 
-// The live controls of one unit: a slider or knob per Core.Control
-// declaration, and one linked block per multi_slider group. Edits write
-// the unit's controls.json live while dragging (throttled to ~10
-// writes/second) and once more on release; an attached `synthc watch`
-// picks each write up and rebuilds, and the pending marker clears once
-// the new metadata echoes the final value back.
-// One ungrouped control: a knob or a slider, its name, and the pending
-// marker. Split out so a panel can draw one control at a time.
-// for a member it names.
-bool drawOneControl(UnitState& u, const ControlMeta& c) {
-  {
-    ControlUi& ui = u.controlUi[c.name];
-    ImGui::PushID(c.name.c_str());
-    bool edited = false, released = false;
-    if (c.kind == "knob") {
-      edited = knobFloat("##knob", &ui.value, (float)c.min, (float)c.max,
-                         36.0f * gUiScale);
-      released = ImGui::IsItemDeactivated() && ui.editing;
-      ImGui::SameLine();
-      ImGui::AlignTextToFramePadding();
-      ImGui::Text("%s  %.4g", c.name.c_str(), (double)ui.value);
-    } else if (c.kind == "toggle") {
-      // A tickbox has no drag: the click that flips it is also the end
-      // of the edit, so the override write lands immediately.
-      bool on = ui.value >= 0.5f;
-      if (ImGui::Checkbox("##toggle", &on)) {
-        ui.value = on ? 1.0f : 0.0f;
-        edited = released = true;
-      }
-      ImGui::SameLine();
-      ImGui::AlignTextToFramePadding();
-      ImGui::TextUnformatted(c.name.c_str());
-    } else if (c.kind == "choice") {
-      // One tickbox per option, the value their index. Labels come from
-      // the build; "##k" keeps two same-named options apart for ImGui
-      // without showing anything extra.
-      int pick = (int)std::lround((double)ui.value);
-      ImGui::AlignTextToFramePadding();
-      ImGui::TextUnformatted(c.name.c_str());
-      for (size_t k = 0; k < c.options.size(); k++) {
-        ImGui::SameLine();
-        std::string label = c.options[k] + "##" + std::to_string(k);
-        if (ImGui::RadioButton(label.c_str(), &pick, (int)k)) {
-          ui.value = (float)pick;
-          edited = released = true;
-        }
-      }
-    } else if (c.kind == "int_slider") {
-      ImGui::SetNextItemWidth(
-          std::max(160.0f * gUiScale,
-                   ImGui::GetContentRegionAvail().x * 0.45f));
-      int v = (int)std::lround((double)ui.value);
-      if (ImGui::SliderInt("##int", &v, (int)c.min, (int)c.max)) {
-        ui.value = (float)v;
-        edited = true;
-      }
-      released = ImGui::IsItemDeactivatedAfterEdit();
-      ImGui::SameLine();
-      ImGui::TextUnformatted(c.name.c_str());
-    } else {
-      ImGui::SetNextItemWidth(
-          std::max(160.0f * gUiScale,
-                   ImGui::GetContentRegionAvail().x * 0.45f));
-      edited = ImGui::SliderFloat("##slider", &ui.value, (float)c.min,
-                                  (float)c.max, "%.4g");
-      released = ImGui::IsItemDeactivatedAfterEdit();
-      ImGui::SameLine();
-      ImGui::TextUnformatted(c.name.c_str());
-    }
-    if (edited || released) noteControlEdit(u, ui, released);
-    bool dirty = drawControlTail(u, ui, c);
-    ImGui::PopID();
-    return dirty;
-  }
-}
-
-// The lanes of one multi_slider group, found by name. Lanes arrive
-// consecutively in declaration order, so the group is the run of
-// controls sharing this name; they draw together because each lane's
-// limits depend on where the others sit. Returns false when no such
-// group exists.
-bool drawGroupByName(UnitState& u, const std::vector<ControlMeta>& controls,
-                     const std::string& group, bool& anyDirty) {
-  for (size_t i = 0; i < controls.size(); i++) {
-    if (controls[i].group != group) continue;
-    size_t n = 1;
-    while (i + n < controls.size() && controls[i + n].group == group) n++;
-    anyDirty |= drawControlGroup(u, controls, i, n);
-    return true;
-  }
-  return false;
-}
-
-// The unit's whole control list, groups drawn linked. `skip`, when set,
-// names the members some panel already covers, which the "grouped only"
-// toggle hides from here.
-void drawControlList(UnitState& u, const std::vector<ControlMeta>& controls,
-                     const std::set<std::string>* skip, bool& anyDirty) {
-  for (size_t i = 0; i < controls.size();) {
-    if (!controls[i].group.empty()) {
-      const std::string& group = controls[i].group;
-      size_t n = 1;
-      while (i + n < controls.size() && controls[i + n].group == group) n++;
-      if (!skip || !skip->count(group))
-        anyDirty |= drawControlGroup(u, controls, i, n);
-      i += n;
-      continue;
-    }
-    const ControlMeta& c = controls[i++];
-    if (skip && skip->count(c.name)) continue;
-    anyDirty |= drawOneControl(u, c);
-  }
-}
-
-
-// The contents of one waveform view: min/max envelope lanes per channel
-// (matching the .svg vis), wheel zoom about the cursor, right-drag pan,
-// left-drag selection, and (optionally looped) playback of the selection
-// or visible range.
-//
-// `availY` is the vertical room the canvas may take. A panel showing
-// several targets divides its window between them and passes each one's
-// share; pass -1 to fill whatever is left, which is what a view that
-// owns its window wants.
-void drawWaveContent(AppState& app, WavePanel& p, float availY = -1.0f) {
-  if (!p.error.empty()) {
-    ImGui::TextColored(ImVec4(1.0f, 0.45f, 0.45f, 1.0f), "cannot load %s: %s",
-                       p.artifactPath.c_str(), p.error.c_str());
-    return;
-  }
-  if (p.wav.frames() == 0) {
-    ImGui::TextDisabled("empty artifact");
-    return;
-  }
-
-  WaveView& v = p.view;
-  double rate = p.wav.rate;
-
-  bool isThisPlaying =
-      app.player.playing() && app.player.currentPath() == p.artifactPath;
-  if (isThisPlaying) {
-    if (ImGui::SmallButton("stop")) app.player.stop();
-  } else {
-    if (ImGui::SmallButton(p.hasSelection() ? "play selection"
-                                            : "play view")) {
-      double from = p.hasSelection() ? p.selStart : v.start;
-      double to = p.hasSelection() ? p.selEnd : v.end;
-      app.playError.clear();
-      if (!app.player.playRange(p.artifactPath, (int64_t)std::floor(from),
-                                (int64_t)std::ceil(to), app.playError,
-                                p.loop) &&
-          !app.playError.empty())
-        app.playError = p.targetName + ": " + app.playError;
-    }
-  }
-  ImGui::SameLine();
-  // Replays the played range (the selection, usually) until stopped;
-  // toggling mid-play applies to the running playback too.
-  if (ImGui::Checkbox("loop", &p.loop) && isThisPlaying)
-    app.player.setLooping(p.loop);
-  ImGui::SameLine();
-  if (ImGui::SmallButton("zoom in")) v.zoomAt(0.5, 1.0 / 1.5);
-  ImGui::SameLine();
-  if (ImGui::SmallButton("zoom out")) v.zoomAt(0.5, 1.5);
-  ImGui::SameLine();
-  if (ImGui::SmallButton("fit")) v.reset(v.frames);
-  if (p.hasSelection()) {
-    ImGui::SameLine();
-    if (ImGui::SmallButton("zoom to selection")) {
-      v.start = p.selStart;
-      v.end = p.selEnd;
-      v.clamp();
-    }
-    ImGui::SameLine();
-    if (ImGui::SmallButton("clear selection")) p.selStart = p.selEnd = -1;
-  }
-  ImGui::SameLine();
-  if (rate > 0) {
-    std::string info = "view " + formatSeconds(v.start / rate) + " - " +
-                       formatSeconds(v.end / rate);
-    if (p.hasSelection())
-      info += " | selection " + formatSeconds(p.selStart / rate) + " - " +
-              formatSeconds(p.selEnd / rate) + " (" +
-              formatSeconds((p.selEnd - p.selStart) / rate) + ")";
-    else
-      info += " | drag: select, wheel: zoom, right-drag: pan";
-    ImGui::TextDisabled("%s", info.c_str());
-  }
-
-  int channels = (int)p.wav.channels.size();
-  float laneGap = 4.0f;
-  // The canvas fills its share of the window, so resizing the window
-  // resizes the lanes.
-  if (availY < 0) availY = ImGui::GetContentRegionAvail().y;
-  float laneH = std::max(28.0f * gUiScale,
-                         (availY - (channels - 1) * laneGap) / channels);
-  ImVec2 canvasSize(std::max(120.0f, ImGui::GetContentRegionAvail().x),
-                    channels * laneH + (channels - 1) * laneGap);
-  ImVec2 pos = ImGui::GetCursorScreenPos();
-  ImGui::InvisibleButton("wave_canvas", canvasSize);
-  bool hovered = ImGui::IsItemHovered();
-  ImDrawList* dl = ImGui::GetWindowDrawList();
-  ImGuiIO& io = ImGui::GetIO();
-  double width = canvasSize.x;
-  auto frameToX = [&](double f) {
-    return pos.x + (float)((f - v.start) / v.span() * width);
-  };
-  auto xToFrame = [&](double x) {
-    return v.start + (x - pos.x) / width * v.span();
-  };
-
-  // An in-progress drag (right-button pan or left-button selection) takes
-  // precedence over wheel zoom: applying both in one frame makes them
-  // fight over the view.
-  bool dragActive = ImGui::IsMouseDown(ImGuiMouseButton_Right) ||
-                    ImGui::IsItemActive();
-  if (hovered && io.MouseWheel != 0 && !dragActive) {
-    double frac = std::clamp((double)(io.MousePos.x - pos.x) / width, 0.0, 1.0);
-    v.zoomAt(frac, std::pow(1.3, (double)-io.MouseWheel));
-  }
-  if (hovered && ImGui::IsMouseDragging(ImGuiMouseButton_Right, 0))
-    v.pan(-io.MouseDelta.x * v.span() / width);
-
-  if (ImGui::IsItemActivated())
-    p.dragAnchor = std::clamp(xToFrame(io.MousePos.x), 0.0, (double)v.frames);
-  if (ImGui::IsItemActive() && ImGui::IsMouseDown(ImGuiMouseButton_Left) &&
-      p.dragAnchor >= 0) {
-    double cur = std::clamp(xToFrame(io.MousePos.x), 0.0, (double)v.frames);
-    p.selStart = std::min(p.dragAnchor, cur);
-    p.selEnd = std::max(p.dragAnchor, cur);
-  }
-  if (ImGui::IsItemDeactivated()) {
-    // A click without a real drag (under ~2px of travel) clears the
-    // selection instead of leaving a sliver selected.
-    if (p.hasSelection() && p.selEnd - p.selStart < v.span() / width * 2.0)
-      p.selStart = p.selEnd = -1;
-    p.dragAnchor = -1;
-  }
-
-  for (int c = 0; c < channels; c++) {
-    float laneTop = pos.y + c * (laneH + laneGap);
-    float laneBot = laneTop + laneH;
-    float mid = laneTop + laneH * 0.5f;
-    float amp = laneH * 0.5f - 2.0f;
-    dl->AddRectFilled(ImVec2(pos.x, laneTop),
-                      ImVec2(pos.x + (float)width, laneBot),
-                      IM_COL32(20, 20, 26, 255));
-    dl->AddLine(ImVec2(pos.x, mid), ImVec2(pos.x + (float)width, mid),
-                IM_COL32(60, 60, 75, 255));
-    auto cols =
-        minMaxColumns(p.wav.channels[c], p.bins[c], v.start, v.end,
-                      (int)width);
-    for (int x = 0; x < (int)cols.size(); x++) {
-      float lo = std::clamp(cols[x].first, -1.0f, 1.0f);
-      float hi = std::clamp(cols[x].second, -1.0f, 1.0f);
-      dl->AddLine(ImVec2(pos.x + x + 0.5f, mid - hi * amp),
-                  ImVec2(pos.x + x + 0.5f, mid - lo * amp + 1.0f),
-                  IM_COL32(110, 205, 160, 255));
-    }
-  }
-
-  if (p.hasSelection() && p.selEnd > v.start && p.selStart < v.end) {
-    float x0 = std::max(frameToX(p.selStart), pos.x);
-    float x1 = std::min(frameToX(p.selEnd), pos.x + (float)width);
-    dl->AddRectFilled(ImVec2(x0, pos.y), ImVec2(x1, pos.y + canvasSize.y),
-                      IM_COL32(120, 160, 255, 48));
-    dl->AddLine(ImVec2(x0, pos.y), ImVec2(x0, pos.y + canvasSize.y),
-                IM_COL32(150, 180, 255, 180));
-    dl->AddLine(ImVec2(x1, pos.y), ImVec2(x1, pos.y + canvasSize.y),
-                IM_COL32(150, 180, 255, 180));
-  }
-
-  if (isThisPlaying && rate > 0) {
-    double f = app.player.positionSeconds() * rate;
-    if (f >= v.start && f <= v.end) {
-      float x = frameToX(f);
-      dl->AddLine(ImVec2(x, pos.y), ImVec2(x, pos.y + canvasSize.y),
-                  IM_COL32(255, 230, 120, 220));
-    }
-  }
-}
-
-// A panel's compact view of one target: the whole file's envelope in a
-// short strip, a playhead while it is playing, and the few controls that
-// matter next to a knob you are turning. Deliberately not the full
-// waveform window - no zoom, no selection - because a panel's point is
-// to fit several targets and their controls on screen at once. `detail`
-// opens the real thing.
-//
-// Height is passed in rather than taken from the content region: unlike
-// drawWaveContent, a strip shares its window with everything above it.
-// One target inside a panel: the row of facts the old targets table
-// carried - status, duration, rate, channels - and then the waveform
-// itself, fully interactive. This is the merge: there is no separate
-// waveform window any more, so everything that used to live in one is
-// here, next to the controls that shape it.
-void drawPanelTarget(AppState& app, UnitState& u, const TargetMeta& t,
-                     float waveHeight, std::set<std::string>& wanted) {
+// One target inside a window: the row of facts - status, duration, rate,
+// channels - and then the waveform itself, fully interactive.
+void drawTargetElement(AppState& app, const TargetMeta& t, float waveHeight,
+                       std::set<std::string>& wanted, WavePanel** shown) {
   ImGui::PushID(t.name.c_str());
   ImGui::Spacing();
   ImGui::SeparatorText(t.name.c_str());
 
   if (t.status != "ok") {
-    ImGui::TextColored(ImVec4(1.0f, 0.45f, 0.45f, 1.0f), "%s",
-                       t.error.empty() ? "not built" : t.error.c_str());
+    ImGui::TextColored(kRed, "%s", t.error.empty() ? "not built"
+                                                   : t.error.c_str());
     ImGui::PopID();
     return;
   }
@@ -1112,10 +767,8 @@ void drawPanelTarget(AppState& app, UnitState& u, const TargetMeta& t,
                       t.channels, (long long)t.frames);
 
   // Decoding is the expensive part - a couple of minutes of stereo costs
-  // ~90 MB as doubles - so a target scrolled out of the panel is
-  // reserved its space and skipped. Panels open by default, and a
-  // project with a dozen targets would otherwise decode all of them the
-  // moment you launched.
+  // ~90 MB as doubles - so a target scrolled out of the window is
+  // reserved its space and skipped.
   float blockH = waveHeight > 0
                      ? waveHeight + ImGui::GetFrameHeightWithSpacing() +
                            ImGui::GetTextLineHeightWithSpacing()
@@ -1130,125 +783,45 @@ void drawPanelTarget(AppState& app, UnitState& u, const TargetMeta& t,
   std::string path = (fs::path(app.rootDir) / t.artifact).string();
   wanted.insert(path);
   WavePanel& w = app.wave(path, t.name);
-  drawWaveContent(app, w, waveHeight);
+  if (shown) *shown = &w;
+  drawWaveContent(app.player, app.playError, w, waveHeight);
   ImGui::PopID();
 }
 
-// One panel: its controls, then each of its targets with a full
-// waveform. The window is ordinary - drag, resize, close - and its
-// `###` id is unit-qualified so ImGui's ini remembers where the user put
-// it and how big they made it.
-//
-// `wanted` collects the artifact paths this panel is showing, so the
-// caller can drop the decoded audio of panels that are closed.
-void drawPanel(AppState& app, UnitState& u, const PanelMeta& panel,
-               std::set<std::string>& wanted) {
-  bool open = app.panelOpen(u, panel.name);
-  if (!open) return;
-
-  const ImGuiViewport* vp = ImGui::GetMainViewport();
-  float cascade = 30.0f * gUiScale *
-                  (float)(std::hash<std::string>{}(panel.name) % 6);
-  // Panels are the whole UI now, so they open big enough to work in: a
-  // waveform you can actually read plus room for the controls above it.
-  ImGui::SetNextWindowSize(ImVec2(720 * gUiScale, 560 * gUiScale),
-                           ImGuiCond_FirstUseEver);
-  ImGui::SetNextWindowPos(ImVec2(vp->WorkPos.x + 60 + cascade,
-                                 vp->WorkPos.y + 70 + cascade),
-                          ImGuiCond_FirstUseEver);
-  ImGui::SetNextWindowSizeConstraints(ImVec2(320 * gUiScale, 160 * gUiScale),
-                                      ImVec2(FLT_MAX, FLT_MAX));
-  std::string title = panel.name + "###panel " + app.panelKey(u, panel.name);
-  if (ImGui::Begin(title.c_str(), &open)) {
-    const std::vector<ControlMeta>& controls = u.loaded.meta.controls;
-
-    // Resolve the panel's members once: a control member names either
-    // one control or a whole multi_slider group, and a target member
-    // names one of the unit's targets.
-    std::vector<const TargetMeta*> targets;
-    for (const std::string& name : panel.targets)
-      for (auto& m : u.loaded.meta.targets)
-        if (m.name == name) targets.push_back(&m);
-
-    if (!panel.controls.empty()) {
-      bool anyDirty = false;
-      // Members carry the depth they had in the panel's controller tree,
-      // so a composite's parts sit indented under the control they
-      // belong to instead of reading as siblings.
-      int indented = 0;
-      for (const PanelMember& member : panel.controls) {
-        while (indented < member.depth) {
-          ImGui::Indent(12.0f * gUiScale);
-          indented++;
-        }
-        while (indented > member.depth) {
-          ImGui::Unindent(12.0f * gUiScale);
-          indented--;
-        }
-        const ControlMeta* c = nullptr;
-        for (auto& m : controls)
-          if (m.name == member.name && m.group.empty()) c = &m;
-        if (c)
-          anyDirty |= drawOneControl(u, *c);
-        else
-          drawGroupByName(u, controls, member.name, anyDirty);
+// Carries out a wave action the keyboard asked for on the waveform the
+// selection is pointing at, now that it has been decoded.
+void applyWaveRequest(AppState& app, WavePanel& w) {
+  switch (app.deferred.wave) {
+    case Action::WavePlay:
+      if (app.player.playing() && app.player.currentPath() == w.artifactPath) {
+        app.player.stop();
+      } else {
+        double from = w.hasSelection() ? w.selStart : w.view.start;
+        double to = w.hasSelection() ? w.selEnd : w.view.end;
+        app.playError.clear();
+        app.player.playRange(w.artifactPath, (int64_t)std::floor(from),
+                             (int64_t)std::ceil(to), app.playError, w.loop);
       }
-      while (indented > 0) {
-        ImGui::Unindent(12.0f * gUiScale);
-        indented--;
-      }
-      if (ImGui::SmallButton("defaults")) {
-        for (auto& m : controls) {
-          bool mine = false;
-          for (const PanelMember& n : panel.controls)
-            if (n.name == m.name || n.name == m.group) mine = true;
-          if (!mine) continue;
-          ControlUi& ui = u.controlUi[m.name];
-          ui.value = (float)m.def;
-          ui.editing = false;
-          ui.dirty = true;
-        }
-        writeUnitOverrides(u);
-      }
-      if (anyDirty) {
-        ImGui::SameLine();
-        ImGui::TextDisabled("* pending rebuild");
-      }
-      if (!u.controlsError.empty())
-        ImGui::TextColored(ImVec4(1.0f, 0.45f, 0.45f, 1.0f), "controls: %s",
-                           u.controlsError.c_str());
-    }
-
-    // A lone target fills the window, so a one-target panel uses all the
-    // room you gave it. Several get a fixed, readable height each and
-    // the panel scrolls - dividing the window between seven stems would
-    // leave every one of them too short to read.
-    size_t drawable = 0;
-    for (const TargetMeta* t : targets)
-      if (t->status == "ok" && t->kind != "visual" && !t->artifact.empty())
-        drawable++;
-    float perTarget = drawable > 1 ? 150.0f * gUiScale : -1.0f;
-    for (const TargetMeta* t : targets)
-      drawPanelTarget(app, u, *t, perTarget, wanted);
-    if (targets.empty() && panel.controls.empty())
-      ImGui::TextDisabled("this panel is empty");
+      break;
+    case Action::WaveZoom: w.view.zoomAt(0.5, app.deferred.waveStep); break;
+    case Action::WaveFit: w.view.reset(w.view.frames); break;
+    case Action::WaveLoop:
+      w.loop = !w.loop;
+      if (app.player.playing() && app.player.currentPath() == w.artifactPath)
+        app.player.setLooping(w.loop);
+      break;
+    default: break;
   }
-  ImGui::End();
-  app.panelOpen(u, panel.name) = open;
+  app.deferred.wave = Action::None;
 }
 
-void drawFrame(AppState& app) {
-  const ImGuiViewport* vp = ImGui::GetMainViewport();
-  ImGui::SetNextWindowPos(vp->WorkPos);
-  ImGui::SetNextWindowSize(vp->WorkSize);
-  // NoBringToFrontOnFocus/NoNavFocus keep this full-screen backdrop pinned
-  // behind everything: clicking it must not bury the floating wave panels.
-  ImGui::Begin("synthgraph", nullptr,
-               ImGuiWindowFlags_NoTitleBar | ImGuiWindowFlags_NoResize |
-                   ImGuiWindowFlags_NoMove | ImGuiWindowFlags_NoCollapse |
-                   ImGuiWindowFlags_NoBringToFrontOnFocus |
-                   ImGuiWindowFlags_NoNavFocus);
-
+// The overview: what the backdrop used to show. Per unit the project,
+// its build status and diagnostics, then the tick list of its panels -
+// which is how a window is brought into existence, and where it says
+// which tab is holding it.
+void drawOverviewBody(AppState& app, const WindowRef& self) {
+  std::map<std::string, Rect>& rects = app.elementRects[windowId(self)];
+  rects.clear();
   bool anyMissing = false;
   for (size_t i = 0; i < app.units.size(); i++) {
     UnitState& u = app.units[i];
@@ -1259,8 +832,7 @@ void drawFrame(AppState& app) {
     }
     ImGui::PushID((int)i);
     if (!u.unit.label.empty()) {
-      ImGui::TextColored(ImVec4(0.7f, 0.8f, 1.0f, 1.0f), "[%s]",
-                         u.unit.label.c_str());
+      ImGui::TextColored(kBlue, "[%s]", u.unit.label.c_str());
       ImGui::SameLine();
     }
     if (!u.loaded.ok) {
@@ -1275,15 +847,38 @@ void drawFrame(AppState& app) {
     ImGui::Text("project: %s", meta.project.c_str());
     ImGui::SameLine();
     if (meta.status == "ok")
-      ImGui::TextColored(ImVec4(0.5f, 0.9f, 0.5f, 1.0f), "[build ok]");
+      ImGui::TextColored(kGreen, "[build ok]");
     else
-      ImGui::TextColored(ImVec4(1.0f, 0.45f, 0.45f, 1.0f), "[build failed]");
-    ImGui::SameLine();
-    ImGui::TextDisabled("metadata: %s", u.unit.metadataPath.c_str());
+      ImGui::TextColored(kRed, "[build failed]");
     ImGui::Separator();
-
     drawDiagnostics(app, u);
-    drawPanelBar(app, u);
+
+    ImGui::TextDisabled("panels");
+    for (const PanelMeta& p : app.panels[unitKey(u.unit)]) {
+      WindowRef ref;
+      ref.kind = WindowRef::Kind::Panel;
+      ref.unit = unitKey(u.unit);
+      ref.panel = p.name;
+      int in = tabHolding(app.tabs, ref);
+      bool open = in != 0;
+      ImVec2 top = ImGui::GetCursorScreenPos();
+      float rowW = std::max(16.0f, ImGui::GetContentRegionAvail().x);
+      if (ImGui::Checkbox((p.name + "###p" + p.name).c_str(), &open))
+        app.togglePanel(ref);
+      if (in) {
+        ImGui::SameLine();
+        // Where it went, so a window you ticked on and cannot see is
+        // one tab away rather than lost.
+        ImGui::TextDisabled("tab %d%s", in,
+                            in == app.activeTab ? "" : " (elsewhere)");
+      }
+      ImVec2 after = ImGui::GetCursorScreenPos();
+      // Every row is a selectable element, keyed the way the
+      // enumeration keys it: hints label these, Tab steps through them
+      // and Enter ticks them.
+      rects[windowId(ref)] =
+          Rect{top.x, top.y, rowW, std::max(2.0f, after.y - top.y)};
+    }
     ImGui::PopID();
   }
   if (anyMissing) {
@@ -1293,39 +888,980 @@ void drawFrame(AppState& app) {
         "window refreshes on its own.",
         app.projectDir.c_str(), app.projectDir.c_str());
   }
-
   if (!app.playError.empty()) {
     ImGui::Spacing();
-    ImGui::TextColored(ImVec4(1.0f, 0.45f, 0.45f, 1.0f), "playback: %s",
-                       app.playError.c_str());
+    ImGui::TextColored(kRed, "playback: %s", app.playError.c_str());
   }
   if (!app.stateError.empty()) {
     ImGui::Spacing();
-    ImGui::TextColored(ImVec4(1.0f, 0.45f, 0.45f, 1.0f), "project state: %s",
-                       app.stateError.c_str());
+    ImGui::TextColored(kRed, "project state: %s", app.stateError.c_str());
   }
   if (app.player.playing()) {
     ImGui::Spacing();
     ImGui::TextDisabled("playing%s %s", app.player.looping() ? " (loop)" : "",
                         app.player.currentPath().c_str());
   }
-  ImGui::End();
+}
 
-  // Panels are the UI: every control and every waveform lives in one.
-  // `wanted` collects the artifacts the open panels are showing, so the
-  // audio behind a panel the user closed can be released.
-  std::set<std::string> wanted;
-  for (size_t i = 0; i < app.units.size(); i++) {
-    UnitState& u = app.units[i];
-    if (!u.loaded.ok) continue;
-    ImGui::PushID((int)i);
-    for (const PanelMeta& panel : app.panelsFor(u))
-      drawPanel(app, u, panel, wanted);
-    ImGui::PopID();
+// One panel window's contents: its controls in the order the panel names
+// them - a component's parts indented under it - then its targets with
+// their waveforms. Every row's rectangle is recorded as it is drawn, so
+// the hint badges and the focus ring land on it.
+void drawPanelBody(AppState& app, UnitState& u, const PanelMeta& panel,
+                   const WindowRef& ref, std::set<std::string>& wanted) {
+  const std::vector<ControlMeta>& controls = u.loaded.meta.controls;
+  std::vector<WindowElement> els = windowElements(panel, u.loaded.meta);
+  std::map<std::string, Rect>& rects = app.elementRects[windowId(ref)];
+  rects.clear();
+
+  size_t drawable = 0;
+  for (const WindowElement& e : els) {
+    if (e.kind != WindowElement::Kind::Target) continue;
+    for (const TargetMeta& t : u.loaded.meta.targets)
+      if (t.name == e.name && t.status == "ok" && t.kind != "visual" &&
+          !t.artifact.empty())
+        drawable++;
+  }
+  // A lone target fills the window; several get a readable fixed height
+  // each and the window scrolls.
+  float perTarget = drawable > 1 ? 150.0f * gUiScale : -1.0f;
+
+  bool anyDirty = false;
+  int indented = 0;
+  for (const WindowElement& e : els) {
+    while (indented < e.depth) {
+      ImGui::Indent(12.0f * gUiScale);
+      indented++;
+    }
+    while (indented > e.depth) {
+      ImGui::Unindent(12.0f * gUiScale);
+      indented--;
+    }
+    ImVec2 top = ImGui::GetCursorScreenPos();
+    float rowW = std::max(16.0f, ImGui::GetContentRegionAvail().x);
+    bool selected = app.sel.window == ref && app.sel.element == e.name;
+    WavePanel* wave = nullptr;
+    switch (e.kind) {
+      case WindowElement::Kind::Control:
+        for (const ControlMeta& c : controls)
+          if (c.name == e.name && c.group.empty())
+            anyDirty |= drawOneControl(u, c);
+        break;
+      case WindowElement::Kind::Group:
+        drawGroupByName(u, controls, e.name, anyDirty);
+        break;
+      case WindowElement::Kind::Target:
+        for (const TargetMeta& t : u.loaded.meta.targets)
+          if (t.name == e.name)
+            drawTargetElement(app, t, perTarget, wanted, &wave);
+        break;
+      case WindowElement::Kind::Panel:
+        break;  // the overview's rows, which this window does not have
+    }
+    if (selected && wave && app.deferred.wave != Action::None)
+      applyWaveRequest(app, *wave);
+    ImVec2 after = ImGui::GetCursorScreenPos();
+    rects[e.name] = Rect{top.x, top.y, rowW, std::max(2.0f, after.y - top.y)};
+  }
+  while (indented > 0) {
+    ImGui::Unindent(12.0f * gUiScale);
+    indented--;
   }
 
-  // Drop the audio of anything no open panel is showing, remembering its
-  // view first so reopening the panel comes back where you left it.
+  if (!els.empty()) {
+    if (ImGui::SmallButton("defaults")) {
+      for (const ControlMeta& m : controls) {
+        bool mine = false;
+        for (const WindowElement& e : els)
+          if (e.name == m.name || e.name == m.group) mine = true;
+        if (mine) resetControl(u, m);
+      }
+    }
+    if (anyDirty) {
+      ImGui::SameLine();
+      ImGui::TextDisabled("* pending rebuild");
+    }
+  } else {
+    ImGui::TextDisabled("this panel is empty");
+  }
+  if (!u.controlsError.empty())
+    ImGui::TextColored(kRed, "controls: %s", u.controlsError.c_str());
+}
+
+// Draws one window's contents at its own scale, and puts the style back
+// afterwards. Scaling has to reach three separate things or it is not a
+// smaller *rendering*, only smaller text in full-size frames:
+//
+//   - ImGui's style metrics (padding, spacing, scrollbars, rounding,
+//     grab sizes), which is what ScaleAllSizes does and what --scale
+//     already does globally;
+//   - the font, through the window's own font scale;
+//   - the sizes this app picks in raw pixels - knob diameters, slider
+//     widths, wave heights - which is exactly what gUiScale multiplies.
+//
+// Everything is then laid out and drawn at the target size. The one
+// thing that is a true raster scale is the glyphs themselves: they come
+// from an atlas baked at one size, so large factors soften the text.
+struct ScopedWindowScale {
+  ImGuiStyle saved;
+  float outerUiScale;
+  bool on;
+
+  explicit ScopedWindowScale(float scale)
+      : saved(ImGui::GetStyle()), outerUiScale(gUiScale), on(scale != 1.0f) {
+    if (!on) return;
+    ImGui::GetStyle().ScaleAllSizes(scale);
+    gUiScale *= scale;
+  }
+  // A style left scaled would compound on the next frame, so this is
+  // never conditional on how the drawing went.
+  ~ScopedWindowScale() {
+    if (!on) return;
+    ImGui::GetStyle() = saved;
+    gUiScale = outerUiScale;
+  }
+};
+
+// One leaf of the tree: a window with our own title row (the tiling
+// owns the geometry, so ImGui's own bar and its ini have no say) and a
+// scrolling body.
+void drawLeaf(AppState& app, const PlacedWindow& pw,
+              std::set<std::string>& wanted) {
+  const WindowRef& ref = pw.window;
+  std::string id = windowId(ref);
+  Tab& tab = app.tab();
+
+  // Before Begin: the window's own padding is read there. The scale is
+  // taken from the ladder step nearest what the window asks for, so the
+  // style and the glyphs are always the same size and that size is
+  // always one the font was baked at.
+  int step = gFonts.indexNear(gFonts.base * app.windowScale(id));
+  float ownScale = gFonts.scaleAt(step);
+  ScopedWindowScale scaled(ownScale);
+
+  ImGui::SetNextWindowPos(v2(pw.rect));
+  ImGui::SetNextWindowSize(ImVec2(pw.rect.w, pw.rect.h));
+  ImGui::PushStyleVar(ImGuiStyleVar_WindowRounding, 3.0f);
+  ImGui::PushStyleColor(ImGuiCol_Border,
+                        pw.focused ? ImGui::ColorConvertU32ToFloat4(kAccent)
+                                   : ImVec4(0.28f, 0.28f, 0.34f, 1.0f));
+  ImGui::Begin(("###win " + id).c_str(), nullptr,
+               ImGuiWindowFlags_NoTitleBar | ImGuiWindowFlags_NoResize |
+                   ImGuiWindowFlags_NoMove | ImGuiWindowFlags_NoCollapse |
+                   ImGuiWindowFlags_NoSavedSettings |
+                   ImGuiWindowFlags_NoBringToFrontOnFocus |
+                   ImGuiWindowFlags_NoScrollbar);
+  // Both of these are per-window state ImGui keeps between frames, so
+  // they are set every frame whatever the scale is: leaving a window's
+  // font scale behind is what made one that had been zoomed and reset
+  // stay small and blurry at "100%". The scale is always exactly 1 now
+  // - the size comes from the font, not from stretching it.
+  ImFont* font = gFonts.fontAt(step);
+  if (font) ImGui::PushFont(font);
+  ImGui::SetWindowFontScale(1.0f);
+
+  // Clicking anywhere in a window focuses it, the way clicking a
+  // terminal does.
+  if (ImGui::IsWindowHovered(ImGuiHoveredFlags_ChildWindows |
+                             ImGuiHoveredFlags_AllowWhenBlockedByActiveItem) &&
+      ImGui::IsMouseClicked(ImGuiMouseButton_Left) && !pw.focused) {
+    focusWindow(tab, ref);
+    app.sel.clear();
+  }
+
+  // A window inside the focused container is not itself focused, but it
+  // is about to be moved or closed with it, so it does not read as
+  // inactive either.
+  ImGui::PushStyleColor(ImGuiCol_Text,
+                        pw.focused || pw.inFocus
+                            ? ImVec4(0.85f, 1.0f, 0.90f, 1.0f)
+                            : ImVec4(0.72f, 0.72f, 0.78f, 1.0f));
+  ImGui::TextUnformatted(windowTitle(ref).c_str());
+  ImGui::PopStyleColor();
+  if (app.windowScale(id) != 1.0f) {
+    ImGui::SameLine();
+    ImGui::TextDisabled("%.0f%%", app.windowScale(id) * 100.0f);
+  }
+  float closeW = ImGui::CalcTextSize("x").x + ImGui::GetStyle().FramePadding.x * 2;
+  ImGui::SameLine(std::max(ImGui::GetCursorPosX(),
+                           ImGui::GetWindowWidth() - closeW -
+                               ImGui::GetStyle().WindowPadding.x));
+  bool closed = ImGui::SmallButton("x");
+  if (ImGui::IsItemHovered()) ImGui::SetTooltip("close (Alt+q)");
+  ImGui::Separator();
+
+  ImGui::BeginChild("body", ImVec2(0, 0), false);
+  // A scroll the keyboard asked for lands on the focused window.
+  if (pw.focused && app.deferred.scrollLines != 0)
+    ImGui::SetScrollY(ImGui::GetScrollY() +
+                      app.deferred.scrollLines *
+                          ImGui::GetTextLineHeightWithSpacing());
+  if (pw.focused && app.deferred.scrollPages != 0)
+    ImGui::SetScrollY(ImGui::GetScrollY() +
+                      app.deferred.scrollPages * ImGui::GetWindowHeight());
+
+  if (ref.kind == WindowRef::Kind::Overview) {
+    drawOverviewBody(app, ref);
+  } else {
+    UnitState* u = app.unitFor(ref.unit);
+    const PanelMeta* p = app.panelFor(ref);
+    if (u && p)
+      drawPanelBody(app, *u, *p, ref, wanted);
+    else
+      ImGui::TextDisabled("this panel is not in the build any more");
+  }
+  ImGui::EndChild();
+  if (font) ImGui::PopFont();
+  ImGui::End();
+  ImGui::PopStyleColor();
+  ImGui::PopStyleVar();
+
+  if (closed) {
+    removeWindow(tab, ref);
+    app.sel.clear();
+  }
+}
+
+// The containers themselves: a thin border per level, so the shape of
+// the tree is visible in the layout and not only in the outline. The
+// focused window gets a heavier one on top of everything - which window
+// has the keyboard has to be readable at a glance.
+void drawContainerFrames(const Placement& p) {
+  ImDrawList* bg = ImGui::GetBackgroundDrawList();
+  ImDrawList* fg = ImGui::GetForegroundDrawList();
+  auto ring = [fg](const Rect& r, ImU32 col, float grow, float thick) {
+    fg->AddRect(ImVec2(r.x - grow, r.y - grow),
+                ImVec2(r.x + r.w + grow, r.y + r.h + grow), col, 4.0f, 0,
+                thick);
+  };
+  // One ring, one meaning: this is what the next command acts on -
+  // whether that is a window, a container, or a gathered run of them.
+  for (const PlacedSplit& s : p.splits) {
+    bg->AddRect(v2(s.rect), v2end(s.rect), depthColor(s.depth, 150), 4.0f, 0,
+                1.0f);
+    if (s.focused || s.selected) ring(s.rect, kAccent, 2, 2.0f);
+  }
+  for (const PlacedWindow& w : p.windows)
+    if (w.focused || w.selected) ring(w.rect, kAccent, 1, 2.0f);
+}
+
+// The gutters, dragged with the mouse: the same boundaries Alt+r moves
+// with the keyboard.
+void dragDividers(AppState& app, const Placement& p, const Rect& area) {
+  ImGuiIO& io = ImGui::GetIO();
+  ImDrawList* dl = ImGui::GetForegroundDrawList();
+  static int held = -1;
+  if (!ImGui::IsMouseDown(ImGuiMouseButton_Left)) held = -1;
+  for (size_t i = 0; i < p.dividers.size(); i++) {
+    const Divider& d = p.dividers[i];
+    bool over = io.MousePos.x >= d.rect.x &&
+                io.MousePos.x <= d.rect.x + d.rect.w &&
+                io.MousePos.y >= d.rect.y && io.MousePos.y <= d.rect.y + d.rect.h;
+    if (over && !ImGui::IsAnyItemHovered()) {
+      ImGui::SetMouseCursor(d.split == Split::H ? ImGuiMouseCursor_ResizeEW
+                                                : ImGuiMouseCursor_ResizeNS);
+      if (ImGui::IsMouseClicked(ImGuiMouseButton_Left)) held = (int)i;
+    }
+    if (held == (int)i) {
+      dl->AddRectFilled(v2(d.rect), v2end(d.rect), kAccent);
+      float span = d.split == Split::H ? area.w : area.h;
+      float move = d.split == Split::H ? io.MouseDelta.x : io.MouseDelta.y;
+      if (span > 0 && move != 0)
+        resizeSplit(app.tab(), d.path, d.boundary, move / span);
+    }
+  }
+}
+
+// ---------------------------------------------------------------------
+// The overlays: the tree outline, hint labels, search, help, which-key.
+// ---------------------------------------------------------------------
+
+void outlineLines(const Node& n, const Tab& t, Path path,
+                  const std::string& prefix, bool last,
+                  std::vector<std::string>& out) {
+  std::string head = path.empty() ? "" : prefix + (last ? "`-- " : "|-- ");
+  // The outline is where a focused *container* is easiest to see, so it
+  // marks the focus and the gathered run wherever they sit.
+  Run run = focusedRun(t);
+  std::string mark = path == t.focused  ? "   <- focused"
+                     : inRun(run, path) ? "   <- selected"
+                                        : "";
+  if (n.kind == Node::Kind::Leaf) {
+    out.push_back(head + windowTitle(n.window) + mark);
+    return;
+  }
+  if (n.kind == Node::Kind::Empty) return;
+  out.push_back(head + (n.split == Split::H ? "splith" : "splitv") + mark);
+  std::string next = path.empty() ? "" : prefix + (last ? "    " : "|   ");
+  for (size_t i = 0; i < n.children.size(); i++) {
+    Path cp = path;
+    cp.push_back((int)i);
+    outlineLines(n.children[i], t, cp, next, i + 1 == n.children.size(), out);
+  }
+}
+
+// The focused tab's tree, written out. The layout already says the shape
+// through its nested borders; this says it in words, which is what you
+// want when a window is somewhere you cannot see.
+void drawOutline(AppState& app, const Rect& area) {
+  Tab& t = app.tab();
+  std::vector<std::string> lines;
+  outlineLines(t.root, t, {}, "", true, lines);
+  float w = 240.0f * gUiScale;
+  ImGui::SetNextWindowPos(ImVec2(area.x + area.w - w - 10 * gUiScale,
+                                 area.y + 10 * gUiScale));
+  ImGui::SetNextWindowSize(ImVec2(w, 0));
+  ImGui::SetNextWindowBgAlpha(0.92f);
+  ImGui::Begin("###outline", nullptr,
+               ImGuiWindowFlags_NoDecoration | ImGuiWindowFlags_NoSavedSettings |
+                   ImGuiWindowFlags_AlwaysAutoResize |
+                   ImGuiWindowFlags_NoFocusOnAppearing);
+  ImGui::TextColored(kBlue, "tab %s", tabLabel(t).c_str());
+  ImGui::Separator();
+  if (lines.empty()) ImGui::TextDisabled("(empty)");
+  for (const std::string& l : lines) ImGui::TextUnformatted(l.c_str());
+  ImGui::Separator();
+  ImGui::TextDisabled("Alt+t to close");
+  ImGui::End();
+}
+
+// The focused window's rows, each with the key that jumps to it.
+void drawHints(AppState& app, const Placement& p) {
+  const PlacedWindow* focused = nullptr;
+  for (const PlacedWindow& w : p.windows)
+    if (w.focused) focused = &w;
+  if (!focused) return;
+  auto rects = app.elementRects.find(windowId(focused->window));
+  if (rects == app.elementRects.end()) return;
+  std::vector<std::string> labels = hintLabels(app.hintOrder.size());
+  ImDrawList* dl = ImGui::GetForegroundDrawList();
+  for (size_t i = 0; i < app.hintOrder.size(); i++) {
+    auto r = rects->second.find(app.hintOrder[i]);
+    if (r == rects->second.end()) continue;
+    // A row scrolled out of its window keeps its rectangle from when it
+    // was last drawn; labelling it would put a badge outside the window.
+    if (r->second.y < focused->rect.y ||
+        r->second.y > focused->rect.y + focused->rect.h)
+      continue;
+    const std::string& label = labels[i];
+    // A label the typing has ruled out fades rather than vanishing, so
+    // the rows do not jump about under a half-typed hint.
+    bool live = label.rfind(app.hintTyped, 0) == 0;
+    ImVec2 at(r->second.x + 2, r->second.y + 1);
+    ImVec2 size = ImGui::CalcTextSize(label.c_str());
+    dl->AddRectFilled(at, ImVec2(at.x + size.x + 8, at.y + size.y + 4),
+                      live ? IM_COL32(235, 200, 110, 235)
+                           : IM_COL32(90, 90, 100, 160),
+                      3.0f);
+    dl->AddText(ImVec2(at.x + 4, at.y + 2),
+                live ? IM_COL32(20, 20, 20, 255) : IM_COL32(60, 60, 60, 255),
+                label.c_str());
+  }
+}
+
+// A ring around the row the keyboard has hold of. The focused *window*
+// says so with its own border and title, so this is only ever about
+// what is selected inside one.
+void drawFocusRing(AppState& app) {
+  if (!app.sel.active()) return;
+  auto rects = app.elementRects.find(windowId(app.sel.window));
+  if (rects == app.elementRects.end()) return;
+  auto r = rects->second.find(app.sel.element);
+  if (r == rects->second.end()) return;
+  ImGui::GetForegroundDrawList()->AddRect(
+      ImVec2(r->second.x - 2, r->second.y - 1),
+      ImVec2(r->second.x + r->second.w, r->second.y + r->second.h + 1),
+      kAccent, 3.0f, 0, 1.5f);
+}
+
+void rebuildIndex(AppState& app) {
+  app.index = buildSearchIndex(app.tabs, app.unitIndexes());
+  app.matches = searchItems(app.index, app.searchQuery);
+}
+
+void acceptSearch(AppState& app) {
+  if (app.matches.empty()) return;
+  int pick = std::clamp(app.searchPick, 0, (int)app.matches.size() - 1);
+  const SearchItem& it = app.index[app.matches[(size_t)pick].item];
+  app.sel.clear();
+  if (it.kind == SearchItem::Kind::Tab) {
+    app.gotoTab(it.tab);
+    return;
+  }
+  // A window no tab is holding is opened here; one that is already
+  // somewhere is where we go.
+  if (it.tab)
+    app.activeTab = it.tab;
+  else
+    app.openWindow(it.window);
+  focusWindow(app.tab(), it.window);
+  if (it.kind == SearchItem::Kind::Element) {
+    app.sel.window = it.window;
+    app.sel.element = it.element;
+  }
+}
+
+// Search: everything the project can show, narrowed as you type. Tabs
+// first, then windows, then the things inside them.
+void drawSearch(AppState& app, const Rect& area) {
+  float w = std::min(area.w - 40 * gUiScale, 560.0f * gUiScale);
+  ImGui::SetNextWindowPos(ImVec2(area.x + (area.w - w) * 0.5f,
+                                 area.y + 40 * gUiScale));
+  ImGui::SetNextWindowSize(ImVec2(w, 0));
+  ImGui::Begin("###search", nullptr,
+               ImGuiWindowFlags_NoDecoration | ImGuiWindowFlags_NoSavedSettings |
+                   ImGuiWindowFlags_AlwaysAutoResize);
+  ImGui::SetNextItemWidth(-1);
+  if (app.captureFocus) {
+    ImGui::SetKeyboardFocusHere();
+    app.captureFocus = false;
+  }
+  if (ImGui::InputTextWithHint("##query", "tab, window, control, waveform...",
+                               app.textBuf, sizeof app.textBuf)) {
+    app.searchQuery = app.textBuf;
+    app.searchPick = 0;
+    app.matches = searchItems(app.index, app.searchQuery);
+  }
+  ImGui::Separator();
+  if (app.matches.empty()) ImGui::TextDisabled("nothing matches");
+  int shown = 0;
+  if (!app.matches.empty())
+    app.searchPick = std::clamp(app.searchPick, 0, (int)app.matches.size() - 1);
+  for (size_t i = 0; i < app.matches.size() && shown < 12; i++, shown++) {
+    const SearchItem& it = app.index[app.matches[i].item];
+    bool picked = (int)i == app.searchPick;
+    const char* what = it.kind == SearchItem::Kind::Tab      ? "tab"
+                       : it.kind == SearchItem::Kind::Window ? "window"
+                                                             : "in";
+    std::string row = it.label + "##r" + std::to_string(i);
+    if (ImGui::Selectable(row.c_str(), picked)) {
+      app.searchPick = (int)i;
+      acceptSearch(app);
+      app.keys.mode = Mode::Normal;
+    }
+    ImGui::SameLine();
+    ImGui::TextDisabled("%s %s", what, it.detail.c_str());
+  }
+  ImGui::Separator();
+  ImGui::TextDisabled("Enter go  -  Up/Down pick  -  Esc close");
+  ImGui::End();
+}
+
+void drawRename(AppState& app, const Rect& area) {
+  float w = 320.0f * gUiScale;
+  ImGui::SetNextWindowPos(ImVec2(area.x + (area.w - w) * 0.5f,
+                                 area.y + 40 * gUiScale));
+  ImGui::SetNextWindowSize(ImVec2(w, 0));
+  ImGui::Begin("###rename", nullptr,
+               ImGuiWindowFlags_NoDecoration | ImGuiWindowFlags_NoSavedSettings |
+                   ImGuiWindowFlags_AlwaysAutoResize);
+  ImGui::Text("name for tab %d", app.activeTab);
+  ImGui::SetNextItemWidth(-1);
+  if (app.captureFocus) {
+    ImGui::SetKeyboardFocusHere();
+    app.captureFocus = false;
+  }
+  ImGui::InputText("##name", app.textBuf, sizeof app.textBuf);
+  ImGui::TextDisabled("Enter to keep it, Esc to leave it alone");
+  ImGui::End();
+}
+
+// Every shortcut that applies right here: the mode's own map, filtered
+// by what is selected. Read from the same table the keys are, so it
+// cannot drift out of date.
+void drawHelp(AppState& app, const Rect& area, unsigned ctx) {
+  Mode showing = app.keys.helpFrom;
+  float w = std::min(area.w - 40 * gUiScale, 700.0f * gUiScale);
+  ImGui::SetNextWindowPos(ImVec2(area.x + (area.w - w) * 0.5f,
+                                 area.y + 30 * gUiScale));
+  ImGui::SetNextWindowSize(ImVec2(w, 0));
+  ImGui::SetNextWindowBgAlpha(0.96f);
+  ImGui::Begin("###help", nullptr,
+               ImGuiWindowFlags_NoDecoration | ImGuiWindowFlags_NoSavedSettings |
+                   ImGuiWindowFlags_AlwaysAutoResize);
+  ImGui::TextColored(kBlue, "shortcuts - %s mode", modeName(showing));
+  ImGui::TextDisabled(
+      "global first, then what applies to the window and to whatever is "
+      "selected in it");
+  ImGui::Separator();
+  std::string group;
+  if (ImGui::BeginTable("help", 2,
+                        ImGuiTableFlags_SizingFixedFit |
+                            ImGuiTableFlags_RowBg)) {
+    ImGui::TableSetupColumn("key", ImGuiTableColumnFlags_WidthFixed,
+                            130.0f * gUiScale);
+    ImGui::TableSetupColumn("what", ImGuiTableColumnFlags_WidthStretch);
+    for (const Binding* b : bindingsFor(showing, ctx)) {
+      if (!b->listed) continue;
+      if (group != b->group) {
+        group = b->group;
+        ImGui::TableNextRow();
+        ImGui::TableNextColumn();
+        ImGui::TableNextColumn();
+        ImGui::TextColored(kBlue, "%s", group.c_str());
+      }
+      ImGui::TableNextRow();
+      ImGui::TableNextColumn();
+      ImGui::TextUnformatted(sequenceName(b->sequence).c_str());
+      ImGui::TableNextColumn();
+      ImGui::TextUnformatted(b->help);
+    }
+    ImGui::EndTable();
+  }
+  ImGui::Separator();
+  ImGui::TextDisabled("any key closes");
+  ImGui::End();
+}
+
+// The which-key pane: what can come next, while you are in the middle of
+// typing it. Holding Alt lists the whole Alt map; a held prefix narrows
+// to what completes it; a mode lists that mode's keys.
+std::vector<const Binding*> whichKeyRows(AppState& app, unsigned ctx) {
+  std::vector<const Binding*> out;
+  bool bare = app.keys.pending.empty();
+  for (const Binding* b : app.keys.completions(ctx)) {
+    if (!b->listed) continue;
+    // With Alt down and nothing typed yet, only the Alt bindings are
+    // reachable, so only those are worth showing.
+    if (bare && app.keys.mode == Mode::Normal &&
+        b->sequence[0].alt != (app.altHeld || app.keys.sticky))
+      continue;
+    out.push_back(b);
+  }
+  return out;
+}
+
+bool whichKeyShowing(AppState& app, size_t rows) {
+  if (!app.whichKey || rows == 0) return false;
+  if (app.keys.mode == Mode::Search || app.keys.mode == Mode::Rename ||
+      app.keys.mode == Mode::Help)
+    return false;
+  // A tapped Alt asked for it, so it appears at once. A held one waits,
+  // so a chord typed at speed never makes the pane flash.
+  if (app.keys.sticky) return true;
+  if (!app.keys.pending.empty() || app.keys.mode != Mode::Normal)
+    return ImGui::GetTime() - app.pendingSince > 0.25;
+  return app.altHeld && ImGui::GetTime() - app.altSince > 0.35;
+}
+
+// How the pane is laid out: as many columns as fit the widest entry it
+// actually has, and no more rows than the height allows. Everything the
+// drawing needs to size the window before it opens it.
+struct WhichKeyLayout {
+  int columns = 1;
+  int rows = 1;
+  float cell = 200;
+  float keyWidth = 60;
+  size_t shown = 0;   // entries that fit
+  size_t hidden = 0;  // and the ones that did not
+  float height = 0;
+};
+
+WhichKeyLayout layOutWhichKey(const std::vector<const Binding*>& rows,
+                              float width, float maxHeight) {
+  WhichKeyLayout l;
+  const ImGuiStyle& st = ImGui::GetStyle();
+  float line = ImGui::GetTextLineHeightWithSpacing();
+  float gap = st.ItemSpacing.x * 2;
+  for (const Binding* b : rows) {
+    l.keyWidth = std::max(
+        l.keyWidth, ImGui::CalcTextSize(sequenceName(b->sequence).c_str()).x);
+    l.cell = std::max(l.cell, ImGui::CalcTextSize(b->help).x + l.keyWidth + gap);
+  }
+  float avail = std::max(120.0f, width - st.WindowPadding.x * 2);
+  // Never wider than the space there is: a column that does not fit is
+  // a column whose text runs off the screen.
+  l.cell = std::min(l.cell, avail);
+  l.columns = std::max(1, (int)(avail / l.cell));
+  l.cell = avail / (float)l.columns;
+  int fits = std::max(1, (int)((maxHeight - line - st.WindowPadding.y * 2) / line));
+  l.rows = (int)((rows.size() + (size_t)l.columns - 1) / (size_t)l.columns);
+  l.rows = std::clamp(l.rows, 1, fits);
+  l.shown = std::min(rows.size(), (size_t)(l.rows * l.columns));
+  l.hidden = rows.size() - l.shown;
+  l.height = line * (float)(l.rows + 1) + st.WindowPadding.y * 2;
+  return l;
+}
+
+// Text cut to fit, with an ellipsis rather than a hard edge.
+std::string elide(const std::string& text, float room) {
+  if (ImGui::CalcTextSize(text.c_str()).x <= room) return text;
+  std::string out = text;
+  while (!out.empty() &&
+         ImGui::CalcTextSize((out + "...").c_str()).x > room)
+    out.pop_back();
+  return out + "...";
+}
+
+void drawWhichKey(AppState& app, const std::vector<const Binding*>& rows,
+                  const WhichKeyLayout& l, float width, float top) {
+  ImGui::SetNextWindowPos(ImVec2(0, top));
+  ImGui::SetNextWindowSize(ImVec2(width, l.height));
+  ImGui::Begin("###whichkey", nullptr,
+               ImGuiWindowFlags_NoDecoration | ImGuiWindowFlags_NoSavedSettings |
+                   ImGuiWindowFlags_NoBringToFrontOnFocus |
+                   ImGuiWindowFlags_NoNavFocus);
+  std::string lead = app.keys.prefixLabel();
+  if (lead.empty()) lead = modeName(app.keys.mode);
+  ImGui::TextColored(kBlue, "%s", lead.c_str());
+  ImGui::SameLine();
+  if (l.hidden)
+    ImGui::TextDisabled("(%zu more - ? for all of them)", l.hidden);
+  else
+    ImGui::TextDisabled("(Alt+w to put this away)");
+
+  float x0 = ImGui::GetCursorPosX();
+  float y0 = ImGui::GetCursorPosY();
+  for (size_t i = 0; i < l.shown; i++) {
+    int col = (int)i / l.rows, row = (int)i % l.rows;
+    ImGui::SetCursorPos(ImVec2(x0 + (float)col * l.cell,
+                               y0 + (float)row * ImGui::GetTextLineHeightWithSpacing()));
+    // The chord that would come next, not the whole sequence: that is
+    // what you are about to press.
+    const Chord& next = rows[i]->sequence[app.keys.pending.size()];
+    std::string key = chordName(next);
+    // With a prefix already typed, the modifier is spoken for - showing
+    // it on every row would be noise.
+    if (app.keys.sticky && next.alt && !next.ctrl) {
+      key = chordName(Chord{next.key, false, next.shift, false});
+    }
+    ImGui::TextColored(ImVec4(0.95f, 0.85f, 0.5f, 1.0f), "%s", key.c_str());
+    ImGui::SameLine(x0 + (float)col * l.cell + l.keyWidth);
+    ImGui::TextUnformatted(
+        elide(rows[i]->help, l.cell - l.keyWidth - ImGui::GetStyle().ItemSpacing.x)
+            .c_str());
+  }
+  ImGui::End();
+}
+
+// ---------------------------------------------------------------------
+// Input: real keys in, table actions out.
+// ---------------------------------------------------------------------
+
+Chord readChord() {
+  ImGuiIO& io = ImGui::GetIO();
+  Chord c;
+  c.alt = io.KeyAlt;
+  c.shift = io.KeyShift;
+  c.ctrl = io.KeyCtrl;
+  // Auto-repeat is wanted: holding Alt+l should walk across the windows,
+  // and holding `l` in resize mode should keep resizing.
+  for (int i = 0; i < 26; i++)
+    if (ImGui::IsKeyPressed((ImGuiKey)(ImGuiKey_A + i), true)) {
+      c.key = (Key)((int)Key::A + i);
+      return c;
+    }
+  for (int i = 0; i < 10; i++)
+    if (ImGui::IsKeyPressed((ImGuiKey)(ImGuiKey_0 + i), true)) {
+      c.key = (Key)((int)Key::D0 + i);
+      return c;
+    }
+  static const struct {
+    ImGuiKey imk;
+    Key key;
+  } rest[] = {
+      {ImGuiKey_LeftArrow, Key::Left},   {ImGuiKey_RightArrow, Key::Right},
+      {ImGuiKey_UpArrow, Key::Up},       {ImGuiKey_DownArrow, Key::Down},
+      {ImGuiKey_Enter, Key::Enter},      {ImGuiKey_KeypadEnter, Key::Enter},
+      {ImGuiKey_Escape, Key::Escape},    {ImGuiKey_Tab, Key::Tab},
+      {ImGuiKey_Space, Key::Space},      {ImGuiKey_Slash, Key::Slash},
+      {ImGuiKey_Comma, Key::Comma},      {ImGuiKey_Period, Key::Period},
+      {ImGuiKey_Minus, Key::Minus},      {ImGuiKey_Equal, Key::Equal},
+  };
+  for (auto& r : rest)
+    if (ImGui::IsKeyPressed(r.imk, true)) {
+      c.key = r.key;
+      return c;
+    }
+  return Chord{};
+}
+
+// The rows of the focused window, in draw order: what Tab steps through
+// and what the hints label.
+void refreshHintOrder(AppState& app) {
+  app.hintOrder.clear();
+  auto w = focusedWindow(app.tab());
+  if (!w) return;
+  for (const WindowElement& e : app.elementsOf(*w))
+    app.hintOrder.push_back(e.name);
+}
+
+unsigned contextBits(AppState& app) {
+  unsigned ctx = 0;
+  Tab& t = app.tab();
+  if (windowsIn(t).size() > 1) ctx |= CtxTiled;
+  if (focusIsContainer(t)) ctx |= CtxContainer;
+  // Not at the root: there is a container above this to step out to.
+  if (!t.empty() && !t.focused.empty()) ctx |= CtxNested;
+  if (app.sel.active())
+    for (const WindowElement& e : app.elementsOf(app.sel.window))
+      if (e.name == app.sel.element) {
+        ctx |= CtxRow;
+        // A linked group is not one value to nudge, and a panel tickbox
+        // is not a value at all - both can still be activated.
+        if (e.kind == WindowElement::Kind::Target) ctx |= CtxWave;
+        if (e.kind == WindowElement::Kind::Control) ctx |= CtxWidget;
+      }
+  return ctx;
+}
+
+// The control the selection is on, if it is on one at all (a group or a
+// waveform is not one control, and the nudge keys leave it alone).
+ControlMeta* selectedControl(AppState& app, UnitState** unit) {
+  if (!app.sel.active()) return nullptr;
+  UnitState* u = app.unitFor(app.sel.window.unit);
+  if (!u) return nullptr;
+  for (ControlMeta& c : u->loaded.meta.controls)
+    if (c.name == app.sel.element && c.group.empty()) {
+      *unit = u;
+      return &c;
+    }
+  return nullptr;
+}
+
+bool discreteKind(const std::string& kind) {
+  return kind == "int_slider" || kind == "toggle" || kind == "choice";
+}
+
+void adjustSelected(AppState& app, double frac) {
+  UnitState* u = nullptr;
+  ControlMeta* c = selectedControl(app, &u);
+  if (!c || !u) return;
+  ControlUi& ui = u->controlUi[c->name];
+  double next;
+  if (discreteKind(c->kind))
+    next = (double)ui.value + (frac > 0 ? 1 : -1);
+  else
+    next = (double)ui.value + frac * (c->max - c->min);
+  ui.value = (float)std::clamp(next, c->min, c->max);
+  noteControlEdit(*u, ui, /*released=*/true);
+}
+
+// Enter on a tickbox flips it; on a list of options it takes the next
+// one, wrapping - the keyboard's version of clicking the one you want.
+void activateSelected(AppState& app) {
+  // A row of the overview is a panel tickbox: activating it shows or
+  // hides that panel, exactly as clicking it does.
+  if (app.sel.window.kind == WindowRef::Kind::Overview) {
+    if (auto w = app.panelRowTarget(app.sel.element)) app.togglePanel(*w);
+    return;
+  }
+  UnitState* u = nullptr;
+  ControlMeta* c = selectedControl(app, &u);
+  if (!c || !u) return;
+  ControlUi& ui = u->controlUi[c->name];
+  if (c->kind == "toggle") {
+    ui.value = ui.value >= 0.5f ? 0.0f : 1.0f;
+  } else if (c->kind == "choice") {
+    int n = (int)std::max<size_t>(1, c->options.size());
+    ui.value = (float)(((int)std::lround((double)ui.value) + 1) % n);
+  } else {
+    return;
+  }
+  noteControlEdit(*u, ui, /*released=*/true);
+}
+
+void stepSelection(AppState& app, int by) {
+  refreshHintOrder(app);
+  if (app.hintOrder.empty()) return;
+  auto w = focusedWindow(app.tab());
+  if (!w) return;
+  int at = -1;
+  if (app.sel.active() && app.sel.window == *w)
+    for (size_t i = 0; i < app.hintOrder.size(); i++)
+      if (app.hintOrder[i] == app.sel.element) at = (int)i;
+  int n = (int)app.hintOrder.size();
+  int next = at < 0 ? (by > 0 ? 0 : n - 1) : (at + by % n + n) % n;
+  app.sel.window = *w;
+  app.sel.element = app.hintOrder[(size_t)next];
+}
+
+void applyAction(AppState& app, const KeyMachine::Step& s) {
+  Tab& tab = app.tab();
+  auto focused = focusedWindow(tab);
+  switch (s.action) {
+    case Action::FocusDir:
+      if (focusDir(tab, (Dir)s.arg)) app.sel.clear();
+      break;
+    case Action::MoveDir: moveDir(tab, (Dir)s.arg); break;
+    case Action::CloseWindow:
+      // Whatever the focus covers: one window, or every window in the
+      // focused container.
+      closeFocused(tab);
+      app.sel.clear();
+      break;
+    case Action::ShowOverview: app.openWindow(overviewWindow()); break;
+    case Action::GotoTab: app.gotoTab(s.arg); break;
+    case Action::SendToTab:
+      // A container goes across intact, laid out as it was.
+      if (s.arg != app.activeTab &&
+          sendFocusedToTab(app.tabs, app.activeTab, s.arg, app.contentArea))
+        app.sel.clear();
+      break;
+    case Action::NewTab: app.gotoTab(nextFreeTabIndex(app.tabs)); break;
+    case Action::RenameTab:
+      std::snprintf(app.textBuf, sizeof app.textBuf, "%s", tab.name.c_str());
+      app.captureFocus = true;
+      break;
+    case Action::SplitH: tab.pendingSplit = Split::H; break;
+    case Action::SplitV: tab.pendingSplit = Split::V; break;
+    case Action::FocusParent:
+      // The container's own contents are not a widget any more.
+      if (focusParent(tab)) app.sel.clear();
+      break;
+    case Action::FocusChild:
+      if (focusChild(tab)) app.sel.clear();
+      break;
+    case Action::EnterSelect:
+      clearSelection(tab);
+      app.sel.clear();
+      break;
+    case Action::ExtendSel: extendSelection(tab, (Dir)s.arg); break;
+    case Action::Group: groupSelection(tab, (Split)s.arg); break;
+    case Action::Flatten: flattenFocused(tab); break;
+    case Action::ResizeDir: resizeFocused(tab, (Dir)s.arg, s.step); break;
+    case Action::OpenSearch:
+      app.searchQuery.clear();
+      app.textBuf[0] = '\0';
+      app.searchPick = 0;
+      app.captureFocus = true;
+      rebuildIndex(app);
+      break;
+    case Action::ToggleOutline: app.outline = !app.outline; break;
+    case Action::ToggleWhichKey: app.whichKey = !app.whichKey; break;
+    case Action::EnterHint:
+      app.hintTyped.clear();
+      refreshHintOrder(app);
+      break;
+    case Action::LeaveMode:
+      app.sel.clear();
+      app.hintTyped.clear();
+      break;
+    case Action::Scroll: app.deferred.scrollLines = (float)s.step; break;
+    case Action::ScrollPage: app.deferred.scrollPages = (float)s.step; break;
+    case Action::WidgetAdjust: adjustSelected(app, s.step); break;
+    case Action::WidgetActivate: activateSelected(app); break;
+    case Action::WidgetReset: {
+      UnitState* u = nullptr;
+      if (ControlMeta* c = selectedControl(app, &u)) resetControl(*u, *c);
+      break;
+    }
+    case Action::WidgetStep: stepSelection(app, s.arg); break;
+    case Action::ScaleWindow: app.scaleFocusedWindow(s.arg); break;
+    case Action::WavePlay:
+    case Action::WaveZoom:
+    case Action::WaveFit:
+    case Action::WaveLoop:
+      app.deferred.wave = s.action;
+      app.deferred.waveStep = s.step;
+      break;
+    case Action::SearchAccept: acceptSearch(app); break;
+    case Action::SearchStep:
+      app.searchPick = std::max(0, app.searchPick + s.arg);
+      break;
+    case Action::RenameAccept: tab.name = app.textBuf; break;
+    default: break;
+  }
+}
+
+// Hint mode: the letters are the labels, not shortcuts. Returns true
+// when a key was consumed here - it must not go on to the map as well,
+// or one press of `f` picks the label `f` and then reopens the labels.
+bool typeHints(AppState& app) {
+  std::vector<std::string> labels = hintLabels(app.hintOrder.size());
+  bool consumed = false;
+  for (int i = 0; i < 26; i++) {
+    if (!ImGui::IsKeyPressed((ImGuiKey)(ImGuiKey_A + i), false)) continue;
+    consumed = true;
+    app.hintTyped += (char)('a' + i);
+    size_t picked = 0;
+    switch (matchHint(labels, app.hintTyped, picked)) {
+      case HintMatch::Exact:
+        if (auto w = focusedWindow(app.tab())) {
+          app.sel.window = *w;
+          app.sel.element = app.hintOrder[picked];
+        }
+        app.hintTyped.clear();
+        app.keys.mode = Mode::Normal;
+        return true;
+      case HintMatch::Prefix: break;
+      case HintMatch::None:
+        // Nothing can start with what has been typed: give up rather
+        // than leaving the labels up with no way out but Escape.
+        app.hintTyped.clear();
+        break;
+    }
+  }
+  return consumed;
+}
+
+// Alt tapped on its own arms the prefix; Alt used as a modifier for
+// some other key does not. Anything pressed while it is down disarms
+// it, so holding Alt and typing works exactly as it always did.
+void trackAltTap(AppState& app) {
+  ImGuiIO& io = ImGui::GetIO();
+  bool altWasHeld = app.altHeld;
+  app.altHeld = io.KeyAlt;
+  if (app.altHeld && !altWasHeld) {
+    app.altSince = ImGui::GetTime();
+    app.altArmed = true;
+  }
+  if (app.altHeld && app.altArmed && ImGui::IsAnyItemActive())
+    app.altArmed = false;
+  if (!app.altHeld && altWasHeld) {
+    if (app.altArmed && app.keys.mode == Mode::Normal) {
+      app.keys.sticky = true;
+      app.pendingSince = 0;  // the pane comes up at once: it was asked for
+    }
+    app.altArmed = false;
+  }
+}
+
+void handleInput(AppState& app, unsigned ctx) {
+  // The only thing the app decides for itself: whether the press was a
+  // hint label, which needs the labels it just drew. Everything else -
+  // whether it is spent, what it means, what mode it leaves behind - is
+  // the machine's, in one place, in one order.
+  bool captured = app.keys.mode == Mode::Hint && typeHints(app);
+  trackAltTap(app);
+
+  Chord c = readChord();
+  if (c.valid() && app.altHeld) app.altArmed = false;
+
+  KeyMachine::Step s = app.keys.dispatch(c, captured, ctx);
+  switch (s.kind) {
+    case KeyMachine::Step::Kind::Pending:
+      app.pendingSince = ImGui::GetTime();
+      break;
+    case KeyMachine::Step::Kind::Fired:
+      if (s.action == Action::EnterResize || s.action == Action::EnterHint ||
+          s.action == Action::EnterSelect)
+        app.pendingSince = ImGui::GetTime();
+      applyAction(app, s);
+      break;
+    case KeyMachine::Step::Kind::Consumed:
+    case KeyMachine::Step::Kind::None:
+      break;
+  }
+}
+
+void drawEmptyTab(AppState& app, const Rect& area) {
+  ImGui::SetNextWindowPos(ImVec2(area.x + area.w * 0.5f - 160 * gUiScale,
+                                 area.y + area.h * 0.5f - 30 * gUiScale));
+  ImGui::SetNextWindowSize(ImVec2(320 * gUiScale, 0));
+  ImGui::Begin("###empty", nullptr,
+               ImGuiWindowFlags_NoDecoration | ImGuiWindowFlags_NoSavedSettings |
+                   ImGuiWindowFlags_AlwaysAutoResize |
+                   ImGuiWindowFlags_NoBringToFrontOnFocus);
+  ImGui::TextDisabled("tab %s is empty", tabLabel(app.tab()).c_str());
+  ImGui::TextDisabled("Alt+o  the overview, and its list of panels");
+  ImGui::TextDisabled("Alt+d  find a panel by name");
+  ImGui::End();
+}
+
+// Audio behind a window nothing is showing is released, its view
+// remembered first so reopening comes back where you left it.
+void releaseUnusedWaves(AppState& app, const std::set<std::string>& wanted) {
   for (auto it = app.waves.begin(); it != app.waves.end();) {
     if (wanted.count(it->first)) {
       ++it;
@@ -1345,6 +1881,51 @@ void drawFrame(AppState& app) {
     app.savedWaves[it->first] = std::move(st);
     it = app.waves.erase(it);
   }
+}
+
+void drawFrame(AppState& app) {
+  unsigned ctx = contextBits(app);
+  handleInput(app, ctx);
+  ctx = contextBits(app);  // the action may have changed what is selected
+  if (app.activeTab < 1) app.activeTab = 1;
+  // A tab you emptied and left is not a tab any more. Named ones stay -
+  // naming it says you meant to keep it - and so does the one you are
+  // standing on, which is how you get an empty tab to fill.
+  std::erase_if(app.tabs, [&app](const Tab& t) {
+    return t.empty() && t.name.empty() && t.index != app.activeTab;
+  });
+  ensureTab(app.tabs, app.activeTab);
+
+  const ImGuiViewport* vp = ImGui::GetMainViewport();
+  float width = vp->WorkSize.x, height = vp->WorkSize.y;
+  drawTabBar(app, width);
+
+  std::vector<const Binding*> wk = whichKeyRows(app, ctx);
+  bool showWk = whichKeyShowing(app, wk.size());
+  WhichKeyLayout wkl;
+  if (showWk) wkl = layOutWhichKey(wk, width, height * 0.4f);
+  float wkH = showWk ? wkl.height : 0.0f;
+
+  Rect area{vp->WorkPos.x, vp->WorkPos.y + tabBarHeight(), width,
+            std::max(60.0f, height - tabBarHeight() - wkH)};
+  app.contentArea = area;
+  Placement placement = place(app.tab(), area);
+  drawContainerFrames(placement);
+
+  std::set<std::string> wanted;
+  for (const PlacedWindow& pw : placement.windows) drawLeaf(app, pw, wanted);
+  if (placement.windows.empty()) drawEmptyTab(app, area);
+  dragDividers(app, placement, area);
+  releaseUnusedWaves(app, wanted);
+
+  drawFocusRing(app);
+  if (app.outline) drawOutline(app, area);
+  if (app.keys.mode == Mode::Hint) drawHints(app, placement);
+  if (app.keys.mode == Mode::Search) drawSearch(app, area);
+  if (app.keys.mode == Mode::Rename) drawRename(app, area);
+  if (app.keys.mode == Mode::Help) drawHelp(app, area, ctx);
+  if (showWk) drawWhichKey(app, wk, wkl, width, area.y + area.h);
+  app.deferred.clear();
 }
 
 // A saved window position is only reused when it still lands on a
@@ -1375,6 +1956,7 @@ int usage() {
 
 int main(int argc, char** argv) {
   bool selfTest = false;
+  bool selfTestFailed = false;  // a checked expectation the run did not meet
   bool fullscreen = false;
   std::string projectDir = ".";
   for (int i = 1; i < argc; i++) {
@@ -1406,6 +1988,18 @@ int main(int argc, char** argv) {
   // run to restore, nor touch the project's control values.
   app.persist = !selfTest;
   app.loadState();
+  if (selfTest) {
+    // A fresh shell: the smoke test must report the same thing whatever
+    // layout the project was last left in. That means dropping the saved
+    // tabs *and* the saved open-panel set the migration would read -
+    // both are the user's, and neither is this test's business.
+    app.state.ui.tabs.clear();
+    app.state.ui.panels.clear();
+    app.tabs.clear();
+    app.activeTab = 1;
+    app.adoptTabs();
+    app.migratePending = true;
+  }
 
   Uint32 windowFlags = SDL_WINDOW_RESIZABLE | (selfTest ? SDL_WINDOW_HIDDEN : 0);
   int winX = SDL_WINDOWPOS_CENTERED, winY = SDL_WINDOWPOS_CENTERED;
@@ -1467,10 +2061,11 @@ int main(int argc, char** argv) {
     ImGui::LoadIniSettingsFromMemory(app.state.ui.imguiIni.c_str(),
                                      app.state.ui.imguiIni.size());
   ImGui::StyleColorsDark();
-  if (gUiScale != 1.0f) {
-    ImGui::GetStyle().ScaleAllSizes(gUiScale);
-    ImGui::GetIO().FontGlobalScale = gUiScale;
-  }
+  if (gUiScale != 1.0f) ImGui::GetStyle().ScaleAllSizes(gUiScale);
+  // The ladder is baked with --scale already in it, so the global font
+  // scale stays at 1: every size on screen is a size something was
+  // actually rasterised at.
+  gFonts.bake(ImGui::GetIO(), gUiScale);
   ImGui_ImplSDL2_InitForSDLRenderer(window, renderer);
   ImGui_ImplSDLRenderer2_Init(renderer);
 
@@ -1493,6 +2088,7 @@ int main(int argc, char** argv) {
 
   bool done = false;
   int frames = 0;
+  const ImGuiStyle restingStyle = ImGui::GetStyle();
   Uint64 last = SDL_GetPerformanceCounter();
   while (!done) {
     SDL_Event e;
@@ -1501,6 +2097,14 @@ int main(int argc, char** argv) {
       if (e.type == SDL_QUIT) done = true;
       // Only sample the OS window's geometry when it actually changed:
       // on X11 these are round trips, too costly to poll every frame.
+      // Alt+Tab away and the release never reaches us, so the prefix
+      // would still be armed when you came back and eat your next key.
+      if (e.type == SDL_WINDOWEVENT &&
+          e.window.event == SDL_WINDOWEVENT_FOCUS_LOST) {
+        app.keys.sticky = false;
+        app.altArmed = false;
+        app.altHeld = false;
+      }
       if (app.persist && !fullscreen && e.type == SDL_WINDOWEVENT &&
           (e.window.event == SDL_WINDOWEVENT_MOVED ||
            e.window.event == SDL_WINDOWEVENT_SIZE_CHANGED)) {
@@ -1534,6 +2138,103 @@ int main(int argc, char** argv) {
       }
     }
 
+    // ...and every overlay: one frame per mode, with a row selected, so
+    // the smoke test draws the search, help, hint and which-key surfaces
+    // as well as the tiling. An unbalanced Begin/End in any of them is
+    // an assert here rather than a crash in front of the user.
+    if (selfTest && frames >= 1 && frames <= 4) {
+      static const Mode modes[] = {Mode::Search, Mode::Help, Mode::Hint,
+                                   Mode::Resize};
+      app.keys.mode = modes[frames - 1];  // one frame each
+      app.outline = true;
+      app.altHeld = true;
+      app.altSince = -10;
+      if (auto w = focusedWindow(app.tab())) {
+        std::vector<WindowElement> els = app.elementsOf(*w);
+        if (!els.empty()) {
+          app.sel.window = *w;
+          app.sel.element = els[0].name;
+        }
+      }
+      refreshHintOrder(app);
+    }
+
+    // The one seam the unit tests cannot reach: real key events becoming
+    // chords. These frames type a short script through ImGui's own input
+    // queue - gather a neighbour, group the two, switch tab - and the
+    // report below prints the tree it produced. A broken ImGuiKey
+    // translation, or a mode that swallows its keys, fails here rather
+    // than under someone's hands.
+    // The overlay frames above leave the machine in whatever mode they
+    // were showing; the script below types from a resting state.
+    if (selfTest && frames == 5) app.keys.reset();
+    if (selfTest) {
+      struct Press {
+        int frame;
+        ImGuiKey key;
+        bool alt;
+        bool ctrl = false;
+      };
+      // Every other frame: ImGui trickles a queue that changes one key
+      // twice, so the modifier released with a chord is still down on
+      // the very next frame - `l` typed there would arrive as Alt+l.
+      static const Press script[] = {
+          {5, ImGuiKey_S, true},        // select mode
+          {7, ImGuiKey_L, false},       // gather the neighbour to the right
+          {9, ImGuiKey_V, false},       // group the two of them stacked
+          {11, ImGuiKey_Escape, false}, // back to normal
+          {13, ImGuiKey_2, true},       // over to tab 2
+          // ...and back again with Alt *tapped* rather than held, which
+          // is a different path through the input code: the modifier is
+          // spent on its own frame and the digit arrives bare.
+          {15, ImGuiKey_None, true},
+          {19, ImGuiKey_1, false},
+          // f, then a label that is *also* a normal-mode shortcut: the
+          // press that picks a row must not reach the map behind it and
+          // reopen the labels. `f` is the fourth label, so a window with
+          // four or more rows exercises it.
+          {21, ImGuiKey_J, true},   // focus a window with rows in it
+          {23, ImGuiKey_F, false},  // label them
+          {25, ImGuiKey_F, false},  // take the row labelled `f`
+          {27, ImGuiKey_A, false},  // (or the first, where there is no `f`)
+          // ...and the overview's own rows, which are panel tickboxes:
+          // label them, take the first, and press it.
+          {29, ImGuiKey_K, true},   // back up to the overview
+          {31, ImGuiKey_F, false},
+          {33, ImGuiKey_A, false},
+          {35, ImGuiKey_Enter, false},
+          // Two notches smaller, so the report can say the style came
+          // back: a scale left applied would compound every frame.
+          {37, ImGuiKey_Minus, false, true},
+          {39, ImGuiKey_Minus, false, true},
+      };
+      for (const Press& k : script) {
+        if (k.frame != frames) continue;
+        ImGuiIO& io = ImGui::GetIO();
+        // Exactly what the SDL backend sends: the modifier travels as
+        // its own event, not as the Alt key going down. Down and up in
+        // one frame, which ImGui applies over two - so auto-repeat never
+        // fires the shortcut twice.
+        if (k.key == ImGuiKey_None) {
+          // Alt on its own, held down; the release comes two frames on.
+          io.AddKeyEvent(ImGuiMod_Alt, true);
+          io.AddKeyEvent(ImGuiKey_LeftAlt, true);
+          continue;
+        }
+        if (k.alt) io.AddKeyEvent(ImGuiMod_Alt, true);
+        if (k.ctrl) io.AddKeyEvent(ImGuiMod_Ctrl, true);
+        io.AddKeyEvent(k.key, true);
+        io.AddKeyEvent(k.key, false);
+        if (k.ctrl) io.AddKeyEvent(ImGuiMod_Ctrl, false);
+        if (k.alt) io.AddKeyEvent(ImGuiMod_Alt, false);
+      }
+      if (frames == 17) {
+        ImGuiIO& io = ImGui::GetIO();
+        io.AddKeyEvent(ImGuiKey_LeftAlt, false);
+        io.AddKeyEvent(ImGuiMod_Alt, false);
+      }
+    }
+
     ImGui_ImplSDLRenderer2_NewFrame();
     ImGui_ImplSDL2_NewFrame();
     ImGui::NewFrame();
@@ -1552,7 +2253,7 @@ int main(int argc, char** argv) {
     }
     app.maybeSave(dtMs);
 
-    if (selfTest && ++frames >= 5) done = true;
+    if (selfTest && ++frames >= 41) done = true;
     if (!selfTest && !vsync) {
       double frameMs = (double)(SDL_GetPerformanceCounter() - now) * 1000.0 /
                        (double)SDL_GetPerformanceFrequency();
@@ -1562,6 +2263,13 @@ int main(int argc, char** argv) {
   }
 
   if (selfTest) {
+    // Read before the reset below: these are what the typed keys left
+    // behind, and they are the point of the exercise.
+    std::string endedIn = modeName(app.keys.mode);
+    std::string picked = app.sel.active() ? app.sel.element : "(none)";
+    size_t labelled = app.hintOrder.size();
+    app.keys.reset();  // the mode cycling in the loop above is over
+    app.sel.clear();
     size_t loadedCount = 0, targetCount = 0, diagCount = 0, controlCount = 0;
     for (auto& u : app.units) {
       if (u.loaded.ok) loadedCount++;
@@ -1582,14 +2290,65 @@ int main(int argc, char** argv) {
         std::printf("self-test: control '%s' = %.6g%s\n", c.name.c_str(),
                     shown, pending ? " (pending rebuild)" : "");
       }
-    // Panels are reported but never drawn: a headless smoke test must
-    // stay deterministic.
     // What the app would actually show, so a project that declares no
     // panels reports the one holding everything rather than nothing.
     for (auto& u : app.units)
-      for (auto& p : app.panelsFor(u))
+      for (auto& p : app.panels[unitKey(u.unit)])
         std::printf("self-test: panel '%s' (%zu control(s), %zu target(s))\n",
                     p.name.c_str(), p.controls.size(), p.targets.size());
+    // ...and the shell they sit in: every tab, with its tree written out
+    // the way the outline overlay writes it. The layout is built fresh
+    // above, so this says the same thing however the app was last left.
+    std::printf("self-test: typed keys left tab %d selected\n",
+                app.activeTab);
+    std::printf("self-test: hints labelled %zu row(s), left mode %s, "
+                "selection '%s'\n",
+                labelled, endedIn.c_str(), picked.c_str());
+    for (auto& [id, scale] : app.windowScales) {
+      int at = gFonts.indexNear(gFonts.base * scale);
+      std::printf("self-test: window '%s' draws at %.0f%% - font baked at "
+                  "%.0fpx\n",
+                  id.c_str(), scale * 100.0f, gFonts.sizeAt(at));
+    }
+    // Every step a window can reach has to land back on the size it came
+    // from. A step that resolved to a different one would be drawn by
+    // stretching the atlas, which is the whole thing this avoids.
+    bool exact = true;
+    for (int i = 0; i < gFonts.count(); i++) {
+      float scale = gFonts.scaleAt(i);
+      if (gFonts.indexNear(gFonts.base * scale) != i) exact = false;
+    }
+    std::printf("self-test: %d zoom step(s), base %.0fpx, all exact: %s\n",
+                gFonts.count(), gFonts.base, exact ? "yes" : "NO");
+    if (!exact) selfTestFailed = true;
+    // A window drawn at its own scale must leave the style exactly as
+    // it found it, or every frame would shrink the whole app a little
+    // further.
+    const ImGuiStyle& now = ImGui::GetStyle();
+    bool intact = now.FramePadding.x == restingStyle.FramePadding.x &&
+                  now.ItemSpacing.y == restingStyle.ItemSpacing.y &&
+                  now.ScrollbarSize == restingStyle.ScrollbarSize &&
+                  now.WindowPadding.x == restingStyle.WindowPadding.x;
+    std::printf("self-test: style after scaled windows: %s\n",
+                intact ? "unchanged" : "LEAKED");
+    if (!intact) selfTestFailed = true;
+    // What `?` would list where the app came to rest - the overlay is
+    // only as good as this, and an empty one is a bug worth catching.
+    for (Mode m : {Mode::Normal, Mode::Select, Mode::Resize}) {
+      size_t listed = 0;
+      for (const Binding* b : bindingsFor(m, CtxTiled | CtxNested))
+        if (b->listed) listed++;
+      std::printf("self-test: help lists %zu shortcut(s) in %s mode\n", listed,
+                  modeName(m));
+    }
+    for (const Tab& t : app.tabs) {
+      std::printf("self-test: tab %s (%zu window(s))\n", tabLabel(t).c_str(),
+                  windowsIn(t).size());
+      std::vector<std::string> lines;
+      outlineLines(t.root, t, {}, "", true, lines);
+      for (const std::string& l : lines)
+        std::printf("self-test:   %s\n", l.c_str());
+    }
     for (auto& [path, w] : app.waves) {
       if (w.error.empty())
         std::printf("self-test: waveform '%s' %lld frame(s), %zu channel(s)\n",
@@ -1613,5 +2372,5 @@ int main(int argc, char** argv) {
   SDL_DestroyRenderer(renderer);
   SDL_DestroyWindow(window);
   SDL_Quit();
-  return 0;
+  return selfTestFailed ? 1 : 0;
 }

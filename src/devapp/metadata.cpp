@@ -126,6 +126,10 @@ MetadataLoadResult loadProjectMetadata(const std::string& path) {
   return r;
 }
 
+std::string unitKey(const MetadataUnit& u) {
+  return u.label.empty() ? std::string(".") : u.label;
+}
+
 std::vector<PanelMeta> resolvePanels(const ProjectMeta& meta) {
   std::vector<PanelMeta> out = meta.panels;
   std::set<std::string> claimedControls, claimedTargets;

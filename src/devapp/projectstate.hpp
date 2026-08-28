@@ -3,6 +3,8 @@
 #include <string>
 #include <vector>
 
+#include "layout.hpp"
+
 namespace synth::devapp {
 
 // The project's own settings file - `project.json` beside `build.json`
@@ -55,11 +57,22 @@ struct UiState {
   // deliberately does not persist tree state in its ini, so the app
   // tracks the few headers it owns itself.
   std::map<std::string, bool> sections;
-  // Which panel windows are open, by "<unit>/<panel>". Panels are the
-  // whole UI - a panel holds its controls and its waveforms together -
-  // so this is the list of what is on screen. Where each window sits is
-  // ImGui's business and rides in `imguiIni`. A panel absent from the
-  // map has never been touched and opens by default.
+  // The tiling shell: the tabs, their trees, and which one was on
+  // screen. This is where every window is and how big it is - the app
+  // places them itself, so ImGui's ini has no say over any of it.
+  std::vector<Tab> tabs;
+  int activeTab = 1;
+  bool outline = false;   // the tree outline overlay was open
+  bool whichKey = true;   // the which-key pane was on
+  // How big each window draws its own contents, by window id, for the
+  // ones that are not at 1. A panel of tiny numbers you lean into is
+  // worth remembering.
+  std::map<std::string, double> windowScales;
+  // Which panel windows are open, by "<unit>/<panel>". Derived from
+  // `tabs` now and written for what reads it: a settings file from
+  // before tabs existed, which is migrated into tab 1, and an older
+  // build of the app, which still finds what it expects. A panel absent
+  // from the map has never been touched and opens by default.
   std::map<std::string, bool> panels;
   bool operator==(const UiState&) const = default;
 };

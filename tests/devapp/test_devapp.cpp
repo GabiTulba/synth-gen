@@ -7,6 +7,7 @@
 #include "build.hpp"
 #include "manifest_helpers.hpp"
 #include "json.hpp"
+#include "layout.hpp"
 #include "metadata.hpp"
 #include "player.hpp"
 #include "test_framework.hpp"
@@ -759,6 +760,69 @@ TEST(project_state_roundtrips_panel_visibility) {
   CHECK(back.state == s);
   CHECK(back.state.ui.panels.at("./Voice") == false);
   CHECK(back.state.ui.panels.at("./Drums") == true);
+}
+
+TEST(project_state_roundtrips_the_tabs) {
+  // The shell is the part of the file people will notice going missing:
+  // the tree, the fractions, the focus and which tab was on screen.
+  TempDir tp;
+  ProjectState st;
+  Tab one;
+  one.index = 1;
+  one.name = "main";
+  WindowRef kick;
+  kick.kind = WindowRef::Kind::Panel;
+  kick.unit = ".";
+  kick.panel = "Kick";
+  insertWindow(one, overviewWindow());
+  insertWindow(one, kick);
+  resizeSplit(one, {}, 0, 0.2);
+  Tab two;
+  two.index = 3;
+  st.ui.tabs = {one, two};
+  st.ui.activeTab = 3;
+  st.ui.outline = true;
+  st.ui.whichKey = false;
+  st.ui.windowScales["./Kick"] = 1.21;
+
+  std::string path = (tp.dir / "project.json").string(), err;
+  CHECK(saveProjectState(path, st, err));
+  ProjectStateLoad back = loadProjectState(path);
+  CHECK(back.found);
+  CHECK(back.state.ui.tabs.size() == 2);
+  CHECK(back.state.ui.tabs[0] == one);
+  CHECK(back.state.ui.tabs[1].index == 3 && back.state.ui.tabs[1].empty());
+  CHECK(back.state.ui.activeTab == 3);
+  CHECK(back.state.ui.outline);
+  CHECK(!back.state.ui.whichKey);
+  CHECK(back.state.ui.windowScales.size() == 1);
+  CHECK_NEAR(back.state.ui.windowScales.at("./Kick"), 1.21, 1e-9);
+}
+
+TEST(project_state_from_before_tabs_still_reads) {
+  // A file the old shell wrote: panels but no tabs. It loads with no
+  // layout at all, which is the signal the app migrates on.
+  TempDir tp;
+  tp.write("project.json", R"({"version": 1, "controls": {},
+     "ui": {"panels": {"./Kick": true, "./Snare": false}}})");
+  ProjectStateLoad r = loadProjectState((tp.dir / "project.json").string());
+  CHECK(r.found);
+  CHECK(r.state.ui.tabs.empty());
+  CHECK(r.state.ui.activeTab == 1);
+  CHECK(r.state.ui.whichKey);  // on unless the file says otherwise
+  CHECK(r.state.ui.panels.at("./Kick"));
+  CHECK(!r.state.ui.panels.at("./Snare"));
+}
+
+TEST(project_state_drops_a_malformed_tab) {
+  TempDir tp;
+  tp.write("project.json", R"({"version": 1, "ui": {"tabs": [
+      {"name": "no index"}, 17,
+      {"index": 2, "root": {"window": {"kind": "overview"}}}]}})");
+  ProjectStateLoad r = loadProjectState((tp.dir / "project.json").string());
+  CHECK(r.found);
+  CHECK(r.state.ui.tabs.size() == 1);  // losing a layout is not fatal
+  CHECK(r.state.ui.tabs[0].index == 2);
 }
 
 TEST(project_state_roundtrips) {

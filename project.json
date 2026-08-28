@@ -1,0 +1,16 @@
+{
+  "version": 1,
+  "controls": {},
+  "ui": {
+    "window": {
+      "x": 510,
+      "y": 277,
+      "w": 900,
+      "h": 600
+    },
+    "imgui": "",
+    "waves": [],
+    "sections": {},
+    "panels": {}
+  }
+}

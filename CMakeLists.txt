@@ -72,26 +72,39 @@ if(SYNTHGRAPH_BUILD_DEVAPP)
     target_link_libraries(imgui PUBLIC SDL2::SDL2)
 
     add_library(synthdev_core
+      src/devapp/keymap.cpp
+      src/devapp/layout.cpp
       src/devapp/metadata.cpp
       src/devapp/player.cpp
       src/devapp/projectstate.cpp
+      src/devapp/search.cpp
       src/devapp/waveform.cpp
     )
     target_include_directories(synthdev_core PUBLIC src/devapp)
     target_link_libraries(synthdev_core PUBLIC synthgraph_core SDL2::SDL2)
 
-    add_executable(synth-dev src/devapp/app.cpp)
+    add_executable(synth-dev src/devapp/app.cpp src/devapp/widgets.cpp)
     target_link_libraries(synth-dev PRIVATE synthdev_core imgui)
     set_target_properties(synth-dev PROPERTIES ENABLE_EXPORTS ON)
 
     add_executable(devapp_tests
       tests/test_main.cpp
       tests/devapp/test_devapp.cpp
+      tests/devapp/test_keymap.cpp
+      tests/devapp/test_layout.cpp
+      tests/devapp/test_search.cpp
     )
     target_link_libraries(devapp_tests PRIVATE synthdev_core)
     target_include_directories(devapp_tests PRIVATE tests)
     set_target_properties(devapp_tests PROPERTIES ENABLE_EXPORTS ON)
     add_test(NAME devapp_tests COMMAND devapp_tests)
+    # A second project on purpose: this one declares enough controls for
+    # a panel with more rows than there are single-letter hint labels
+    # that mean something else, which is where the shell's input
+    # arbitration gets exercised.
+    add_test(NAME devapp_selftest_controls
+             COMMAND synth-dev --self-test
+                     ${CMAKE_CURRENT_SOURCE_DIR}/examples/controls)
     add_test(NAME devapp_selftest
              COMMAND synth-dev --self-test
                      ${CMAKE_CURRENT_SOURCE_DIR}/examples/pluck)

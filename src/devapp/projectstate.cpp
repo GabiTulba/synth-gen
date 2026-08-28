@@ -157,6 +157,24 @@ ProjectStateLoad loadProjectState(const std::string& path) {
   };
   readFlags("panels", r.state.ui.panels);
 
+  if (const json::Value* sc = ui->get("windowScales");
+      sc && sc->kind == json::Value::Kind::Object)
+    for (auto& [id, value] : sc->object)
+      if (value.kind == json::Value::Kind::Number && value.number > 0)
+        r.state.ui.windowScales[id] = value.number;
+
+  r.state.ui.activeTab = (int)ui->getNumber("activeTab", 1);
+  r.state.ui.outline = jsonBool(*ui, "outline", false);
+  r.state.ui.whichKey = jsonBool(*ui, "whichKey", true);
+  // A malformed tab is dropped like a malformed wave entry: losing a
+  // layout must never keep the app from starting.
+  if (const json::Value* tabs = ui->get("tabs");
+      tabs && tabs->kind == json::Value::Kind::Array)
+    for (const json::Value& t : tabs->array) {
+      Tab tab;
+      if (tabFromJson(t, tab)) r.state.ui.tabs.push_back(std::move(tab));
+    }
+
   return r;
 }
 
@@ -211,6 +229,17 @@ bool saveProjectState(const std::string& path, const ProjectState& state,
     ui.set(key, std::move(v));
   };
   writeFlags("panels", state.ui.panels);
+
+  json::Value tabs = json::makeArray();
+  for (const Tab& t : state.ui.tabs) tabs.array.push_back(toJson(t));
+  ui.set("tabs", std::move(tabs));
+  json::Value scales = json::makeObject();
+  for (auto& [id, value] : state.ui.windowScales)
+    scales.set(id, json::makeNumber(value));
+  ui.set("windowScales", std::move(scales));
+  ui.set("activeTab", json::makeNumber(state.ui.activeTab));
+  ui.set("outline", json::makeBool(state.ui.outline));
+  ui.set("whichKey", json::makeBool(state.ui.whichKey));
   root.set("ui", std::move(ui));
 
   std::string text;

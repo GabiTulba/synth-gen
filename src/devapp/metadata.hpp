@@ -112,6 +112,12 @@ struct MetadataUnit {
   std::string metadataPath;  // where the build writes this unit's metadata
 };
 
+// How a unit is named in the project state file: the rule path under a
+// root, and a fixed stand-in for the single-unit case (whose label is
+// empty). Every per-unit key the app writes - control values, window
+// identity - starts with this.
+std::string unitKey(const MetadataUnit& u);
+
 struct MetadataLayout {
   std::string rootDir;  // artifact paths in metadata are relative to this
   std::string manifestPath;  // re-resolve the layout when this changes

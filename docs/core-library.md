@@ -31,7 +31,8 @@ idioms that tie them together.
 | Submodule | Contents | Engine sources |
 |-----------|----------|----------------|
 | `Core.Math` | `exp` `sqrt` `log` `pow`, trig (`sin` `cos` `tan` `atan`), `abs`, `pi`, `min`/`max`/`clamp`/`lerp`, the pure hash (`hash`), Int conversions (`to_scalar`, `round`/`floor`/`ceil`), `not` | `stdlib/core/math.cpp` + SynthGraph sugar |
-| `Core.List` | List combinators & builders: `map`, `mapi`, `fold`, `scan`, `init`, `repeat`, `length`, `append`, `nth`, `rev`, `filter`, `concat`, `flat_map`, `zip`, `take`, `drop`, `range`, `sum`, `maximum`, `iter` | written in SynthGraph (`lib.synth`); `iter` in `lists.cpp` |
+| `Core.List` | List combinators & builders: `map`, `mapi`, `fold`, `scan`, `init`, `repeat`, `length`, `append`, `nth`, `nth_opt`, `rev`, `filter`, `concat`, `flat_map`, `zip`, `take`, `drop`, `range`, `sum`, `maximum`, `iter` | written in SynthGraph (`lib.synth`); `iter` in `lists.cpp` |
+| `Core.Option` | The vocabulary over `'a Option`: `some`, `is_some`/`is_none`, `value`/`fold`, the monadic core (`map`, `bind`, `join`, `map2`), `or_else`, `filter`, `to_list` | written in SynthGraph (`lib.synth`) |
 | `Core.Osc` | Oscillators (`sine`, `saw`, `square`, their bandlimited `saw_bl`/`square_bl` variants, `noise`) and modulation (`fm`, `pm`, `am`) | `stdlib/core/oscillators.cpp` |
 | `Core.Time` | Timestamp construction & sequences: `to_sec`/`to_ms`/`to_min` and their inverses `of_sec`/`of_ms`/`of_min`, the duration quotient (`div`/`rem`), `time_steps`, `jitter` | `stdlib/core/math.cpp`, `lists.cpp` |
 | `Core.Arrange` | Combination and arrangement: `mix_all`, `channels`, `channel`, `sample`, `place`, `place_multi` | `stdlib/core/sampling.cpp` |
@@ -121,7 +122,8 @@ about opens that bind nothing a file uses.
 The combinators are **total**: every one answers for the empty list, so
 a builder that legitimately produces nothing needs no special case at
 the call site. `nth` answers with its `default` when the index is out
-of range (there is no option type); `maximum` takes the value an empty
+of range (`nth_opt` is the `Option`-returning spelling for callers that
+want to observe absence); `maximum` takes the value an empty
 list answers with, which doubles as a floor; `zip` stops at the shorter
 list; `take`/`drop` of a count past either end answer with what is
 there (negative counts take/drop nothing). `mapi` is index-aware `map`;
@@ -138,6 +140,35 @@ evaluates at constant depth.
 function implemented in C++: `unit` has no literal, so a synth-side
 iterator would have nothing to return in its `Nil` arm. Its use is
 computed render names (see `Str`).
+
+### `Core.Option`
+
+`'a Option` is the ambient two-constructor variant
+(`type 'a Option = | None | Some of 'a`, declared at the top of
+`lib.synth` beside `list`) for a value that may be absent: what an
+optional parameter without a default (`?x:T`) delivers to its body,
+what a `?x:` call-site argument passes through, and the return shape of
+partial lookups (`List.nth_opt`). Options are plain variant values, so
+`match` always works; the module exists so a pipeline can thread
+absence without spelling the match out each time.
+
+- **`is_some` / `is_none`** observe; **`value ~default`** and
+  **`fold ~none ~some`** leave the option (`fold` is the catamorphism —
+  everything else here is a special case of it).
+- **`map`**, **`bind`**, **`join`** and **`map2`** are the monadic
+  core: transform a present value, chain computations that may
+  themselves come up empty, flatten one level of nesting, and combine
+  two options (absent if either side is).
+- **`or_else ~alt`** picks the first present option; **`filter ~f`**
+  empties a value that fails a predicate; **`to_list`** bridges to the
+  zero-or-one-element list; **`some`** is the `Some` constructor as a
+  function (constructors are not first-class, so this is what flows
+  into `List.map` and friends).
+
+A defaulted optional parameter (`?(x = e : T)`) subsumes the common
+`value` call: the body already sees a determined `T`, and a caller
+holding an option passes it through with `?x:opt` — "use the caller's
+choice if there is one, mine otherwise".
 
 ### `Core.Osc`
 

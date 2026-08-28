@@ -62,6 +62,31 @@ class Interp {
   std::map<std::string, SigPtr> fileCache_;        // absolute path -> signal
   mutable CoreListInfo coreList_;                  // resolved on first use
   mutable CoreSampleInfo coreSample_;              // resolved on first use
+  mutable CoreOptionInfo coreOption_;              // resolved on first use
+
+  const CoreOptionInfo& coreOption() const {
+    if (!coreOption_) {
+      const TypeDecl* d = prog_.coreTypeDecl("Option");
+      if (!d)
+        throw EvalError("internal error: Core's Option type is not loaded");
+      coreOption_.decl = d;
+      for (size_t i = 0; i < d->ctors.size(); i++) {
+        if (d->ctors[i].name == "None") coreOption_.noneIndex = (int)i;
+        if (d->ctors[i].name == "Some") coreOption_.someIndex = (int)i;
+      }
+    }
+    return coreOption_;
+  }
+
+  Value noneValue() const {
+    const CoreOptionInfo& opt = coreOption();
+    return Value{VariantV{opt.decl, opt.noneIndex, nullptr}};
+  }
+  Value someValue(Value v) const {
+    const CoreOptionInfo& opt = coreOption();
+    return Value{VariantV{opt.decl, opt.someIndex,
+                          std::make_shared<Value>(std::move(v))}};
+  }
 
   const CoreListInfo& coreList() const {
     if (!coreList_) {
@@ -464,16 +489,16 @@ class Interp {
                         "' - likely unbounded recursion (no base case "
                         "reached)");
       }
-      // Assemble the parameter-name list of whatever we're applying.
-      std::vector<std::string> paramNames;
+      // Assemble the parameter list of whatever we're applying.
+      const std::vector<Param>* params = nullptr;
       const std::map<std::string, Value>* prevBound = nullptr;
       const FunV* f = std::get_if<FunV>(&fn.v);
       const LambdaV* l = std::get_if<LambdaV>(&fn.v);
       if (f) {
-        for (auto& p : f->def->params) paramNames.push_back(p.name);
+        params = &f->def->params;
         prevBound = f->bound.get();
       } else if (l) {
-        for (auto& p : l->lam->params) paramNames.push_back(p.name);
+        params = &l->lam->params;
         prevBound = l->bound.get();
       } else {
         throw EvalError("internal error: applying a non-function value");
@@ -482,36 +507,100 @@ class Interp {
       auto bound = std::make_shared<std::map<std::string, Value>>();
       if (prevBound) *bound = *prevBound;
       for (auto& [label, value] : args) {
-        std::string target;
-        if (!label.empty()) {
-          if (bound->count(label))
-            throw EvalError("argument '~" + label + "' provided twice");
-          target = label;
-        } else {
-          for (auto& name : paramNames)
-            if (!bound->count(name)) {
-              target = name;
+        // A '?'-prefixed label passes an Option through to an optional
+        // parameter; a plain label passes a determined element value.
+        bool optPass = !label.empty() && label[0] == '?';
+        std::string name = optPass ? label.substr(1) : label;
+        if (!name.empty()) {
+          if (bound->count(name))
+            throw EvalError("argument '~" + name + "' provided twice");
+          const Param* p = nullptr;
+          for (auto& cand : *params)
+            if (cand.name == name) {
+              p = &cand;
               break;
             }
-          if (target.empty())
+          if (!p)
+            throw EvalError("internal error: no parameter named '" + name +
+                            "'");
+          if (optPass) {
+            const VariantV* var = std::get_if<VariantV>(&value.v);
+            if (!var)
+              throw EvalError("internal error: '?" + name +
+                              "' did not receive an Option value");
+            if (p->defaultExpr) {
+              // A defaulted parameter is a determined value in the body:
+              // Some v fills it with v, None leaves it unfilled so the
+              // default applies when the call completes.
+              if (var->ctor == coreOption().someIndex && var->payload)
+                (*bound)[name] = *var->payload;
+            } else {
+              // A non-defaulted one holds the Option itself.
+              (*bound)[name] = std::move(value);
+            }
+          } else if (p->optional && !p->defaultExpr) {
+            // ~x:v into a non-defaulted optional parameter: the body
+            // sees Some v.
+            (*bound)[name] = someValue(std::move(value));
+          } else {
+            (*bound)[name] = std::move(value);
+          }
+        } else {
+          // Positional values fill the leftmost unbound *required*
+          // parameter; optional parameters fill only by label.
+          const std::string* target = nullptr;
+          for (auto& p : *params)
+            if (!p.optional && !bound->count(p.name)) {
+              target = &p.name;
+              break;
+            }
+          if (!target)
             throw EvalError("internal error: too many arguments");
+          (*bound)[*target] = std::move(value);
         }
-        (*bound)[target] = std::move(value);
       }
 
-      if (bound->size() < paramNames.size()) {
+      // A call completes once every required parameter is bound; the
+      // unfilled optional ones default below, as the body's environment
+      // is assembled.
+      bool requiredLeft = false;
+      for (auto& p : *params)
+        if (!p.optional && !bound->count(p.name)) {
+          requiredLeft = true;
+          break;
+        }
+      if (requiredLeft) {
         if (f) return Value{FunV{f->def, f->mod, std::move(bound)}};
         return Value{LambdaV{l->lam, l->mod, l->captured, std::move(bound)}};
       }
+
+      // Binds the parameters into `env` in declaration order. An unfilled
+      // optional parameter defaults here: its declared default evaluates
+      // with the earlier parameters (and the enclosing scope) visible, a
+      // non-defaulted one becomes None.
+      auto bindParams = [&](Env& env, const CheckedModule& defMod) {
+        for (auto& p : *params) {
+          auto it = bound->find(p.name);
+          if (it != bound->end()) {
+            env[p.name] = it->second;
+          } else if (p.defaultExpr) {
+            env[p.name] = eval(*p.defaultExpr, env, defMod);
+          } else {
+            env[p.name] = noneValue();
+          }
+        }
+      };
 
       std::optional<TailNext> next;
       Value out;
       if (f) {
         // Fully applied. An external body has no expression to evaluate:
         // its arguments dispatch to the bound implementation instead.
+        // (Externals cannot declare optional parameters, so every value
+        // is bound.)
         if (f->def->body->kind == Expr::Kind::External) {
           std::vector<Value> ordered;
-          for (auto& name : paramNames) ordered.push_back((*bound)[name]);
+          for (auto& p : *params) ordered.push_back((*bound)[p.name]);
           return callExternal(*f->def, *f->mod, mod, std::move(ordered));
         }
         if (!guard) guard.emplace(*this, f->def->name);
@@ -521,7 +610,7 @@ class Interp {
         // names are dotted and unreachable from an unqualified lookup.
         if (f->def->isRec)
           env[f->def->name] = Value{FunV{f->def, f->mod, nullptr}};
-        for (auto& name : paramNames) env[name] = (*bound)[name];
+        bindParams(env, *f->mod);
         out = evalTail(*f->def->body, env, *f->mod, next);
       } else {
         // The captured environment plus the bound params (params shadow
@@ -536,7 +625,7 @@ class Interp {
         if (!l->lam->name.empty())
           env[l->lam->name] =
               Value{LambdaV{l->lam, l->mod, l->captured, nullptr}};
-        for (auto& name : paramNames) env[name] = (*bound)[name];
+        bindParams(env, *l->mod);
         out = evalTail(*l->lam->items[0], env, *l->mod, next);
       }
       if (!next) return out;

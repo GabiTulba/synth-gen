@@ -41,7 +41,7 @@ accepts and how it is typed and evaluated. The design document
 - **Boolean literals**: `true`, `false` — always `Bool`.
 - **String literals**: `"..."` with escapes `\n`, `\t`, `\\`, `\"`.
 - **Punctuation**: `;;` `;` `:` `=` `(` `)` `[` `]` `{` `}` `,` `.`
-  `->` `~` `|>` `|` `+` `-` `*` `/` `<` `<=` `>` `>=` `==` `!=` `&&`
+  `->` `~` `?` `|>` `|` `+` `-` `*` `/` `<` `<=` `>` `>=` `==` `!=` `&&`
   `||`, and the `.`-suffixed operators `+.` `-.` `*.` `/.` `<.` `<=.`
   `>.` `>=.` `==.` `!=.` (§3). A lone `|` is the variant/match bar;
   `|>` and `||` win where they fit. Operators are longest-match, so
@@ -69,6 +69,11 @@ let-def     ::= "let" [ "rec" ] (Ident | "_") { param } [ ":" type ] "="
                 (expr | external-body) ";;"
 external-body ::= "external" String                 (C++ file; §5)
 param       ::= [ "~" ] Ident ":" param-type      (~ marks a labeled param)
+              | "?" Ident ":" param-type          (optional labeled param;
+                                                   the body sees T Option)
+              | "?" "(" Ident "=" expr ":" type ")"
+                                                  (optional with a default;
+                                                   the body sees a plain T)
 
 type-def    ::= "type" [ type-params ] UpIdent
                 [ "=" ( record-body | ctor-list ) ] ";;"
@@ -134,6 +139,9 @@ app         ::= atom { arg }                        (application, left)
 arg         ::= atom                                (positional)
               | "~" Ident ":" atom                  (labeled argument)
               | "~" Ident                           (punned: ~x = ~x:x)
+              | "?" Ident ":" atom                  (optional argument: an
+                                                     Option passed through)
+              | "?" Ident                           (punned: ?x = ?x:x)
 atom        ::= atom-base { "." Ident }             (record projection;
                                                      binds tighter than
                                                      application)
@@ -222,7 +230,7 @@ Built-in types: `Scalar`, `Int`, `Vector`, `Timestamp`, `String`,
 `Bool`, `unit`, tuples `(t1, ..., tn)`, and function types
 `t1 -> ... -> tn -> r` (in signatures only). Everything else is a
 *declared* type: user `type` declarations (records, variants, abstract
-types — see below), and the three Core declares that are ambient like
+types — see below), and the four Core declares that are ambient like
 the built-in names, needing no import to write in an annotation:
 
 - `'a list` — an ordinary recursive variant,
@@ -234,6 +242,12 @@ the built-in names, needing no import to write in an annotation:
 - `'a Sample` — a record,
   `type 'a Sample = { sig : 'a Signal; from : Timestamp; to : Timestamp }`,
   so `s.from` projects and `{ s with to = 1s }` re-windows a sample.
+- `'a Option` — an ordinary variant for a value that may be absent,
+  `type 'a Option = | None | Some of 'a`. It is what an optional
+  parameter without a default delivers to its body, what a `?x:`
+  call-site argument passes through (see "Optional labeled parameters"
+  below), and the return shape of partial lookups (`List.nth_opt`).
+  The monadic helpers live in `Core.Option` (§6).
 
 `Int` is the build-time integer: a 64-bit signed whole number for
 counts, indices, and other discrete quantities. The primitives that
@@ -287,13 +301,16 @@ Rules:
 - **The Core library.** All primitives live in `Core` — a *real
   library* bundled with the compiler (`stdlib/core/lib.synth`). Nearly
   every definition is an `external` binding to a C++ implementation
-  shipped beside it (§5); the `List`, `Pitch`, `Tempo`, `Scale` and `Score`
-  modules are written in SynthGraph itself, and the interface opens with the `list`/`Signal`/`Sample`
+  shipped beside it (§5); the `List`, `Option`, `Pitch`, `Tempo`, `Scale`
+  and `Score`
+  modules are written in SynthGraph itself, and the interface opens with
+  the `list`/`Signal`/`Sample`/`Option`
   type declarations (§3, top). Core is organized into functional
   submodules:
   `Osc` (oscillators & modulation), `Fx` (effects, filters,
   envelopes), `Arrange` (sample/place/mix), `Render` (the render
-  effects), `Io` (audio import), `List`, `Time` (conversions &
+  effects), `Io` (audio import), `List`, `Option` (the monadic
+  vocabulary over `'a Option`), `Time` (conversions &
   Timestamp sequences), `Sig` (signal constructors), `Groove` (the
   sequencing tier), `Pitch` (notes, temperaments &
   cents), `Tempo` (meters, note values & the beat grid),
@@ -349,6 +366,41 @@ Rules:
   `place hit : at:Timestamp -> Scalar Signal`). Any subset may be left
   unfilled — a positional prefix, a labeled subset, or a mix. Labels are
   not part of type equality.
+- **Optional labeled parameters.** A parameter declared `?name:T` or
+  `?(name = default : T)` is *optional*: a call may leave it unfilled.
+  Optional parameters come **before every required parameter** in the
+  declaration, and always fill by their own name, never positionally —
+  a positional argument skips them entirely and lands on the leftmost
+  unfilled *required* parameter. Two call-site spellings fill one:
+  `~name:v` passes a determined value of `T`, and `?name:opt` passes a
+  whole `T Option` through (punning works for both). Mirroring the
+  declaration order, the arguments that fill optional parameters come
+  before the call's positional and required labeled arguments.
+  - *Without a default* (`?x:T`), the body sees `x : T Option`: `Some v`
+    when the call passed `~x:v`, exactly the option passed by `?x:opt`,
+    and `None` when the call left it unfilled.
+  - *With a default* (`?(x = e : T)`), the body sees a plain, determined
+    `x : T`. The default `e` must have type `T`, may use the parameters
+    declared before `x`, and evaluates per call, in the function's own
+    scope, only when nothing filled `x` — that includes `?x:None`, so
+    passing an option through a defaulted parameter reads "use the
+    caller's choice if there is one, mine otherwise".
+  - **Completion.** A call *completes* — evaluates, defaulting every
+    unfilled optional parameter — as soon as all *required* parameters
+    are filled. While a required parameter is still missing, the partial
+    application keeps its unfilled optional parameters optional
+    (`f : ?x:Int -> y:Int -> Int -> Int` gives
+    `f ~y:2 : ?x:Int -> Int -> Int`); once it completes, the optionals
+    are gone — `(f 2) ~x:3` is an error, not a late fill.
+  - Optionality (unlike labels) **is** part of a function type's
+    identity: a `?x:Int -> Int -> Int` value is not interchangeable with
+    an `Int -> Int -> Int` one, since calls consume the two parameter
+    lists differently. Written arrow types still carry no labels and no
+    optional markers, so an optional-carrying function is stored either
+    under local inference (`let g = f ~y:2`) or through the
+    local-function sugar that records the flags itself.
+  - A signature with optional parameters needs at least one required
+    parameter, and an `external` cannot declare optional parameters.
 - **Application otherwise.** Any expression of function type may be
   applied or passed where a matching function type is expected: a bare
   name (`map place_pluck [...]`, `map sine [...]`), a partial
@@ -1187,6 +1239,7 @@ val List.repeat : n:Int -> x:'a -> 'a list
 val List.length : xs:'a list -> Int
 val List.append : xs:'a list -> ys:'a list -> 'a list
 val List.nth    : xs:'a list -> i:Int -> default:'a -> 'a  (* out of range -> default *)
+val List.nth_opt : xs:'a list -> i:Int -> 'a Option        (* out of range -> None *)
 val List.rev    : xs:'a list -> 'a list
 
 (* selection & expansion *)
@@ -1204,6 +1257,22 @@ val List.maximum : xs:Scalar list -> least:Scalar -> Scalar  (* empty -> least *
 val List.iter    : f:('a -> unit) -> xs:'a list -> unit
   (* iterate renders over a list; implemented in C++ - `unit` has no
      literal, so a synth-side iterator could not exist *)
+
+(* Core.Option: the vocabulary over 'a Option - written in SynthGraph
+   (plain matches over the Some/None variant), not C++ *)
+val Option.some    : x:'a -> 'a Option        (* Some as a function *)
+val Option.is_some : o:'a Option -> Bool
+val Option.is_none : o:'a Option -> Bool
+val Option.value   : default:'a -> o:'a Option -> 'a
+val Option.fold    : none:'b -> some:('a -> 'b) -> o:'a Option -> 'b
+val Option.map     : f:('a -> 'b) -> o:'a Option -> 'b Option
+val Option.bind    : f:('a -> 'b Option) -> o:'a Option -> 'b Option
+val Option.join    : o:'a Option Option -> 'a Option
+val Option.map2    : f:('a -> 'b -> 'c) -> a:'a Option -> b:'b Option
+                       -> 'c Option       (* None if either side is *)
+val Option.or_else : alt:'a Option -> o:'a Option -> 'a Option
+val Option.filter  : f:('a -> Bool) -> o:'a Option -> 'a Option
+val Option.to_list : o:'a Option -> 'a list   (* zero or one element *)
 
 (* Core.Time: timestamp construction & sequences *)
 val Time.to_sec: x:Scalar -> Timestamp

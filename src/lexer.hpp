@@ -41,6 +41,7 @@ enum class Tok {
   Dot,
   Arrow,      // ->
   Tilde,      // ~ (labeled parameter/argument marker)
+  Question,   // ? (optional parameter/argument marker)
   PipeGt,     // |>
   Bar,        // | (variant declarations and match arms)
   // Discrete (Int) operators. The continuous kinds - Scalar, Timestamp,

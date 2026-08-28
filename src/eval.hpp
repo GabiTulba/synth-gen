@@ -86,6 +86,17 @@ struct CoreListInfo {
   explicit operator bool() const { return decl != nullptr; }
 };
 
+// Core's Option declaration and its constructor indexes: optional
+// parameters wrap and unwrap Some/None values at application time, and
+// an unfilled non-defaulted optional parameter arrives in the body as
+// None.
+struct CoreOptionInfo {
+  const TypeDecl* decl = nullptr;
+  int noneIndex = 0;
+  int someIndex = 1;
+  explicit operator bool() const { return decl != nullptr; }
+};
+
 // Core's Sample declaration and its field indexes: samples are ordinary
 // record values ({ sig; from; to }), and the external boundary converts
 // them to (and from) the engine-level ext::Sample with this.

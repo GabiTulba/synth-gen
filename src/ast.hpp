@@ -40,6 +40,10 @@ struct TypeExpr {
   // Fun: per-param labels, "" = positional (local-function desugaring
   // only; a written arrow type has no labels).
   std::vector<std::string> labels;
+  // Fun: per-param optional flags, parallel to `labels` (local-function
+  // desugaring only). An optional parameter's item is its *element* type
+  // as annotated (`?x:T` contributes T).
+  std::vector<char> optionals;
   TypeExprPtr ret;  // Fun
   // Filled by the checker: the resolved semantic type. Doubles as the
   // idempotency guard - a node shared by the local-function desugaring
@@ -61,8 +65,21 @@ enum class BinOpKind {
 struct Param {
   std::string name;
   TypeExprPtr typeExpr;  // the annotation as written (parser)
-  TypePtr type;          // resolved by the checker
-  bool labeled = false;  // declared with ~name:Type
+  TypePtr type;          // resolved by the checker: always the *element*
+                         // type as annotated - for an optional parameter
+                         // without a default the body sees `type Option`
+  bool labeled = false;  // declared with ~name:Type (optional parameters
+                         // are always labeled by their own name)
+  // Declared with ?name:Type or ?(name = default : Type). Optional
+  // parameters precede every required one, are filled only by label
+  // (~name:value passes a determined value, ?name:opt passes an Option),
+  // and default when the call completes: to `defaultExpr`'s value when
+  // one is declared (the body then sees a plain Type), to None otherwise
+  // (the body sees Type Option).
+  bool optional = false;
+  // Shared (not owned uniquely) so Param stays copyable; evaluated at
+  // call time in the function's own scope, with earlier parameters bound.
+  std::shared_ptr<Expr> defaultExpr;
   Span span{};
 };
 
@@ -131,7 +148,10 @@ struct Expr {
   std::string name;        // Ident
   BinOpKind op = BinOpKind::Add;
   std::vector<ExprPtr> items;
-  // App: label per argument, parallel to items[1..]; "" = positional.
+  // App: label per argument, parallel to items[1..]; "" = positional. A
+  // label written with the optional-argument marker (`?x:opt`, passing an
+  // Option through) is stored with a leading '?' ("?x") - labels are
+  // identifiers, so the prefix is unambiguous.
   // RecordLit: field name per value, parallel to items.
   // RecordUpdate: field name per new value, parallel to items[1..].
   std::vector<std::string> argLabels;

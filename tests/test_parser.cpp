@@ -246,6 +246,83 @@ TEST(parser_punned_argument_needs_a_name) {
   CHECK(diags.hasErrors());
 }
 
+TEST(parser_optional_params) {
+  DiagnosticBag diags;
+  auto defs = parseSrc(
+      "let f ?x:Int ?(y = 2 : Int) z:Int : Int = z ;;", diags);
+  CHECK(!diags.hasErrors());
+  CHECK(defs[0].params.size() == 3);
+  // ?x:Int - optional, no default, labeled by its own name.
+  CHECK(defs[0].params[0].name == "x");
+  CHECK(defs[0].params[0].optional);
+  CHECK(defs[0].params[0].labeled);
+  CHECK(defs[0].params[0].defaultExpr == nullptr);
+  CHECK(defs[0].params[0].typeExpr->name == "Int");
+  // ?(y = 2 : Int) - optional with a default expression.
+  CHECK(defs[0].params[1].name == "y");
+  CHECK(defs[0].params[1].optional);
+  CHECK(defs[0].params[1].defaultExpr != nullptr);
+  CHECK(defs[0].params[1].defaultExpr->kind == Expr::Kind::IntLit);
+  CHECK(defs[0].params[1].typeExpr->name == "Int");
+  // z:Int stays an ordinary positional parameter.
+  CHECK(!defs[0].params[2].optional);
+  CHECK(!defs[0].params[2].labeled);
+}
+
+TEST(parser_optional_param_default_needs_parens_shape) {
+  DiagnosticBag diags;
+  parseSrc("let f ?(x : Int) y:Int : Int = y ;;", diags);
+  CHECK(diags.hasErrors());  // '=' required inside ?( ... )
+}
+
+TEST(parser_optional_arguments_and_punning) {
+  DiagnosticBag diags;
+  auto defs = parseSrc(
+      "let g : Int = f ?x:opt ~y:1 2 ;;\n"
+      "let h : Int = let x = opt in f ?x 2 ;;",
+      diags);
+  CHECK(!diags.hasErrors());
+  // `?x:opt` is stored with a '?'-prefixed label; ~y and positional
+  // arguments keep their plain spellings.
+  const Expr& call = *defs[0].body;
+  CHECK(call.kind == Expr::Kind::App);
+  CHECK(call.argLabels.size() == 3);
+  CHECK(call.argLabels[0] == "?x");
+  CHECK(call.items[1]->kind == Expr::Kind::Ident);
+  CHECK(call.argLabels[1] == "y");
+  CHECK(call.argLabels[2] == "");
+  // `?x` puns to `?x:x` exactly like `~x`.
+  const Expr& pun = *defs[1].body->items[1];
+  CHECK(pun.kind == Expr::Kind::App);
+  CHECK(pun.argLabels[0] == "?x");
+  CHECK(pun.items[1]->kind == Expr::Kind::Ident);
+  CHECK(pun.items[1]->name == "x");
+  CHECK(pun.items[1]->punned);
+}
+
+TEST(parser_optional_local_function_keeps_flags) {
+  DiagnosticBag diags;
+  auto defs = parseSrc(
+      "let g : Int =\n"
+      "  let f ?(a = 1 : Int) b:Int : Int = a + b in f ~a:2 3 ;;",
+      diags);
+  CHECK(!diags.hasErrors());
+  // The local function desugars to a lambda under a Fun annotation that
+  // records the optional flag alongside the label.
+  const Expr& let = *defs[0].body;
+  CHECK(let.kind == Expr::Kind::Let);
+  CHECK(let.declTypeExpr->kind == TypeExpr::Kind::Fun);
+  CHECK(let.declTypeExpr->labels.size() == 2);
+  CHECK(let.declTypeExpr->labels[0] == "a");
+  CHECK(let.declTypeExpr->optionals.size() == 2);
+  CHECK(let.declTypeExpr->optionals[0] == 1);
+  CHECK(let.declTypeExpr->optionals[1] == 0);
+  const Expr& lam = *let.items[0];
+  CHECK(lam.kind == Expr::Kind::Lambda);
+  CHECK(lam.params[0].optional);
+  CHECK(lam.params[0].defaultExpr != nullptr);
+}
+
 TEST(parser_pipe_desugars_to_application) {
   DiagnosticBag diags;
   auto defs = parseSrc(

@@ -68,6 +68,11 @@ void collectPatternNames(const Pattern& p, std::set<std::string>& into) {
   for (auto& s : p.items) collectPatternNames(s, into);
 }
 
+void collectParamDefaultDeps(const std::vector<Param>& ps,
+                             std::set<std::string> params,
+                             const CheckedModule& mod, const Program& prog,
+                             DepMap& out);
+
 void collectDeps(const Expr& e, const std::set<std::string>& params,
                  const CheckedModule& mod, const Program& prog, DepMap& out) {
   if (e.kind == Expr::Kind::Ident) {
@@ -94,7 +99,10 @@ void collectDeps(const Expr& e, const std::set<std::string>& params,
   if (e.kind == Expr::Kind::Lambda) {
     // Lambda params shadow same-named defs inside the body; without this
     // the shadowed def would be recorded as a spurious dependency and
-    // needlessly invalidate cached artifacts.
+    // needlessly invalidate cached artifacts. Optional-parameter default
+    // expressions are part of the lambda too - each sees the enclosing
+    // scope plus the parameters declared before it.
+    collectParamDefaultDeps(e.params, params, mod, prog, out);
     std::set<std::string> scoped = params;
     for (auto& p : e.params) scoped.insert(p.name);
     collectDeps(*e.items[0], scoped, mod, prog, out);
@@ -111,6 +119,19 @@ void collectDeps(const Expr& e, const std::set<std::string>& params,
     return;
   }
   for (auto& child : e.items) collectDeps(*child, params, mod, prog, out);
+}
+
+// A defaulted optional parameter's expression evaluates in the function's
+// own scope with the earlier parameters visible; its references are
+// dependencies like the body's.
+void collectParamDefaultDeps(const std::vector<Param>& ps,
+                             std::set<std::string> params,
+                             const CheckedModule& mod, const Program& prog,
+                             DepMap& out) {
+  for (auto& p : ps) {
+    if (p.defaultExpr) collectDeps(*p.defaultExpr, params, mod, prog, out);
+    params.insert(p.name);
+  }
 }
 
 // --- Type-declaration dependencies -----------------------------------------
@@ -148,7 +169,10 @@ void collectNamedDecls(const TypePtr& t, const Program& prog, DepMap& out) {
 void collectExprTypeDeps(const Expr& e, const Program& prog, DepMap& out) {
   collectNamedDecls(e.type, prog, out);
   collectNamedDecls(e.declType, prog, out);
-  for (auto& p : e.params) collectNamedDecls(p.type, prog, out);
+  for (auto& p : e.params) {
+    collectNamedDecls(p.type, prog, out);
+    if (p.defaultExpr) collectExprTypeDeps(*p.defaultExpr, prog, out);
+  }
   for (auto& child : e.items) collectExprTypeDeps(*child, prog, out);
 }
 
@@ -161,7 +185,10 @@ void collectTypeDeps(const TopDef& def, const Program& prog, DepMap& out) {
       if (c.type) collectNamedDecls(c.type->resolved, prog, out);
     return;
   }
-  for (auto& p : def.params) collectNamedDecls(p.type, prog, out);
+  for (auto& p : def.params) {
+    collectNamedDecls(p.type, prog, out);
+    if (p.defaultExpr) collectExprTypeDeps(*p.defaultExpr, prog, out);
+  }
   collectNamedDecls(def.retType, prog, out);
   if (def.body) collectExprTypeDeps(*def.body, prog, out);
 }
@@ -188,6 +215,7 @@ struct Hasher {
     if (def.body) {
       std::set<std::string> params;
       for (auto& p : def.params) params.insert(p.name);
+      collectParamDefaultDeps(def.params, {}, mod, prog, deps);
       collectDeps(*def.body, params, mod, prog, deps);
     }
     collectTypeDeps(def, prog, deps);
@@ -225,6 +253,7 @@ std::map<const TopDef*, DefStats> defGraphStats(const Program& prog) {
       std::set<std::string> params;
       for (auto& p : def.params) params.insert(p.name);
       DepMap deps;
+      collectParamDefaultDeps(def.params, {}, mod, prog, deps);
       collectDeps(*def.body, params, mod, prog, deps);
       for (auto& [key, dep] : deps) {
         if (dep.second == &def) continue;

@@ -127,6 +127,31 @@ let _ = sample pattern ~from:0s ~to:2s |> render ~name:"warm" ~rate:48000.0 ;;
   name, the label **puns**: `~cutoff` means `~cutoff:cutoff`, so
   `adsr ~attack ~decay ~sustain ~release` says once what it would
   otherwise say twice.
+- **Optional labels** let a call skip a parameter entirely. They are
+  declared *before* every required parameter, as `?x:T` (the body then
+  sees `x : T Option` — `None` when the call left it out) or with a
+  default, `?(x = e : T)` (the body sees a plain, determined `T`):
+
+  ```ocaml
+  let pluck ?(bright = 0.5 : Scalar) ?vibrato:(Scalar Signal) freq:Scalar
+      : Scalar Signal =
+    let base : Scalar Signal = (match vibrato with
+      | None -> sine freq
+      | Some lfo -> fm ~carrier:freq ~modulator:lfo) in
+    soft_clip ~threshold:(1.0 -. bright) base *. exp_decay 6.0 ;;
+
+  let plain : Scalar Signal = pluck 220.0 ;;              (* defaults *)
+  let hard : Scalar Signal = pluck ~bright:0.9 220.0 ;;   (* determined *)
+  let wob : Scalar Signal =
+    pluck ?vibrato:(Some (sine 5.0 *. 3.0)) 220.0 ;;      (* an Option through *)
+  ```
+
+  `~x:v` fills an optional parameter with a determined value; `?x:opt`
+  passes a whole Option through (both spellings pun). Positional
+  arguments skip optional parameters, and a call *completes* — applying
+  the defaults — as soon as its required parameters are filled. The
+  `Core.Option` module carries the monadic vocabulary (`map`, `bind`,
+  `value`, ...) over the ambient `'a Option` variant.
 - Any function-typed expression can be applied (`(f 1.0) 2.0`) or passed
   along — a bare name, a partial application, a parameter, a lambda.
 - **Lambdas** (`fun x:Scalar -> ...`) annotate their parameters like

@@ -59,6 +59,15 @@ TypePtr tFun(std::vector<TypePtr> params, std::vector<std::string> labels,
   t->ret = std::move(ret);
   return t;
 }
+TypePtr tFun(std::vector<TypePtr> params, std::vector<std::string> labels,
+             std::vector<char> opts, TypePtr ret) {
+  auto t = std::make_shared<Type>(Type::Kind::Fun);
+  t->items = std::move(params);
+  t->labels = std::move(labels);
+  t->opts = std::move(opts);
+  t->ret = std::move(ret);
+  return t;
+}
 TypePtr tVar(int id) {
   auto t = std::make_shared<Type>(Type::Kind::Var);
   t->var = id;
@@ -126,8 +135,13 @@ bool typeEquals(const TypePtr& a, const TypePtr& b) {
       return true;
     case Type::Kind::Fun:
       if (a->items.size() != b->items.size()) return false;
-      for (size_t i = 0; i < a->items.size(); i++)
+      for (size_t i = 0; i < a->items.size(); i++) {
+        // Optionality is structural: an optional parameter is consumed
+        // differently from a required one (label-only, defaulting), so a
+        // function with one is not interchangeable with one without.
+        if (a->optAt(i) != b->optAt(i)) return false;
         if (!typeEquals(a->items[i], b->items[i])) return false;
+      }
       return typeEquals(a->ret, b->ret);
     case Type::Kind::Var:
       return a->var == b->var;
@@ -175,6 +189,7 @@ std::string typeName(const TypePtr& t) {
       std::string s;
       for (size_t i = 0; i < t->items.size(); i++) {
         std::string label = t->labelAt(i);
+        if (t->optAt(i)) s += "?";
         if (!label.empty()) s += label + ":";
         s += nestedTypeName(t->items[i]) + " -> ";
       }
@@ -272,8 +287,11 @@ bool unify(const TypePtr& sig, const TypePtr& concrete, Subst& subst) {
       return true;
     case Type::Kind::Fun:
       if (sig->items.size() != concrete->items.size()) return false;
-      for (size_t i = 0; i < sig->items.size(); i++)
+      for (size_t i = 0; i < sig->items.size(); i++) {
+        // Same rule as typeEquals: optionality is structural.
+        if (sig->optAt(i) != concrete->optAt(i)) return false;
         if (!unify(sig->items[i], concrete->items[i], subst)) return false;
+      }
       return unify(sig->ret, concrete->ret, subst);
     case Type::Kind::Var:
       return false;  // unreachable
@@ -305,7 +323,8 @@ TypePtr applySubst(const TypePtr& t, const Subst& subst) {
     case Type::Kind::Fun: {
       std::vector<TypePtr> params;
       for (auto& x : t->items) params.push_back(applySubst(x, subst));
-      return tFun(std::move(params), t->labels, applySubst(t->ret, subst));
+      return tFun(std::move(params), t->labels, t->opts,
+                  applySubst(t->ret, subst));
     }
     case Type::Kind::Named: {
       std::vector<TypePtr> args;

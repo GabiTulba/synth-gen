@@ -310,11 +310,44 @@ class Parser {
   }
 
   // Parameters: [~]ident ':' type, until ':' (return type), '=' or '->'.
-  // A leading '~' declares a labeled parameter. Shared by top-level lets,
-  // local lets, and lambdas.
+  // A leading '~' declares a labeled parameter. A leading '?' declares an
+  // *optional* labeled parameter: `?x:Type` (the body sees x : Type
+  // Option) or `?(x = default : Type)` (the body sees a plain Type; the
+  // default evaluates when a call leaves x unfilled). Shared by top-level
+  // lets, local lets, and lambdas.
   void parseParams(std::vector<Param>& out) {
-    while (at(Tok::Ident) || at(Tok::Tilde)) {
+    while (at(Tok::Ident) || at(Tok::Tilde) || at(Tok::Question)) {
       Param p;
+      if (at(Tok::Question)) {
+        Span qspan = advance().span;  // '?'
+        p.labeled = true;  // optional parameters always fill by name
+        p.optional = true;
+        if (at(Tok::LParen)) {
+          // ?(name = default : Type)
+          advance();  // '('
+          const Token& pn = expect(Tok::Ident, "parameter name");
+          p.name = pn.text;
+          expect(Tok::Equals,
+                 "'=' (a defaulted optional parameter is written "
+                 "?(name = default : Type))");
+          ExprPtr def = parseExpr();
+          expect(Tok::Colon, "':' before the optional parameter's type");
+          p.typeExpr = parseType();
+          const Token& close =
+              expect(Tok::RParen, "')' to close the optional parameter");
+          p.defaultExpr = std::shared_ptr<Expr>(std::move(def));
+          p.span = {qspan.lo, close.span.hi};
+        } else {
+          // ?name:Type
+          const Token& pn = expect(Tok::Ident, "parameter name");
+          p.name = pn.text;
+          expect(Tok::Colon, "':' after parameter name");
+          p.typeExpr = parseParamType();
+          p.span = {qspan.lo, peek().span.lo};
+        }
+        out.push_back(std::move(p));
+        continue;
+      }
       if (at(Tok::Tilde)) {
         advance();
         p.labeled = true;
@@ -690,6 +723,7 @@ class Parser {
         for (auto& p : params) {
           fn->items.push_back(p.typeExpr);
           fn->labels.push_back(p.labeled ? p.name : "");
+          fn->optionals.push_back(p.optional ? 1 : 0);
         }
         fn->ret = std::move(ty);
         ty = std::move(fn);
@@ -846,10 +880,15 @@ class Parser {
     std::vector<ExprPtr> args;
     std::vector<std::string> labels;
     for (;;) {
-      if (at(Tok::Tilde)) {
-        // Labeled argument: ~name:atom, or punned as bare ~name.
+      if (at(Tok::Tilde) || at(Tok::Question)) {
+        // Labeled argument: ~name:atom, or punned as bare ~name. The '?'
+        // spelling passes an Option through to an optional parameter
+        // (?name:opt / punned ?name); it is stored with a '?' prefix on
+        // the label so the checker and evaluator can tell the two apart.
+        bool optArg = at(Tok::Question);
         advance();
-        const Token& name = expect(Tok::Ident, "label after '~'");
+        const Token& name = expect(
+            Tok::Ident, optArg ? "label after '?'" : "label after '~'");
         if (at(Tok::Colon)) {
           advance();
           args.push_back(parseAtom());
@@ -862,7 +901,7 @@ class Parser {
           id->punned = true;
           args.push_back(std::move(id));
         }
-        labels.push_back(name.text);
+        labels.push_back(optArg ? "?" + name.text : name.text);
       } else if (startsAtom()) {
         args.push_back(parseAtom());
         labels.push_back("");

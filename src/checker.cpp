@@ -51,12 +51,13 @@ class ModuleChecker {
 
   void run() {
     frames_.emplace_back();  // the file-level scope
-    // The prelude: Core's `list`, `Signal` and `Sample` declarations
-    // (and list's Nil/Cons constructors) are ambient, like the built-in
-    // type names - annotations and list literals need no import. Core
-    // itself declares them at the top of its interface, so nothing to
-    // seed there.
-    for (const char* name : {"list", "Signal", "Sample"}) {
+    // The prelude: Core's `list`, `Signal`, `Sample` and `Option`
+    // declarations (and list's Nil/Cons and Option's Some/None
+    // constructors) are ambient, like the built-in type names -
+    // annotations, list literals and optional parameters need no import.
+    // Core itself declares them at the top of its interface, so nothing
+    // to seed there.
+    for (const char* name : {"list", "Signal", "Sample", "Option"}) {
       if (const TypeDecl* d = coreDecl(name)) {
         frames_.back().types[name] = {d, nullptr};
         bindDeclCtors(frames_.back(), d);
@@ -367,7 +368,8 @@ class ModuleChecker {
       case TypeExpr::Kind::Fun: {
         std::vector<TypePtr> ps;
         for (auto& i : te.items) ps.push_back(resolveType(*i));
-        return tFun(std::move(ps), te.labels, resolveType(*te.ret));
+        return tFun(std::move(ps), te.labels, te.optionals,
+                    resolveType(*te.ret));
       }
       case TypeExpr::Kind::Name:
         return resolveTypeName(te);
@@ -466,17 +468,81 @@ class ModuleChecker {
     if (typeResolveFailed_) throw Abort{};
   }
 
+  // The Core-declared Option type applied to `elem`: what an optional
+  // parameter without a default holds inside the body, and what a
+  // `?label:` call-site argument passes through.
+  TypePtr optionType(Span span, TypePtr elem) {
+    const TypeDecl* d = coreDecl("Option");
+    if (!d) fail(span, "internal error: Core's Option type is not loaded");
+    return tNamed(d, {std::move(elem)});
+  }
+
+  // The type a parameter has inside the body: an optional parameter
+  // without a default arrives as `T Option` (unfilled calls pass None);
+  // one with a default is a plain determined T.
+  TypePtr paramBodyType(const Param& p) {
+    return p.optional && !p.defaultExpr ? optionType(p.span, p.type)
+                                        : p.type;
+  }
+
+  // Optional parameters come before every required one, and never alone:
+  // a call completes as soon as its required parameters are filled, so a
+  // signature that is all-optional could never leave its parameters to
+  // their defaults.
+  void validateParamOrder(const std::vector<Param>& params) {
+    bool sawRequired = false, anyOptional = false;
+    for (auto& p : params) {
+      if (p.optional) {
+        anyOptional = true;
+        if (sawRequired)
+          fail(p.span, "optional parameter '?" + p.name +
+                           "' must come before every required parameter");
+      } else {
+        sawRequired = true;
+      }
+    }
+    if (anyOptional && !sawRequired)
+      fail(params.front().span,
+           "a function with optional parameters needs at least one "
+           "required parameter (a call completes - and applies the "
+           "defaults - once the required parameters are filled)");
+  }
+
+  // A defaulted optional parameter's default expression must have the
+  // parameter's annotated (element) type. It checks in the scope the
+  // parameter itself sits in, so it may use earlier parameters.
+  void checkParamDefault(const Param& p,
+                         std::map<std::string, TypePtr>& env) {
+    if (!p.defaultExpr) return;
+    TypePtr got = check(*p.defaultExpr, env);
+    bool ok;
+    if (containsAnyVar(got)) {
+      Subst subst;
+      ok = unify(got, p.type, subst);
+    } else {
+      ok = typeEquals(got, p.type);
+    }
+    if (!ok)
+      fail(p.defaultExpr->span,
+           "the default of '?" + p.name + "' has type " + typeName(got) +
+               " but the parameter is annotated as " + typeName(p.type));
+  }
+
   void checkDef(TopDef& def, const std::string& prefix) {
     // Inside `module A = struct`, `x` is stored under "A.x": one flat
     // per-file map, with the dotted path as the canonical name.
     const std::string stored = prefix + def.name;
     try {
       resolveDefSignature(def);
+      validateParamOrder(def.params);
       std::map<std::string, TypePtr> env;
       for (auto& p : def.params) {
         if (env.count(p.name))
           fail(p.span, "duplicate parameter '" + p.name + "'");
-        env[p.name] = p.type;
+        // The default sees the parameters declared before it, not later
+        // ones (and not itself).
+        checkParamDefault(p, env);
+        env[p.name] = paramBodyType(p);
       }
       if (def.isRec) {
         // The name is in scope in its own body, at its full annotated
@@ -565,6 +631,11 @@ class ModuleChecker {
       fail(def.span, "'let _' cannot be external (an external binds a "
                      "named value to an implementation)");
     if (!def.retType) fail(def.span, "missing return type annotation");
+    for (auto& p : def.params)
+      if (p.optional)
+        fail(p.span, "an external cannot declare an optional parameter "
+                     "('" + def.name + "', parameter '?" + p.name +
+                     "'); wrap it in a SynthGraph function instead");
     def.body->type = def.retType;
     for (char c : def.name)
       if (!(std::isalnum((unsigned char)c) || c == '_'))
@@ -576,11 +647,16 @@ class ModuleChecker {
   static TypePtr defFunType(const TopDef& def) {
     std::vector<TypePtr> ps;
     std::vector<std::string> labels;
+    std::vector<char> opts;
     for (auto& p : def.params) {
+      // An optional parameter's slot carries its element type; the
+      // opts flag is what says how a call may fill (or skip) it.
       ps.push_back(p.type);
       labels.push_back(p.labeled ? p.name : "");
+      opts.push_back(p.optional ? 1 : 0);
     }
-    return tFun(std::move(ps), std::move(labels), def.retType);
+    return tFun(std::move(ps), std::move(labels), std::move(opts),
+                def.retType);
   }
 
   TypePtr check(Expr& e, std::map<std::string, TypePtr>& env) {
@@ -1344,6 +1420,7 @@ class ModuleChecker {
         // type, labels included - the same shape defFunType builds.
         for (auto& p : e.params)
           if (!p.type && p.typeExpr) p.type = resolveType(*p.typeExpr);
+        validateParamOrder(e.params);
         for (size_t i = 0; i < e.params.size(); i++)
           for (size_t j = 0; j < i; j++)
             if (e.params[i].name == e.params[j].name)
@@ -1351,11 +1428,14 @@ class ModuleChecker {
                    "duplicate parameter '" + e.params[i].name + "'");
         std::vector<std::pair<std::string, std::optional<TypePtr>>> saved;
         for (auto& p : e.params) {
+          // A default sees the enclosing scope plus the parameters
+          // declared before it - bound one at a time, interleaved.
+          checkParamDefault(p, env);
           auto prev = env.find(p.name);
           saved.emplace_back(p.name, prev != env.end()
                                          ? std::optional<TypePtr>(prev->second)
                                          : std::nullopt);
-          env[p.name] = p.type;
+          env[p.name] = paramBodyType(p);
         }
         TypePtr bodyT = check(*e.items[0], env);
         for (auto it = saved.rbegin(); it != saved.rend(); ++it) {
@@ -1364,11 +1444,14 @@ class ModuleChecker {
         }
         std::vector<TypePtr> ps;
         std::vector<std::string> labels;
+        std::vector<char> opts;
         for (auto& p : e.params) {
           ps.push_back(p.type);
           labels.push_back(p.labeled ? p.name : "");
+          opts.push_back(p.optional ? 1 : 0);
         }
-        return tFun(std::move(ps), std::move(labels), bodyT);
+        return tFun(std::move(ps), std::move(labels), std::move(opts),
+                    bodyT);
       }
     }
     fail(e.span, "internal error: unknown expression kind");
@@ -1703,10 +1786,19 @@ class ModuleChecker {
       paramLabels.push_back(fnType->labelAt(i));
     retType = fnType->ret;
 
-    // Match arguments to parameters.
+    // Match arguments to parameters. An optional parameter fills only by
+    // label: `~x:v` passes a determined element value, `?x:opt` passes an
+    // Option through; positional arguments skip optional parameters
+    // entirely. Mirroring the declaration rule, arguments that fill
+    // optional parameters come before every other argument of the call.
     std::vector<int> argForParam(paramTypes.size(), -1);
+    std::vector<char> argOptPass(argTypes.size(), 0);  // written as ?x:
+    bool sawRequiredFill = false;
     for (size_t j = 0; j < argTypes.size(); j++) {
       std::string label = labelOf(j);
+      bool optPass = !label.empty() && label[0] == '?';
+      if (optPass) label = label.substr(1);
+      argOptPass[j] = optPass ? 1 : 0;
       size_t target = paramTypes.size();
       if (!label.empty()) {
         for (size_t i = 0; i < paramTypes.size(); i++)
@@ -1716,44 +1808,67 @@ class ModuleChecker {
           }
         if (target == paramTypes.size())
           fail(e.items[j + 1]->span,
-               calleeDesc(callee) + " has no unfilled argument labeled '~" +
-                   label + "'");
+               calleeDesc(callee) + " has no unfilled argument labeled '" +
+                   (optPass ? "?" : "~") + label + "'");
+        if (optPass && !fnType->optAt(target))
+          fail(e.items[j + 1]->span,
+               "argument '" + label + "' of " + calleeDesc(callee) +
+                   " is not optional; pass a plain value with '~" + label +
+                   ":...'");
       } else {
         for (size_t i = 0; i < paramTypes.size(); i++)
-          if (argForParam[i] < 0) {
+          if (argForParam[i] < 0 && !fnType->optAt(i)) {
             target = i;
             break;
           }
-        if (target == paramTypes.size())
+        if (target == paramTypes.size()) {
+          size_t required = 0;
+          for (size_t i = 0; i < paramTypes.size(); i++)
+            if (!fnType->optAt(i)) required++;
           fail(e.span, calleeDesc(callee) + " expects " +
-                           std::to_string(paramTypes.size()) +
-                           " argument(s), got " +
+                           std::to_string(required) +
+                           " non-optional argument(s), got " +
                            std::to_string(argTypes.size()));
+        }
+      }
+      if (fnType->optAt(target)) {
+        if (sawRequiredFill)
+          fail(e.items[j + 1]->span,
+               "optional argument '" + std::string(optPass ? "?" : "~") +
+                   label + "' must come before the call's positional and "
+                   "required labeled arguments");
+      } else {
+        sawRequiredFill = true;
       }
       argForParam[target] = (int)j;
     }
 
-    // Type-check the provided arguments against their parameters.
+    // Type-check the provided arguments against their parameters. A
+    // `?x:` argument checks against `T Option`, everything else against
+    // the parameter type itself.
     Subst subst;
     for (size_t i = 0; i < paramTypes.size(); i++) {
       if (argForParam[i] < 0) continue;
       size_t j = (size_t)argForParam[i];
+      TypePtr want0 = argOptPass[j]
+                          ? optionType(e.items[j + 1]->span, paramTypes[i])
+                          : paramTypes[i];
       // unify degenerates to typeEquals when both sides are var-free (all
       // user-code types), and handles vars on either side: freshened
       // primitive parameters, or an argument that is itself a polymorphic
       // partial application.
-      bool ok = unify(paramTypes[i], argTypes[j], subst);
+      bool ok = unify(want0, argTypes[j], subst);
       if (!ok) {
         std::string label = paramLabels[i].empty()
                                 ? "argument " + std::to_string(i + 1)
                                 : "argument '" + paramLabels[i] + "'";
         std::string msg =
             label + " of " + calleeDesc(callee) + " expects " +
-            typeName(applySubst(paramTypes[i], subst)) + ", got " +
+            typeName(applySubst(want0, subst)) + ", got " +
             typeName(argTypes[j]);
         // The most common way to hold an Int where a Scalar is wanted is
         // a whole-number literal; say how to spell the other one.
-        TypePtr want = applySubst(paramTypes[i], subst);
+        TypePtr want = applySubst(want0, subst);
         if (want->kind == Type::Kind::Scalar &&
             argTypes[j]->kind == Type::Kind::Int)
           msg += " (a literal like 440 is an Int; write 440.0 for a "
@@ -1762,11 +1877,18 @@ class ModuleChecker {
       }
     }
 
-    // Fully applied?
+    // Fully applied? A call completes once every *required* parameter is
+    // filled: the unfilled optional ones take their defaults (their
+    // declared default expression, or None) - they cannot be supplied by
+    // a later application.
     std::vector<size_t> unfilled;
+    bool requiredLeft = false;
     for (size_t i = 0; i < paramTypes.size(); i++)
-      if (argForParam[i] < 0) unfilled.push_back(i);
-    if (unfilled.empty()) {
+      if (argForParam[i] < 0) {
+        unfilled.push_back(i);
+        if (!fnType->optAt(i)) requiredLeft = true;
+      }
+    if (!requiredLeft) {
       TypePtr ret = applySubst(retType, subst);
       // A rigid variable left in the result is fine - it is this
       // definition's own 'a, still standing for whatever the caller picks.
@@ -1778,15 +1900,19 @@ class ModuleChecker {
     }
 
     // Partial application: the result is the curried function of the
-    // remaining parameters, in declaration order, keeping their labels.
+    // remaining parameters, in declaration order, keeping their labels
+    // (and, while a required parameter is still missing, the unfilled
+    // optional ones stay optional).
     std::vector<TypePtr> remTypes;
     std::vector<std::string> remLabels;
+    std::vector<char> remOpts;
     for (size_t i : unfilled) {
       remTypes.push_back(applySubst(paramTypes[i], subst));
       remLabels.push_back(paramLabels[i]);
+      remOpts.push_back(fnType->optAt(i) ? 1 : 0);
     }
     return tFun(std::move(remTypes), std::move(remLabels),
-                applySubst(retType, subst));
+                std::move(remOpts), applySubst(retType, subst));
   }
 
   // A type variable in the result has to be pinned down by an argument -

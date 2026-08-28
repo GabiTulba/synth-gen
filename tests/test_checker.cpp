@@ -2925,8 +2925,9 @@ TEST(checker_core_is_a_real_library_of_externals) {
   // ...and outside the SynthGraph-implemented modules, the only
   // non-external definitions are the documented handful of sugar the
   // external modules carry beside their bindings.
-  std::set<std::string> inSynthGraph = {"List",  "Pitch", "Tempo", "Scale",
-                                        "Score", "Groove", "Mix",  "Dsp"};
+  std::set<std::string> inSynthGraph = {"List",  "Option", "Pitch", "Tempo",
+                                        "Scale", "Score",  "Groove", "Mix",
+                                        "Dsp"};
   std::set<std::string> sugar = {"Math.pi",    "Math.min",  "Math.max",
                                  "Math.clamp", "Math.lerp", "Fx.gated",
                                  "Fx.echoes",  "Control.multi_slider"};
@@ -4162,4 +4163,292 @@ let s : Scalar Signal = sine 440.0 ;;
   DiagnosticBag quiet;
   checkProject({f}, quiet);
   CHECK(quiet.items.empty());
+}
+
+// --- Optional labeled parameters & the Option type -------------------------
+
+TEST(checker_option_type_is_ambient) {
+  TempProject tp;
+  // No open needed: `Option`, `Some` and `None` are ambient like `list`.
+  std::string f = tp.write("o.synth", R"(
+let s : Int Option = Some 3 ;;
+let n : Int Option = None ;;
+let v : Int = match s with | None -> 0 | Some x -> x ;;
+)");
+  DiagnosticBag diags;
+  Program prog = checkProject({f}, diags);
+  CHECK(!diags.hasErrors());
+  CHECK(typeName(userMod(prog).defTypes.at("s")) == "Int Option");
+}
+
+TEST(checker_optional_param_types) {
+  TempProject tp;
+  std::string f = tp.write("o.synth", R"(
+let f ?x:Int ?(y = 2 : Int) z:Int : Int =
+  let dx : Int = match x with | None -> 0 | Some v -> v in
+  dx + y + z
+;;
+)");
+  DiagnosticBag diags;
+  Program prog = checkProject({f}, diags);
+  for (auto& d : diags.items)
+    std::cerr << renderDiagnostic(d, userMod(prog).parsed.source);
+  CHECK(!diags.hasErrors());
+  // The stored signature carries element types with '?' markers; the
+  // body saw x : Int Option (the match above) and y : Int (used in +).
+  CHECK(typeName(userMod(prog).defTypes.at("f")) ==
+        "?x:Int -> ?y:Int -> Int -> Int");
+}
+
+TEST(checker_optional_param_without_default_is_option_in_body) {
+  TempProject tp;
+  // Using a non-defaulted optional as its element type must fail: the
+  // body holds an Int Option, not an Int.
+  std::string f = tp.write("o.synth",
+                           "let f ?x:Int z:Int : Int = x + z ;;\n");
+  DiagnosticBag diags;
+  checkProject({f}, diags);
+  CHECK(diags.hasErrors());
+}
+
+TEST(checker_optional_params_must_come_first) {
+  TempProject tp;
+  std::string f = tp.write("o.synth",
+                           "let f z:Int ?x:Int : Int = z ;;\n");
+  DiagnosticBag diags;
+  checkProject({f}, diags);
+  CHECK(diags.hasErrors());
+  bool said = false;
+  for (auto& d : diags.items)
+    if (d.message.find("must come before") != std::string::npos) said = true;
+  CHECK(said);
+}
+
+TEST(checker_optional_params_need_a_required_one) {
+  TempProject tp;
+  std::string f = tp.write("o.synth",
+                           "let f ?(x = 1 : Int) : Int = x ;;\n");
+  DiagnosticBag diags;
+  checkProject({f}, diags);
+  CHECK(diags.hasErrors());
+  bool said = false;
+  for (auto& d : diags.items)
+    if (d.message.find("at least one required") != std::string::npos)
+      said = true;
+  CHECK(said);
+}
+
+TEST(checker_optional_default_type_must_match) {
+  TempProject tp;
+  std::string f = tp.write("o.synth",
+                           "let f ?(x = 1.5 : Int) z:Int : Int = x + z ;;\n");
+  DiagnosticBag diags;
+  checkProject({f}, diags);
+  CHECK(diags.hasErrors());
+}
+
+TEST(checker_optional_default_sees_earlier_params_only) {
+  TempProject tp;
+  std::string ok = tp.write("ok.synth", R"(
+let f ?(a = 1 : Int) ?(b = a + 1 : Int) z:Int : Int = a + b + z ;;
+)");
+  DiagnosticBag d1;
+  Program p1 = checkProject({ok}, d1);
+  for (auto& d : d1.items)
+    std::cerr << renderDiagnostic(d, userMod(p1).parsed.source);
+  CHECK(!d1.hasErrors());
+  // A default cannot reach forward to a later parameter.
+  std::string bad = tp.write("bad.synth",
+                             "let f ?(a = z : Int) z:Int : Int = a ;;\n");
+  DiagnosticBag d2;
+  checkProject({bad}, d2);
+  CHECK(d2.hasErrors());
+}
+
+TEST(checker_optional_call_forms) {
+  TempProject tp;
+  std::string f = tp.write("o.synth", R"(
+let f ?x:Int ?(y = 2 : Int) z:Int : Int =
+  let dx : Int = match x with | None -> 0 | Some v -> v in
+  dx + y + z
+;;
+let a : Int = f 10 ;;
+let b : Int = f ~x:1 ~y:3 10 ;;
+let c : Int = f ?x:(Some 1) 10 ;;
+let d : Int = f ?x:None ?y:(Some 4) 10 ;;
+let e : Int = let x = Some 5 in f ?x 10 ;;
+)");
+  DiagnosticBag diags;
+  Program prog = checkProject({f}, diags);
+  for (auto& d : diags.items)
+    std::cerr << renderDiagnostic(d, userMod(prog).parsed.source);
+  CHECK(!diags.hasErrors());
+}
+
+TEST(checker_optional_pass_requires_optional_param) {
+  TempProject tp;
+  // `?z:` targets a required (labeled) parameter: rejected with a
+  // pointer to '~'.
+  std::string f = tp.write("o.synth", R"(
+let f ?x:Int ~z:Int : Int = z ;;
+let a : Int = f ?z:(Some 1) ;;
+)");
+  DiagnosticBag diags;
+  checkProject({f}, diags);
+  CHECK(diags.hasErrors());
+  bool said = false;
+  for (auto& d : diags.items)
+    if (d.message.find("is not optional") != std::string::npos) said = true;
+  CHECK(said);
+}
+
+TEST(checker_optional_pass_takes_an_option_value) {
+  TempProject tp;
+  // `?x:` passes an Option through; a bare element value is a mismatch.
+  std::string f = tp.write("o.synth", R"(
+let f ?x:Int z:Int : Int = z ;;
+let a : Int = f ?x:1 10 ;;
+)");
+  DiagnosticBag diags;
+  checkProject({f}, diags);
+  CHECK(diags.hasErrors());
+}
+
+TEST(checker_positional_arguments_skip_optional_params) {
+  TempProject tp;
+  // The one positional argument must land on z, not on ?x.
+  std::string f = tp.write("o.synth", R"(
+let f ?x:Timestamp z:Int : Int = z ;;
+let a : Int = f 10 ;;
+)");
+  DiagnosticBag diags;
+  Program prog = checkProject({f}, diags);
+  for (auto& d : diags.items)
+    std::cerr << renderDiagnostic(d, userMod(prog).parsed.source);
+  CHECK(!diags.hasErrors());
+}
+
+TEST(checker_optional_arguments_come_before_required_ones) {
+  TempProject tp;
+  // Mirroring the declaration rule: an optional-parameter argument after
+  // a required one is rejected.
+  std::string f = tp.write("o.synth", R"(
+let f ?x:Int y:Int z:Int : Int = z ;;
+let a : Int = f 1 ~x:2 3 ;;
+)");
+  DiagnosticBag diags;
+  checkProject({f}, diags);
+  CHECK(diags.hasErrors());
+  bool said = false;
+  for (auto& d : diags.items)
+    if (d.message.find("must come before") != std::string::npos) said = true;
+  CHECK(said);
+}
+
+TEST(checker_partial_application_keeps_optionals) {
+  TempProject tp;
+  // Filling neither the optional nor all required parameters leaves a
+  // function that still carries the optional slot; filling the last
+  // required parameter completes the call and defaults the rest.
+  std::string f = tp.write("o.synth", R"(
+let f ?(x = 1 : Int) ~y:Int z:Int : Int = x + y + z ;;
+let g = f ~y:2 ;;
+let a : Int = g 3 ;;
+)");
+  DiagnosticBag diags;
+  Program prog = checkProject({f}, diags);
+  for (auto& d : diags.items)
+    std::cerr << renderDiagnostic(d, userMod(prog).parsed.source);
+  CHECK(!diags.hasErrors());
+  CHECK(typeName(userMod(prog).defTypes.at("g")) == "?x:Int -> Int -> Int");
+}
+
+TEST(checker_completed_call_cannot_add_optionals_later) {
+  TempProject tp;
+  // Once every required parameter is filled the optionals have
+  // defaulted; a later application has nothing to bind them to.
+  std::string f = tp.write("o.synth", R"(
+let f ?(x = 1 : Int) y:Int : Int = x + y ;;
+let a : Int = (f 2) ~x:3 ;;
+)");
+  DiagnosticBag diags;
+  checkProject({f}, diags);
+  CHECK(diags.hasErrors());
+}
+
+TEST(checker_optionality_is_part_of_function_types) {
+  TempProject tp;
+  // A function with an optional parameter is not interchangeable with
+  // the all-required arrow type of the same shape.
+  std::string f = tp.write("o.synth", R"(
+let f ?x:Int y:Int : Int = y ;;
+let g : Int -> Int -> Int = f ;;
+)");
+  DiagnosticBag diags;
+  checkProject({f}, diags);
+  CHECK(diags.hasErrors());
+}
+
+TEST(checker_externals_cannot_declare_optional_params) {
+  TempProject tp;
+  std::string f = tp.write(
+      "o.synth", "let f ?x:Int y:Int : Int = external \"impl.cpp\" ;;\n");
+  DiagnosticBag diags;
+  checkProject({f}, diags);
+  CHECK(diags.hasErrors());
+  bool said = false;
+  for (auto& d : diags.items)
+    if (d.message.find("external") != std::string::npos &&
+        d.message.find("optional") != std::string::npos)
+      said = true;
+  CHECK(said);
+}
+
+TEST(checker_optional_params_in_lambdas_and_local_functions) {
+  TempProject tp;
+  std::string f = tp.write("o.synth", R"(
+let a : Int =
+  let add ?(by = 1 : Int) n:Int : Int = n + by in
+  add ~by:2 40 ;;
+let b : Int =
+  (* Written arrow types carry no labels (and no optional markers); an
+     optional-carrying lambda binds through inference instead. *)
+  let g = fun ?(by = 1 : Int) n:Int -> n + by in
+  g 41 ;;
+)");
+  DiagnosticBag diags;
+  Program prog = checkProject({f}, diags);
+  for (auto& d : diags.items)
+    std::cerr << renderDiagnostic(d, userMod(prog).parsed.source);
+  CHECK(!diags.hasErrors());
+}
+
+TEST(checker_core_option_module_helpers) {
+  TempProject tp;
+  std::string f = tp.write("o.synth", R"(
+open Core
+let doubled : Int Option = Option.map ~f:(fun n:Int -> n * 2) ~o:(Some 21) ;;
+let chained : Int Option =
+  Option.bind ~f:(fun n:Int -> if n > 0 then Some n else None)
+              ~o:doubled ;;
+let flat : Int Option = Option.join ~o:(Some (Some 3)) ;;
+let both : Int Option =
+  Option.map2 ~f:(fun a:Int b:Int -> a + b) ~a:(Some 1) ~b:(Some 2) ;;
+let out : Int = Option.value ~default:0 ~o:chained ;;
+let folded : Int = Option.fold ~none:0 ~some:(fun n:Int -> n + 1) ~o:flat ;;
+let kept : Int Option = Option.filter ~f:(fun n:Int -> n > 2) ~o:flat ;;
+let fallback : Int Option = Option.or_else ~alt:(Some 9) ~o:None ;;
+let listed : Int list = Option.to_list ~o:both ;;
+let lifted : Int Option list = List.map ~f:(fun n:Int -> Option.some ~x:n) ~xs:[1; 2] ;;
+let present : Bool = Option.is_some ~o:both ;;
+let absent : Bool = Option.is_none ~o:both ;;
+let indexed : Int Option = List.nth_opt ~xs:[1; 2; 3] ~i:1 ;;
+)");
+  DiagnosticBag diags;
+  Program prog = checkProject({f}, diags);
+  for (auto& d : diags.items)
+    std::cerr << renderDiagnostic(d, userMod(prog).parsed.source);
+  CHECK(!diags.hasErrors());
+  CHECK(typeName(userMod(prog).defTypes.at("chained")) == "Int Option");
+  CHECK(typeName(userMod(prog).defTypes.at("listed")) == "Int list");
 }

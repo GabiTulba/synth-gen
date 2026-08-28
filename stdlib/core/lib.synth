@@ -22,11 +22,18 @@
    `Signal` is abstract - an engine-backed handle with no structure to
    observe; the element type is Scalar (mono) or Vector (multichannel).
    A `Sample` is a plain record: a signal plus the window to cut from
-   it, so `s.from` and `{ s with to = ... }` work like on any record. *)
+   it, so `s.from` and `{ s with to = ... }` work like on any record.
+
+   `Option` is the ordinary two-constructor variant for a value that may
+   be absent. It is what an optional parameter without a default
+   (`?x:T`) delivers to a body, what a `?x:` call-site argument passes
+   through, and the return shape of every partial lookup. The Option
+   module below carries the monadic vocabulary over it. *)
 
 type 'a list = | Nil | Cons of ('a, 'a list) ;;
 type 'a Signal ;;
 type 'a Sample = { sig : 'a Signal; from : Timestamp; to : Timestamp } ;;
+type 'a Option = | None | Some of 'a ;;
 
 (* --- Math & Bool (math.cpp) ------------------------------------------ *)
 
@@ -67,6 +74,75 @@ module Math = struct
   let ceil ~x:Scalar : Int = external "math.cpp" ;;
   (* Boolean negation; && and || are (short-circuiting) operators. *)
   let not ~b:Bool : Bool = external "math.cpp" ;;
+end ;;
+
+(* --- Option functions - written in SynthGraph --------------------------
+   The vocabulary over `'a Option`: observation (is_some / is_none),
+   escape hatches (value / fold), the monadic core (map / bind / join /
+   map2), and choice (or_else / filter). Options are plain Some/None
+   variant values, so `match` always works too; these helpers exist so a
+   pipeline can thread absence without spelling the match out each time. *)
+
+module Option = struct
+  (* `Some` as a function: constructors are not first-class, so this is
+     what flows into List.map and friends. *)
+  let some ~x:'a : 'a Option = Some x ;;
+  (* --- Observation ---------------------------------------------------- *)
+  let is_some ~o:'a Option : Bool =
+    match o with
+    | None -> false
+    | Some _ -> true ;;
+  let is_none ~o:'a Option : Bool =
+    match o with
+    | None -> true
+    | Some _ -> false ;;
+  (* --- Leaving the option ----------------------------------------------
+     `value` answers absence with a default; `fold` handles both shapes
+     in one call (the catamorphism - everything else here is a fold). *)
+  let value ~default:'a ~o:'a Option : 'a =
+    match o with
+    | None -> default
+    | Some x -> x ;;
+  let fold ~none:'b ~some:('a -> 'b) ~o:'a Option : 'b =
+    match o with
+    | None -> none
+    | Some x -> some x ;;
+  (* --- The monadic core ------------------------------------------------
+     map transforms a present value; bind chains computations that may
+     themselves come up empty; join flattens one level of nesting;
+     map2 combines two options (absent if either side is). *)
+  let map ~f:('a -> 'b) ~o:'a Option : 'b Option =
+    match o with
+    | None -> None
+    | Some x -> Some (f x) ;;
+  let bind ~f:('a -> 'b Option) ~o:'a Option : 'b Option =
+    match o with
+    | None -> None
+    | Some x -> f x ;;
+  let join ~o:'a Option Option : 'a Option =
+    match o with
+    | None -> None
+    | Some inner -> inner ;;
+  let map2 ~f:('a -> 'b -> 'c) ~a:'a Option ~b:'b Option : 'c Option =
+    match a with
+    | None -> None
+    | Some x -> (match b with
+                 | None -> None
+                 | Some y -> Some (f x y)) ;;
+  (* --- Choice and filtering ------------------------------------------- *)
+  let or_else ~alt:'a Option ~o:'a Option : 'a Option =
+    match o with
+    | None -> alt
+    | Some x -> Some x ;;
+  let filter ~f:('a -> Bool) ~o:'a Option : 'a Option =
+    match o with
+    | None -> None
+    | Some x -> if f x then Some x else None ;;
+  (* An option is a zero-or-one-element list; this is the bridge. *)
+  let to_list ~o:'a Option : 'a list =
+    match o with
+    | None -> []
+    | Some x -> [x] ;;
 end ;;
 
 (* --- List functions - written in SynthGraph ----------------------------
@@ -117,8 +193,9 @@ module List = struct
       | Cons (x, rest) -> go (Cons (x, acc)) rest in
     go ys (rev ~xs:xs) ;;
   (* Out-of-range indices answer with `default` rather than failing the
-     build: there is no option type, and a partial primitive would make
-     every caller carry a bounds check the list already knows. *)
+     build: a partial primitive would make every caller carry a bounds
+     check the list already knows. `nth_opt` is the Option-returning
+     spelling for callers that want to observe absence instead. *)
   let rec nth ~xs:'a list ~i:Int ~default:'a : 'a =
     if i < 0 then default
     else match xs with
@@ -126,6 +203,13 @@ module List = struct
          | Cons (x, rest) ->
              if i <= 0 then x
              else nth ~xs:rest ~i:(i - 1) ~default:default ;;
+  let rec nth_opt ~xs:'a list ~i:Int : 'a Option =
+    if i < 0 then None
+    else match xs with
+         | Nil -> None
+         | Cons (x, rest) ->
+             if i <= 0 then Some x
+             else nth_opt ~xs:rest ~i:(i - 1) ;;
   (* --- Selection and expansion --------------------------------------- *)
   let filter ~f:('a -> Bool) ~xs:'a list : 'a list =
     let rec go acc:'a list rem:'a list : 'a list =

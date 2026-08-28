@@ -83,6 +83,13 @@ struct Type {
   // Fun: per-param labels, "" = positional. May be empty (all positional).
   // Labels drive call-site matching and printing; equality ignores them.
   std::vector<std::string> labels;
+  // Fun: per-param optional flags, parallel to labels; may be shorter or
+  // empty (all required). An optional parameter's item is its *element*
+  // type (the T of `?x:T`); a call passes T with ~x or T Option with ?x,
+  // and positional arguments skip optional parameters entirely. Unlike
+  // labels, optionality changes how a call consumes the parameter list,
+  // so equality and unification DO compare it.
+  std::vector<char> opts;
   TypePtr ret;                  // Fun
   int var = 0;                  // Var: id; negative = rigid (see above)
   std::string varName;          // Var: surface name ("a" for 'a), for
@@ -93,6 +100,7 @@ struct Type {
   std::string labelAt(size_t i) const {
     return i < labels.size() ? labels[i] : std::string{};
   }
+  bool optAt(size_t i) const { return i < opts.size() && opts[i]; }
 };
 
 TypePtr tScalar();
@@ -107,6 +115,8 @@ TypePtr tNamed(const TypeDecl* decl, std::vector<TypePtr> args);
 TypePtr tFun(std::vector<TypePtr> params, TypePtr ret);
 TypePtr tFun(std::vector<TypePtr> params, std::vector<std::string> labels,
              TypePtr ret);
+TypePtr tFun(std::vector<TypePtr> params, std::vector<std::string> labels,
+             std::vector<char> opts, TypePtr ret);
 TypePtr tVar(int id);
 // A named variable; `id` must be negative for a rigid one (tRigidVar) and
 // non-negative for a free one that keeps its surface name in diagnostics.

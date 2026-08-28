@@ -852,8 +852,8 @@ bool endsValue(Tok k) {
 int spacesBetween(Tok prev, Tok cur, const std::string& gap,
                   bool prevUnaryMinus) {
   if (prevUnaryMinus) return 0;
-  if (prev == Tok::Tilde || prev == Tok::Dot || prev == Tok::LParen ||
-      prev == Tok::LBracket)
+  if (prev == Tok::Tilde || prev == Tok::Question || prev == Tok::Dot ||
+      prev == Tok::LParen || prev == Tok::LBracket)
     return 0;
   if (cur == Tok::Dot || cur == Tok::Comma || cur == Tok::Semi ||
       cur == Tok::RParen || cur == Tok::RBracket)

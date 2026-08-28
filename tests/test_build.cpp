@@ -10,6 +10,7 @@
 #include "build.hpp"
 #include "manifest_helpers.hpp"
 #include "checker.hpp"
+#include "eval.hpp"
 #include "incremental.hpp"
 #include "library.hpp"
 #include "test_framework.hpp"
@@ -4723,4 +4724,89 @@ let _ = render "t" 8000.0 (sample (constant gain) 0s 10ms) ;;
       10);
   CHECK(builds == 2);
   CHECK_NEAR(lastValue, 0.9, 1e-12);
+}
+
+// --- Optional labeled parameters & Option: evaluation ----------------------
+// Optional-parameter semantics are observed through render windows: the
+// sample's `to` timestamp is a plain double on the collected target, so a
+// duration computed through defaults, ~x / ?x fills, and Option helpers
+// is directly checkable.
+
+namespace {
+
+double targetTo(const std::vector<RenderTarget>& targets,
+                const std::string& name) {
+  for (auto& t : targets)
+    if (t.name == name) return t.sample.to;
+  return -1.0;
+}
+
+bool near(double a, double b) { return std::abs(a - b) < 1e-9; }
+
+}  // namespace
+
+TEST(build_optional_params_evaluate) {
+  TempDir td;
+  td.write("opt.synth", R"(
+open Core open Core.Osc open Core.Arrange open Core.Render
+let dur ?(len = 1s : Timestamp) ?tail:Timestamp base:Timestamp : Timestamp =
+  let extra : Timestamp = match tail with
+    | None -> 0s
+    | Some t -> t in
+  base +. len +. extra
+;;
+(* Unfilled optionals default: len = 1s, tail = None. *)
+let _ = render "a" 48000.0 (sample (sine 440.0) 0s (dur 500ms)) ;;
+(* ~len passes a determined value into the defaulted parameter. *)
+let _ = render "b" 48000.0 (sample (sine 440.0) 0s (dur ~len:2s 500ms)) ;;
+(* ?tail passes an Option through; ?len:None leaves len to its default. *)
+let _ = render "c" 48000.0
+  (sample (sine 440.0) 0s (dur ?tail:(Some 250ms) ?len:None 500ms)) ;;
+(* A partial application carries its optional binding (~tail wraps to
+   Some) until the required parameter completes the call. *)
+let _ = render "d" 48000.0
+  (sample (sine 440.0) 0s ((dur ~tail:250ms) 500ms)) ;;
+)");
+  DiagnosticBag diags;
+  Program prog = checkProject({(td.dir / "opt.synth").string()}, diags);
+  for (auto& d : diags.items) std::cerr << renderDiagnostic(d, "");
+  CHECK(!diags.hasErrors());
+  std::vector<RenderTarget> targets;
+  CHECK(evaluateProgram(prog, targets, diags));
+  CHECK(targets.size() == 4);
+  CHECK(near(targetTo(targets, "a"), 1.5));
+  CHECK(near(targetTo(targets, "b"), 2.5));
+  CHECK(near(targetTo(targets, "c"), 1.75));
+  CHECK(near(targetTo(targets, "d"), 1.75));
+}
+
+TEST(build_option_module_evaluates) {
+  TempDir td;
+  td.write("opt.synth", R"(
+open Core open Core.Osc open Core.Arrange open Core.Render
+let pick : Timestamp =
+  Option.value ~default:1s
+    ~o:(Option.map ~f:(fun t:Timestamp -> t +. 250ms)
+                   ~o:(List.nth_opt ~xs:[3s; 500ms] ~i:1)) ;;
+let missing : Timestamp =
+  Option.value ~default:2s ~o:(List.nth_opt ~xs:[3s] ~i:5) ;;
+let chained : Timestamp =
+  Option.value ~default:100ms
+    ~o:(Option.bind ~f:(fun t:Timestamp ->
+                          if t >. 1s then Some (t +. 1s) else None)
+                    ~o:(Some 2s)) ;;
+let _ = render "p" 48000.0 (sample (sine 440.0) 0s pick) ;;
+let _ = render "m" 48000.0 (sample (sine 440.0) 0s missing) ;;
+let _ = render "ch" 48000.0 (sample (sine 440.0) 0s chained) ;;
+)");
+  DiagnosticBag diags;
+  Program prog = checkProject({(td.dir / "opt.synth").string()}, diags);
+  for (auto& d : diags.items) std::cerr << renderDiagnostic(d, "");
+  CHECK(!diags.hasErrors());
+  std::vector<RenderTarget> targets;
+  CHECK(evaluateProgram(prog, targets, diags));
+  CHECK(targets.size() == 3);
+  CHECK(near(targetTo(targets, "p"), 0.75));
+  CHECK(near(targetTo(targets, "m"), 2.0));
+  CHECK(near(targetTo(targets, "ch"), 3.0));
 }

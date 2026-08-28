@@ -19,7 +19,8 @@
 // transparent Values; signals and samples arrive as engine graph handles
 // you can combine with the <synth/engine.hpp> constructors; functions
 // (and any future value kind) arrive as opaque handles usable through
-// ctx.apply or passable back unchanged.
+// ctx.apply or passable back unchanged - an opaque handle carrying the
+// value's constructor name in `str` when it has one.
 //
 // The implementation is compiled by the host's $CXX into the host
 // process, so the full C++ standard library is usable across the
@@ -56,7 +57,10 @@ struct Value {
   Sample samp;                   // Sample
   // Any host value with no transparent representation here (a function,
   // for instance). Pass it to ctx.apply or return it unchanged; its
-  // meaning lives on the host side.
+  // meaning lives on the host side. `str` carries a tag when the host
+  // has a readable one - a variant value's constructor name - which is
+  // enough to label such a value without understanding it; it is empty
+  // otherwise and never affects the value on the way back.
   std::shared_ptr<void> opaque;
 
   static Value unit() { return {}; }
@@ -107,18 +111,28 @@ struct RenderDecl {
   std::vector<std::pair<std::string, Sample>> stems;  // VisualStems lanes
 };
 
-// A live control being declared: a named build-time Scalar parameter
-// (shown as a slider or a knob by the dev app) with a range and a
-// default. Declaring it yields the control's value for this build: the
-// override an attached dev tool wrote, clamped to [min, max], or `def`
-// when none is active. Names share one project-wide name space;
-// redeclaring a name with the same kind and range yields the same value.
+// A live control being declared: a named build-time parameter the dev
+// app draws as a slider, a knob, a whole-step slider, a tickbox or a
+// list of tickboxes to pick one option from. Declaring it yields the
+// control's value for this build: the override an attached dev tool
+// wrote, clamped to [min, max] (and snapped to a whole number for the
+// discrete kinds), or `def` when none is active. Names share one
+// project-wide name space; redeclaring a name with the same kind, range
+// and options yields the same value.
+//
+// Every kind travels as one number. IntSlider bounds are whole numbers;
+// Toggle is 0 or 1; Choice is the selected option's index, so min is 0
+// and max is options.size() - 1.
 struct ControlDecl {
-  enum class Kind { Slider, Knob };
+  enum class Kind { Slider, Knob, IntSlider, Toggle, Choice };
   Kind kind = Kind::Slider;
   std::string name;  // stable identifier, unique project-wide
   double min = 0, max = 1;
   double def = 0;
+  // Choice only: one label per option, in order - what the dev app
+  // writes beside each tickbox. The option values themselves never
+  // cross; the implementation indexes its own list with the result.
+  std::vector<std::string> options;
 };
 
 // A group of live controls declared together, with a bound on their sum:
@@ -140,17 +154,26 @@ struct ControlGroupDecl {
 
 // A dev-app panel being declared: a named grouping that pairs some of
 // the project's live controls with some of its render targets, so the
-// dev app can show them together instead of as two flat lists. Members
-// are named, not passed by value, because a control declaration yields
-// only its Scalar value and a render declaration yields unit - the
-// name is the only handle either leaves behind. A control member may
-// name a whole multi_slider group rather than each of its lanes.
+// dev app can show them together instead of as two flat lists.
+//
+// A control member is a name and a nesting depth: Core.Ui.panel takes a
+// tree of `Controller`s and flattens it here, because a variant cannot
+// cross this boundary with its structure intact. Depth 0 is a control
+// the panel names directly; deeper members are the parts of a composite
+// and are drawn as one indented block. A member may name a whole
+// multi_slider group rather than each of its lanes. Targets stay bare
+// names: a render declaration yields unit, so its name is the only
+// handle it leaves behind.
 //
 // Panels are presentation only: they never reach the engine and never
 // affect a rendered artifact.
 struct PanelDecl {
+  struct Member {
+    std::string name;
+    int depth = 0;
+  };
   std::string name;  // panel identifier and title, unique project-wide
-  std::vector<std::string> controls;
+  std::vector<Member> controls;
   std::vector<std::string> targets;
 };
 

@@ -24,10 +24,15 @@ SYNTH_EXTERNAL(exp_decay) {
   *result = Value::signal(makeExpDecay(args[0].asScalar()));
   return true;
 }
-SYNTH_EXTERNAL(adsr) {
-  *result = Value::signal(makeAdsr(args[0].asTime(), args[1].asTime(),
-                                   args[2].asScalar(), args[3].asTime(),
-                                   args[4].asTime()));
+// The envelope primitive: `Fx.adsr` is the SynthGraph wrapper that names
+// the two segment shapes; here each arrives as the bare curvature its
+// Curve stands for - 0 for a straight ramp, k for the exponential
+// e^-kx - which is what the engine draws with.
+SYNTH_EXTERNAL(adsr_curved) {
+  *result = Value::signal(makeAdsr(
+      args[0].asTime(), args[1].asTime(), args[2].asScalar(),
+      args[3].asTime(), args[4].asTime(), args[5].asScalar(),
+      args[6].asScalar()));
   return true;
 }
 SYNTH_EXTERNAL(lowpass) {

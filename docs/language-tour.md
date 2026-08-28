@@ -151,7 +151,13 @@ let _ = sample pattern ~from:0s ~to:2s |> render ~name:"warm" ~rate:48000.0 ;;
   arguments skip optional parameters, and a call *completes* — applying
   the defaults — as soon as its required parameters are filled. The
   `Core.Option` module carries the monadic vocabulary (`map`, `bind`,
-  `value`, ...) over the ambient `'a Option` variant.
+  `value`, ...) over the ambient `'a Option` variant. Core uses the same
+  form: `adsr` (and `gated`) take `?decay_curve` and `?release_curve`,
+  `Fx.Curve` values (`Linear` or `Exponential k`) that shape the falling
+  segments — `adsr ~decay_curve:(Exponential 5.0) ~attack:4ms
+  ~decay:600ms ~sustain:0.25 ~release:350ms ~hold:dur` plucks instead of
+  ramps, `k` says how sharply, and leaving them out is the linear
+  envelope as before.
 - Any function-typed expression can be applied (`(f 1.0) 2.0`) or passed
   along — a bare name, a partial application, a parameter, a lambda.
 - **Lambdas** (`fun x:Scalar -> ...`) annotate their parameters like
@@ -367,12 +373,52 @@ per-channel forms). The math primitives `exp`, `sqrt`, `log`, and
 
 `Control.slider ~name:"cutoff" ~min:100.0 ~max:4000.0 ~default:900.0`
 (and `Control.knob`, drawn as a rotary dial) declares a named tweakable
-parameter and evaluates to an ordinary Scalar: the default, or the
-override the `synth-dev` app wrote while you dragged its slider with a
-`synthc watch` daemon running. The value is fixed for one whole build —
-evaluation stays pure and renders stay deterministic; moving a slider
-is a rebuild, not a modulation (use signals for movement *within* a
-render). `examples/controls` is the worked example.
+parameter. It evaluates to a **`Scalar Control`**: `c.value` is the
+value for this build — the default, or the override the `synth-dev` app
+wrote while you dragged its slider with a `synthc watch` daemon running
+— and `c.ui` is the *controller*, which is what a panel is given. The
+value is fixed for one whole build — evaluation stays pure and renders
+stay deterministic; moving a slider is a rebuild, not a modulation (use
+signals for movement *within* a render).
+
+The rest of the family is the same idea in the type the parameter
+actually has: `int_slider` steps whole numbers (`Int` in, `Int` out),
+`toggle` is a tickbox yielding a `Bool`, `choice` is one tickbox per
+option that hands back **the option itself** — of whatever type the
+list holds — and `opt` puts a tickbox in front of a value, so it reads
+`Some value` or `None` and drops straight into an optional parameter:
+
+```ocaml
+let voice : Scalar Signal =
+  Control.choice ~name:"voice" ~options:[sine 220.0; saw_bl 220.0] ;;
+let voices : Int =
+  Control.int_slider ~name:"voices" ~min:1 ~max:8 ~default:3 ;;
+let out : Scalar Signal =
+  pluck ?depth:(Control.opt ~name:"depth" ~value:0.4) voice ;;
+```
+
+Panels take controllers rather than names, so a control's name is
+written once and a component is one value you can hand around:
+
+```ocaml
+let curve : Fx.Curve Control =
+  let shape : CurveShape Control =
+    Control.choice ~name:"decay curve" ~options:[Linear; Exponential] in
+  match shape.value with
+  | Linear -> Control.nest ~value:Fx.Linear ~parts:[shape.ui]
+  | Exponential ->
+      (* declared only in this arm, so Linear has no rate slider at all *)
+      let rate : Scalar Control =
+        Control.slider ~name:"decay curve rate" ~min:0.5 ~max:12.0
+                       ~default:5.0 in
+      Control.nest ~value:(Fx.Exponential rate.value)
+                   ~parts:[shape.ui; rate.ui] ;;
+
+let _ = Ui.panel ~name:"Voice" ~controls:[gain.ui; curve.ui]
+                 ~targets:["tone"] ;;
+```
+
+`examples/controls` is the worked example.
 
 ## Rhythm and humanization
 

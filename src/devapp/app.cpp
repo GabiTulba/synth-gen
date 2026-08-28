@@ -807,6 +807,44 @@ bool drawOneControl(UnitState& u, const ControlMeta& c) {
       ImGui::SameLine();
       ImGui::AlignTextToFramePadding();
       ImGui::Text("%s  %.4g", c.name.c_str(), (double)ui.value);
+    } else if (c.kind == "toggle") {
+      // A tickbox has no drag: the click that flips it is also the end
+      // of the edit, so the override write lands immediately.
+      bool on = ui.value >= 0.5f;
+      if (ImGui::Checkbox("##toggle", &on)) {
+        ui.value = on ? 1.0f : 0.0f;
+        edited = released = true;
+      }
+      ImGui::SameLine();
+      ImGui::AlignTextToFramePadding();
+      ImGui::TextUnformatted(c.name.c_str());
+    } else if (c.kind == "choice") {
+      // One tickbox per option, the value their index. Labels come from
+      // the build; "##k" keeps two same-named options apart for ImGui
+      // without showing anything extra.
+      int pick = (int)std::lround((double)ui.value);
+      ImGui::AlignTextToFramePadding();
+      ImGui::TextUnformatted(c.name.c_str());
+      for (size_t k = 0; k < c.options.size(); k++) {
+        ImGui::SameLine();
+        std::string label = c.options[k] + "##" + std::to_string(k);
+        if (ImGui::RadioButton(label.c_str(), &pick, (int)k)) {
+          ui.value = (float)pick;
+          edited = released = true;
+        }
+      }
+    } else if (c.kind == "int_slider") {
+      ImGui::SetNextItemWidth(
+          std::max(160.0f * gUiScale,
+                   ImGui::GetContentRegionAvail().x * 0.45f));
+      int v = (int)std::lround((double)ui.value);
+      if (ImGui::SliderInt("##int", &v, (int)c.min, (int)c.max)) {
+        ui.value = (float)v;
+        edited = true;
+      }
+      released = ImGui::IsItemDeactivatedAfterEdit();
+      ImGui::SameLine();
+      ImGui::TextUnformatted(c.name.c_str());
     } else {
       ImGui::SetNextItemWidth(
           std::max(160.0f * gUiScale,
@@ -1134,20 +1172,36 @@ void drawPanel(AppState& app, UnitState& u, const PanelMeta& panel,
 
     if (!panel.controls.empty()) {
       bool anyDirty = false;
-      for (const std::string& name : panel.controls) {
+      // Members carry the depth they had in the panel's controller tree,
+      // so a composite's parts sit indented under the control they
+      // belong to instead of reading as siblings.
+      int indented = 0;
+      for (const PanelMember& member : panel.controls) {
+        while (indented < member.depth) {
+          ImGui::Indent(12.0f * gUiScale);
+          indented++;
+        }
+        while (indented > member.depth) {
+          ImGui::Unindent(12.0f * gUiScale);
+          indented--;
+        }
         const ControlMeta* c = nullptr;
         for (auto& m : controls)
-          if (m.name == name && m.group.empty()) c = &m;
+          if (m.name == member.name && m.group.empty()) c = &m;
         if (c)
           anyDirty |= drawOneControl(u, *c);
         else
-          drawGroupByName(u, controls, name, anyDirty);
+          drawGroupByName(u, controls, member.name, anyDirty);
+      }
+      while (indented > 0) {
+        ImGui::Unindent(12.0f * gUiScale);
+        indented--;
       }
       if (ImGui::SmallButton("defaults")) {
         for (auto& m : controls) {
           bool mine = false;
-          for (const std::string& n : panel.controls)
-            if (n == m.name || n == m.group) mine = true;
+          for (const PanelMember& n : panel.controls)
+            if (n.name == m.name || n.name == m.group) mine = true;
           if (!mine) continue;
           ControlUi& ui = u.controlUi[m.name];
           ui.value = (float)m.def;

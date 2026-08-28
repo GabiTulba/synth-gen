@@ -29,15 +29,20 @@ struct DiagnosticMeta {
   std::string rendered;
 };
 
-// A live control the build declared (Core.Control.slider/knob/
-// multi_slider): the app shows it as a slider, a knob or one lane of a
-// linked group, and writes overrides for the daemon.
+// A live control the build declared (Core.Control): the app shows it as
+// a slider, a knob, a whole-step slider, a tickbox, one tickbox per
+// option, or one lane of a linked group, and writes overrides for the
+// daemon.
 struct ControlMeta {
   std::string name;
-  std::string kind;  // "slider" | "knob" | "multi_slider"
+  // "slider" | "knob" | "multi_slider" | "int_slider" | "toggle" | "choice"
+  std::string kind;
   double min = 0, max = 1;
   double def = 0;    // the declaration's default
   double value = 0;  // the value the last build used
+  // "choice" only: one label per option, in order; the value is the
+  // selected option's index.
+  std::vector<std::string> options;
   // "multi_slider" lanes only: which group this lane belongs to, where
   // it sits in it, and the bounds the group's values sum into. Lanes of
   // one group arrive consecutively, in declaration order.
@@ -64,13 +69,20 @@ ControlBand controlLaneBand(const ControlMeta& lane, double otherLanesSum);
 // A panel the build declared (Core.Ui.panel): a named grouping that
 // pairs some of the unit's controls with some of its targets, so the app
 // can show a knob beside the waveform it shapes instead of listing both
-// flat. Members are names, exactly as the source wrote them - a control
-// member may name a whole multi_slider group rather than each of its
-// lanes, which the app resolves when it draws. The build has already
-// checked that every name resolves.
+// flat. A control member is a name plus the depth it sat at in the
+// panel's controller tree: depth 0 is a control the panel names
+// directly, deeper members are the parts of one composite and draw
+// indented under it. A member may name a whole multi_slider group rather
+// than each of its lanes, which the app resolves when it draws. The
+// build has already checked that every name resolves.
+struct PanelMember {
+  std::string name;
+  int depth = 0;
+};
+
 struct PanelMeta {
   std::string name;  // identity and window title
-  std::vector<std::string> controls;
+  std::vector<PanelMember> controls;
   std::vector<std::string> targets;
 };
 

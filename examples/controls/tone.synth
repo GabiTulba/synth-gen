@@ -1,6 +1,9 @@
-(* tone.synth — live controls: a filtered saw whose cutoff and gain are
-   a slider and a knob in `synth-dev`, under an envelope whose four
-   durations are one multi_slider group. Run `synthc watch` here, open
+(* tone.synth — live controls: a filtered oscillator whose waveform is a
+   row of tickboxes, whose cutoff and gain are a slider and a knob in
+   `synth-dev`, whose voice count steps whole numbers and whose envelope
+   curve is a component that grows a curvature slider when you pick
+   Exponential, under an envelope whose four durations are one
+   multi_slider group. Run `synthc watch` here, open
    the dev app next to it, and drag the controls: every release writes
    an override into the build's controls.json and the daemon rebuilds
    with the new values.
@@ -19,13 +22,13 @@ open Core.Render
 open Core.Control
 open Core.Time
 
-let cutoff : Scalar =
+let cutoff : Scalar Control =
   Control.slider ~name:"cutoff" ~min:100.0 ~max:4000.0 ~default:900.0
 ;;
 
 (* The envelope: four durations in seconds, each with its own range,
    summing to no more than the 1s window the render cuts. *)
-let env : Scalar list =
+let env : Scalar list Control =
   Control.multi_slider ~name:"env" ~sum_min:0.0 ~sum_max:1.0
     ~lanes:[{ name = "attack"; min = 0.0; max = 0.4; default = 0.02 };
              { name = "decay"; min = 0.0; max = 0.5; default = 0.18 };
@@ -33,22 +36,83 @@ let env : Scalar list =
              { name = "release"; min = 0.0; max = 0.8; default = 0.40 }]
 ;;
 
-let attack : Timestamp = to_sec (List.nth ~xs:env ~i:0 ~default:0.0) ;;
-let decay : Timestamp = to_sec (List.nth ~xs:env ~i:1 ~default:0.0) ;;
-let hold : Timestamp = to_sec (List.nth ~xs:env ~i:2 ~default:0.0) ;;
-let release : Timestamp = to_sec (List.nth ~xs:env ~i:3 ~default:0.0) ;;
+let attack : Timestamp = to_sec (List.nth ~xs:env.value ~i:0 ~default:0.0) ;;
+let decay : Timestamp = to_sec (List.nth ~xs:env.value ~i:1 ~default:0.0) ;;
+let hold : Timestamp = to_sec (List.nth ~xs:env.value ~i:2 ~default:0.0) ;;
+let release : Timestamp = to_sec (List.nth ~xs:env.value ~i:3 ~default:0.0) ;;
 
-let gain : Scalar =
+let gain : Scalar Control =
   Control.knob ~name:"gain" ~min:0.0 ~max:1.0 ~default:0.6
 ;;
 
+(* The rest of the control family, each in the type its parameter
+   actually has: a tickbox per waveform to pick one, whole steps for a
+   count, a tickbox for a Bool, and a tickbox in front of a value for a
+   parameter that can simply be absent. The waveform options are whole
+   signals - a signal has no reading, so the dev app numbers those
+   tickboxes 1..3 rather than naming them; a choice over Strings or
+   numbers is labelled with the options themselves. *)
+let osc : Scalar Signal Control =
+  Control.choice ~name:"osc" ~options:[saw_bl 110.0; square_bl 110.0;
+                                       sine 110.0]
+;;
+
+let voices : Int Control =
+  Control.int_slider ~name:"voices" ~min:1 ~max:5 ~default:3
+;;
+
+let bright : Bool Control = Control.toggle ~name:"bright" ~default:false ;;
+
+(* A component: one control built out of two. The shape row is always
+   there; the curvature slider is declared inside the Exponential arm,
+   so while Linear is picked it does not exist - nothing to declare,
+   nothing to draw, nothing in the override file. `nest` binds them into
+   one controller whose head is the row, so the panel that names
+   `decay_curve.ui` gets both, the slider indented under its row. *)
+type CurveShape = | Linear | Exponential ;;
+
+let curve_control ~label:String : Fx.Curve Control =
+  let shape : CurveShape Control =
+    Control.choice ~name:label ~options:[Linear; Exponential] in
+  match shape.value with
+  | Linear -> Control.nest ~value:Fx.Linear ~parts:[shape.ui]
+  | Exponential ->
+      let rate : Scalar Control =
+        Control.slider ~name:(Str.cat label " rate") ~min:0.5 ~max:12.0
+                       ~default:5.0 in
+      Control.nest ~value:(Fx.Exponential rate.value)
+                   ~parts:[shape.ui; rate.ui]
+;;
+
+let decay_curve : Fx.Curve Control = curve_control ~label:"decay curve" ;;
+
+(* The other way to make a parameter optional: unticked this is None and
+   the release stays linear; ticked, the value reaches Fx.gated through
+   its optional parameter. *)
+let release_curve : Fx.Curve Option Control =
+  Control.opt ~on:false ~name:"pluck release" ~value:(Fx.Exponential 8.0)
+;;
+
+(* Detuned copies of the chosen oscillator: `voices` of them, spread a
+   few cents apart, summed and levelled by the count. *)
 let voice : Scalar Signal =
-  saw_bl 110.0 |> lowpass ~cutoff:cutoff
+  Arrange.mix_all
+    ~signals:(List.init ~n:voices.value
+                        ~f:(fun i:Int ->
+                              Fx.resample
+                                ~input:osc.value
+                                ~f:(fun t:Scalar ->
+                                      1.0 +. 0.004 *. Math.to_scalar i)))
+    *. (1.0 /. Math.to_scalar voices.value)
+  |> lowpass ~cutoff:(if bright.value then cutoff.value *. 2.0
+                      else cutoff.value)
 ;;
 
 let _ =
-  voice *. gain
-  |> gated ~attack:attack ~decay:decay ~sustain:0.7
+  voice *. gain.value
+  |> gated ~decay_curve:decay_curve.value
+           ?release_curve:release_curve.value
+           ~attack:attack ~decay:decay ~sustain:0.7
            ~release:release ~hold:hold
   |> place ~at:0s
   |> sample ~from:0s ~to:1s
@@ -57,12 +121,16 @@ let _ =
 
 (* Panels group the controls with the sound they shape, so the dev app
    shows a knob beside the waveform it moves instead of one flat list of
-   controls above another of targets. Naming the group `env` pulls in
-   all four of its lanes; listing them one by one would work too. *)
+   controls above another of targets. A panel names controllers, not
+   strings: `env.ui` is the whole multi_slider group, drawn as its four
+   linked lanes. *)
 let _ =
-  Ui.panel ~name:"Tone" ~controls:["cutoff"; "gain"] ~targets:["tone"]
+  Ui.panel ~name:"Tone"
+           ~controls:[osc.ui; cutoff.ui; gain.ui; voices.ui; bright.ui;
+                      decay_curve.ui; release_curve.ui]
+           ~targets:["tone"]
 ;;
 
 let _ =
-  Ui.panel ~name:"Envelope" ~controls:["env"] ~targets:["tone"]
+  Ui.panel ~name:"Envelope" ~controls:[env.ui] ~targets:["tone"]
 ;;

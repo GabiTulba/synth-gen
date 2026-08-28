@@ -146,6 +146,16 @@ the value this build used), and the build reads overrides from
 { "overrides": { "cutoff": 900.0 } }
 ```
 
+The other kinds are the same control with a different widget and a
+different reading of that one number: `int_slider` (`"kind":
+"int_slider"`) is a whole-step slider, `toggle` (and the tickbox
+`Control.opt` puts in front of a value) is `0` or `1`, and `choice` is
+the selected option's **index**, its entry carrying an extra
+`"options"` array of labels for the dev app to write beside each
+tickbox. Overrides for those kinds snap to a whole number after
+clamping, so a hand-edited `2.7` selects option 3, not a value between
+two options.
+
 `Core.Control.multi_slider` declares a whole group at once: each lane
 becomes a control named `"<group>.<lane>"` (`env.attack`), so the file
 stays flat and per-lane —
@@ -157,6 +167,11 @@ stays flat and per-lane —
 — and the lane's metadata entry carries `group`, `group_index`,
 `sum_min` and `sum_max` beside the usual fields, which is what lets the
 dev app draw the lanes linked.
+
+A panel's `"controls"` are members, not bare names:
+`{"name": "decay curve rate", "depth": 1}`. Depth 0 is a control the
+panel names directly; a deeper member is part of a component
+(`Nested_controller`) and is drawn indented under the member above it.
 
 Override values clamp to the declared range; a group is then projected
 back inside its sum bounds, so a hand-edited file cannot hand the

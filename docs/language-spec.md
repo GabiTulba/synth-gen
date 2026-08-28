@@ -242,6 +242,13 @@ the built-in names, needing no import to write in an annotation:
 - `'a Sample` — a record,
   `type 'a Sample = { sig : 'a Signal; from : Timestamp; to : Timestamp }`,
   so `s.from` projects and `{ s with to = 1s }` re-windows a sample.
+- `Controller` and `'a Control` — what a live control declaration hands
+  back: `type 'a Control = { value : 'a; ui : Controller }`, where
+  `type Controller = | Widget of String | Nested_controller of Controller
+  list`. `c.value` is the value this build resolved; `c.ui` is what
+  `Ui.panel` takes, so a control's name is written once. A component is
+  a `Nested_controller`: its first part is the head, the rest draw one
+  level in (§6, `Core.Control`).
 - `'a Option` — an ordinary variant for a value that may be absent,
   `type 'a Option = | None | Some of 'a`. It is what an optional
   parameter without a default delivers to its body, what a `?x:`
@@ -896,8 +903,18 @@ val Osc.noise: freq:Scalar -> Scalar Signal          (* two-step FM; determinist
 
 (* envelopes *)
 val Fx.exp_decay: rate:Scalar -> Scalar Signal          (* e^(-rate*t) *)
-val Fx.adsr: attack:Timestamp -> decay:Timestamp -> sustain:Scalar
+(* falling-segment shape: a straight ramp, or e^-kx normalized onto the
+   segment's endpoints (k around 3 gentle, 5 analog-ish, 10+ a spike;
+   negative mirrors it, 0 is Linear, |k| <= 64) *)
+type Fx.Curve = | Linear | Exponential of Scalar
+val Fx.adsr: ?decay_curve:Fx.Curve -> ?release_curve:Fx.Curve
+             -> attack:Timestamp -> decay:Timestamp -> sustain:Scalar
              -> release:Timestamp -> hold:Timestamp -> Scalar Signal
+             (* both curves default to Linear; the attack is always linear *)
+val Fx.adsr_curved: attack:Timestamp -> decay:Timestamp -> sustain:Scalar
+             -> release:Timestamp -> hold:Timestamp -> decay_curvature:Scalar
+             -> release_curvature:Scalar -> Scalar Signal
+             (* the primitive adsr wraps: each curve as its bare k *)
 
 (* filters; the modulated forms take the cutoff (Hz) as a mono signal *)
 val Fx.lowpass: cutoff:Scalar -> input:'a Signal -> 'a Signal
@@ -931,7 +948,8 @@ val Fx.reverb: decay:Timestamp -> damping:Scalar -> mix:Scalar
              -> input:'a Signal -> 'a Signal
 
 (* voice sugar (written in SynthGraph over the primitives above) *)
-val Fx.gated: attack:Timestamp -> decay:Timestamp -> sustain:Scalar
+val Fx.gated: ?decay_curve:Fx.Curve -> ?release_curve:Fx.Curve
+            -> attack:Timestamp -> decay:Timestamp -> sustain:Scalar
             -> release:Timestamp -> hold:Timestamp -> input:Scalar Signal
             -> Scalar Sample   (* input * adsr, cut to the envelope's end *)
 val Fx.echoes: by:Timestamp -> gain:Scalar -> n:Int -> input:'a Signal
@@ -958,16 +976,37 @@ val Render.render_vis_stems: name:String -> rate:Scalar
                     -> stems:(String, 'a Sample) list -> unit
   (* ONE svg artifact: a labeled waveform lane per stem, shared time axis *)
 
-(* live controls: named build-time Scalar parameters. Each declaration
+(* live controls: named build-time parameters. Each declaration
    evaluates to the control's value for THIS build: the override an
-   attached dev tool wrote (clamped to [min, max]) or the default.
-   Names share one project-wide name space; a redeclaration with the
-   same kind and range yields the same value, a conflicting one is a
-   build error. max must exceed min; the default must lie in range. *)
+   attached dev tool wrote (clamped to [min, max], snapped to a whole
+   step where the control is discrete) or the default. Names share one
+   project-wide name space; a redeclaration with the same kind, range
+   and options yields the same value, a conflicting one is a build
+   error. max must exceed min; the default must lie in range. *)
+(* Every control yields an 'a Control: the value this build resolved,
+   and the controller a panel shows it with. The `*_value` primitives
+   under each one resolve the value alone. *)
 val Control.slider: name:String -> min:Scalar -> max:Scalar
-           -> default:Scalar -> Scalar
+           -> default:Scalar -> Scalar Control
 val Control.knob: name:String -> min:Scalar -> max:Scalar
-         -> default:Scalar -> Scalar  (* same semantics; shown as a knob *)
+         -> default:Scalar -> Scalar Control  (* same, drawn as a knob *)
+val Control.int_slider: name:String -> min:Int -> max:Int
+              -> default:Int -> Int Control  (* whole steps, Ints in and out *)
+val Control.toggle: name:String -> default:Bool -> Bool Control  (* tickbox *)
+(* one option out of a list, drawn as a tickbox per option and yielding
+   the option itself, whatever its type. The first option is the
+   default; an empty list is a build error. *)
+val Control.choice: name:String -> options:'a list -> 'a Control
+(* a value behind a tickbox: Some value when ticked, None when not.
+   ?on is where the tickbox starts (ticked by default). Built on
+   toggle, so the tickbox is an ordinary control named `name`. *)
+val Control.opt: ?on:Bool -> name:String -> value:'a -> 'a Option Control
+(* Components: `map` keeps the widget and changes the value; `nest`
+   makes several controllers one, whose head draws where the panel put
+   it and whose remaining parts draw one level in. A part declared
+   inside an untaken branch is never declared at all. *)
+val Control.map: f:('a -> 'b) -> c:'a Control -> 'b Control
+val Control.nest: value:'a -> parts:Controller list -> 'a Control
 
 (* A group of controls whose values are related: each lane sits in its
    own [min, max] and the lane values sum into [sum_min, sum_max]. One
@@ -980,19 +1019,20 @@ val Control.knob: name:String -> min:Scalar -> max:Scalar
 type Control.Lane = { name : String; min : Scalar; max : Scalar;
                       default : Scalar }
 val Control.multi_slider: name:String -> sum_min:Scalar -> sum_max:Scalar
-                 -> lanes:Control.Lane list -> Scalar list
+                 -> lanes:Control.Lane list -> Scalar list Control
 
 (* dev-app panels: presentation only. A panel names some controls and
    some render targets, and `synth-dev` shows them together in one
    window - the knobs on top, a waveform strip per target beneath - so a
-   control sits next to the sound it shapes. Members are named because a
-   control evaluates to a bare Scalar and a render to unit; every name
-   must resolve to a declared control, control group or target, or the
-   build fails. A control member may name a whole multi_slider group
-   instead of each lane. Panel names have their own name space, and
-   redeclaring one is a build error. Panels never affect a rendered
-   artifact, and a project that declares none is unaffected. *)
-val Ui.panel: name:String -> controls:String list -> targets:String list
+   control sits next to the sound it shapes. Controls are given as the
+   controllers their declarations handed back (a whole component, or a
+   multi_slider group, counts as one); targets are named, because a
+   render evaluates to unit. Every name still has to resolve - a target,
+   or a hand-built Widget - or the build fails. Panel names have their
+   own name space, and redeclaring one is a build error. Panels never
+   affect a rendered artifact, and a project that declares none is
+   unaffected. *)
+val Ui.panel: name:String -> controls:Controller list -> targets:String list
      -> unit
 
 (* file import *)

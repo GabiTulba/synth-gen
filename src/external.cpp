@@ -2,6 +2,7 @@
 
 #include <dlfcn.h>
 
+#include <cstdio>
 #include <cstdlib>
 #include <filesystem>
 #include <fstream>
@@ -30,6 +31,26 @@ std::string readFileOrEmpty(const fs::path& p) {
   std::ostringstream ss;
   ss << in.rdbuf();
   return ss.str();
+}
+
+// The readable half of a variant's tag: a constructor's payload, when it
+// is one plain value. Anything with structure of its own (a tuple, a
+// record, another variant, a signal) is left off - the constructor name
+// alone is the label then.
+std::string payloadTag(const Value& p) {
+  char buf[32];
+  if (auto* sc = std::get_if<ScalarV>(&p.v)) {
+    std::snprintf(buf, sizeof buf, " %g", sc->v);
+    return buf;
+  }
+  if (auto* iv = std::get_if<IntV>(&p.v)) return " " + std::to_string(iv->v);
+  if (auto* t = std::get_if<TimeV>(&p.v)) {
+    std::snprintf(buf, sizeof buf, " %gs", t->seconds);
+    return buf;
+  }
+  if (auto* b = std::get_if<BoolV>(&p.v)) return b->v ? " true" : " false";
+  if (auto* str = std::get_if<StringV>(&p.v)) return " " + str->s;
+  return "";
 }
 
 ext::Value toExt(const Value& v, const ExtServices& svc) {
@@ -98,9 +119,20 @@ ext::Value toExt(const Value& v, const ExtServices& svc) {
     out.kind = ext::Value::Kind::Sample;
     out.samp = ext::Sample{*sig, from->seconds, to->seconds};
   } else {
-    // Functions (and any future kind): an opaque box the implementation
-    // can apply through ctx or hand back unchanged.
+    // Functions, records, variants of any other type (and any future
+    // kind): an opaque box the implementation can apply through ctx or
+    // hand back unchanged. A variant lends its constructor name - plus a
+    // simple payload where it has one - as the box's tag, the one
+    // readable thing about a value whose structure does not cross, so an
+    // implementation can label it (a `choice` over Fx.Linear /
+    // Fx.Exponential 5.0 draws "Linear" and "Exponential 5") without
+    // understanding it.
     out.kind = ext::Value::Kind::Opaque;
+    if (auto* var = std::get_if<VariantV>(&v.v); var && var->decl &&
+        var->ctor >= 0 && var->ctor < (int)var->decl->ctors.size()) {
+      out.str = var->decl->ctors[(size_t)var->ctor].name;
+      if (var->payload) out.str += payloadTag(*var->payload);
+    }
     out.opaque = std::make_shared<Value>(v);
   }
   return out;
@@ -308,8 +340,24 @@ ExternalFn loadUserExternal(const std::string& cppPath,
     };
     ctx.control = [&svc](ext::ControlDecl d) -> double {
       ControlDecl c;
-      c.kind = d.kind == ext::ControlDecl::Kind::Knob ? ControlDecl::Kind::Knob
-                                                      : ControlDecl::Kind::Slider;
+      switch (d.kind) {
+        case ext::ControlDecl::Kind::Knob:
+          c.kind = ControlDecl::Kind::Knob;
+          break;
+        case ext::ControlDecl::Kind::IntSlider:
+          c.kind = ControlDecl::Kind::IntSlider;
+          break;
+        case ext::ControlDecl::Kind::Toggle:
+          c.kind = ControlDecl::Kind::Toggle;
+          break;
+        case ext::ControlDecl::Kind::Choice:
+          c.kind = ControlDecl::Kind::Choice;
+          break;
+        case ext::ControlDecl::Kind::Slider:
+          c.kind = ControlDecl::Kind::Slider;
+          break;
+      }
+      c.options = std::move(d.options);
       c.name = std::move(d.name);
       c.min = d.min;
       c.max = d.max;
@@ -329,7 +377,8 @@ ExternalFn loadUserExternal(const std::string& cppPath,
     ctx.panel = [&svc](ext::PanelDecl d) {
       PanelDecl p;
       p.name = std::move(d.name);
-      p.controls = std::move(d.controls);
+      for (auto& m : d.controls)
+        p.controls.push_back(PanelDecl::Member{std::move(m.name), m.depth});
       p.targets = std::move(d.targets);
       svc.declarePanel(std::move(p));
     };

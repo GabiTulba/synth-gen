@@ -108,14 +108,22 @@ compiler internals:
   or the panel closes — a couple of minutes of stereo costs about 90 MB
   as samples, so a project with a dozen stems would otherwise decode all
   of them at launch.
-- Shows the build's live controls (`Core.Control.slider` / `knob`) as
-  sliders and rotary knobs. Releasing a drag writes the value into the
-  unit's `controls.json` (atomically); with `synthc watch` running next
-  door, that write triggers a rebuild with the override applied — this
-  is how the app *attaches* to a watch instance. A `*` marks values
-  still waiting for their rebuild; `reset` / `all defaults` clear
-  overrides. See [`build-system.md`](build-system.md) for the file
-  format.
+- Shows the build's live controls (`Core.Control`) with the widget each
+  kind asks for: `slider` and `knob` as a slider and a rotary knob,
+  `int_slider` as a slider that steps whole numbers, `toggle` (and
+  `opt`'s tick) as a tickbox, and `choice` as one tickbox per option,
+  labelled as the build's metadata gives them. Releasing a drag — or
+  the click that flips a tickbox, which has no drag to release — writes
+  the value into the unit's `controls.json` (atomically); with `synthc
+  watch` running next door, that write triggers a rebuild with the
+  override applied — this is how the app *attaches* to a watch
+  instance. A `*` marks values still waiting for their rebuild;
+  `reset` / `all defaults` clear overrides. See
+  [`build-system.md`](build-system.md) for the file format.
+- Draws a component's parts indented under it: a panel member carries
+  the depth it had in the `Controller` tree it was given, so a choice
+  and the slider that only exists while one option is picked read as one
+  block rather than two loose rows.
 - Draws a `multi_slider` group as linked lanes under a budget bar. A
   lane's track is banded: what it has taken, the headroom it can still
   take, and the stretch the other lanes have spoken for, with a tick at

@@ -65,10 +65,14 @@ struct TargetInfo {
 // writes it.
 struct ControlInfo {
   std::string name;
-  std::string kind = "slider";  // "slider" | "knob" | "multi_slider"
+  // "slider" | "knob" | "multi_slider" | "int_slider" | "toggle" | "choice"
+  std::string kind = "slider";
   double min = 0, max = 1;
   double defaultValue = 0;
   double value = 0;  // what this build used: override (clamped) or default
+  // "choice" only: the option labels, in order. The value is the
+  // selected option's index, so min is 0 and max is options.size() - 1.
+  std::vector<std::string> options;
   // "multi_slider" lanes only: the group this lane belongs to, its
   // position in it, and the bounds the group's sum satisfies. `name` is
   // "<group>.<lane>", so a lane overrides like any other control.
@@ -85,8 +89,16 @@ struct ControlInfo {
 // checked to resolve before the build succeeds. Presentation only: a
 // panel never affects a rendered artifact or a cache key.
 struct PanelInfo {
+  // A control member: its name, plus the depth it sat at in the
+  // `Controller` tree the panel was given. Depth 0 is a control the
+  // panel names directly; deeper members are the parts of a composite,
+  // which the dev app draws indented under it.
+  struct Member {
+    std::string name;
+    int depth = 0;
+  };
   std::string name;
-  std::vector<std::string> controls;
+  std::vector<Member> controls;
   std::vector<std::string> targets;
 };
 

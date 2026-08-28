@@ -3989,6 +3989,117 @@ let _ = e +. place v 1s
   checkSameBytes(derived, literal, "out.wav");
 }
 
+TEST(build_adsr_curves_default_to_linear) {
+  // The optional curves default to Linear, so naming them changes
+  // nothing: both spellings render what the primitive underneath does
+  // with its flags off.
+  const char* bare = R"(
+open Core open Core.Osc open Core.Fx open Core.Arrange open Core.Render
+let _ = sine 220.0 *. adsr ~attack:3ms ~decay:110ms ~sustain:0.5
+                           ~release:60ms ~hold:400ms
+  |> sample ~from:0s ~to:600ms |> render ~name:"out" ~rate:8000.0 ;;
+)";
+  const char* named = R"(
+open Core open Core.Osc open Core.Fx open Core.Arrange open Core.Render
+let _ = sine 220.0 *. adsr ~decay_curve:Linear ~release_curve:Linear
+                           ~attack:3ms ~decay:110ms ~sustain:0.5
+                           ~release:60ms ~hold:400ms
+  |> sample ~from:0s ~to:600ms |> render ~name:"out" ~rate:8000.0 ;;
+)";
+  const char* primitive = R"(
+open Core open Core.Osc open Core.Fx open Core.Arrange open Core.Render
+let _ = sine 220.0 *. adsr_curved ~attack:3ms ~decay:110ms ~sustain:0.5
+                                  ~release:60ms ~hold:400ms
+                                  ~decay_curvature:0.0 ~release_curvature:0.0
+  |> sample ~from:0s ~to:600ms |> render ~name:"out" ~rate:8000.0 ;;
+)";
+  checkSameBytes(bare, named, "out.wav");
+  checkSameBytes(bare, primitive, "out.wav");
+}
+
+TEST(build_adsr_exponential_curves_reach_the_engine) {
+  // Exponential picks the curved segments per side, and gated (like
+  // Dsp.adsr) passes the caller's choice through as an Option.
+  const char* named = R"(
+open Core open Core.Osc open Core.Fx open Core.Arrange open Core.Render
+let a : Scalar Signal =
+  adsr ~decay_curve:(Exponential 5.0) ~attack:3ms ~decay:110ms ~sustain:0.5
+       ~release:60ms ~hold:400ms ;;
+let b : Scalar Sample =
+  gated ~release_curve:(Exponential 2.5) ~attack:3ms ~decay:110ms
+        ~sustain:0.5 ~release:60ms ~hold:400ms ~input:(sine 330.0) ;;
+let c : Scalar Signal =
+  Dsp.adsr ?decay_curve:(Some (Exponential 5.0)) ?release_curve:None
+           ~attack:3ms ~decay:110ms ~sustain:0.5 ~release:60ms
+           ~hold:400ms ;;
+let _ = sine 220.0 *. a +. place b 1s +. sine 110.0 *. c
+  |> sample ~from:0s ~to:2s |> render ~name:"out" ~rate:8000.0 ;;
+)";
+  const char* primitive = R"(
+open Core open Core.Osc open Core.Fx open Core.Arrange open Core.Render
+let a : Scalar Signal =
+  adsr_curved ~attack:3ms ~decay:110ms ~sustain:0.5 ~release:60ms
+              ~hold:400ms ~decay_curvature:5.0 ~release_curvature:0.0 ;;
+let b : Scalar Sample =
+  sine 330.0 *. adsr_curved ~attack:3ms ~decay:110ms ~sustain:0.5
+                            ~release:60ms ~hold:400ms
+                            ~decay_curvature:0.0 ~release_curvature:2.5
+    |> sample ~from:0s ~to:460ms ;;
+let _ = sine 220.0 *. a +. place b 1s +. sine 110.0 *. a
+  |> sample ~from:0s ~to:2s |> render ~name:"out" ~rate:8000.0 ;;
+)";
+  checkSameBytes(named, primitive, "out.wav");
+}
+
+TEST(build_adsr_curvature_shapes_the_segment) {
+  // The Curve's payload is the curvature: two different ones are two
+  // different envelopes, and 0 is the straight ramp `Linear` names.
+  auto bytes = [](const char* curve) {
+    TempDir tp;
+    std::string src = std::string(R"(
+open Core open Core.Osc open Core.Fx open Core.Arrange open Core.Render
+let _ = sine 220.0 *. adsr ~decay_curve:()") + curve + R"() ~attack:0s
+                           ~decay:200ms ~sustain:0.25 ~release:60ms
+                           ~hold:200ms
+  |> sample ~from:0s ~to:300ms |> render ~name:"out" ~rate:8000.0 ;;
+)";
+    tp.write("x.synth", src);
+    tp.write("build.json", projectManifest("curvature", {"x.synth"}));
+    BuildResult r = buildProject(tp.dir.string());
+    for (auto& d : r.diags.items) std::cerr << d.message << "\n";
+    CHECK(r.ok);
+    return slurp(tp.dir / "_build" / "artifacts" / "out.wav");
+  };
+  std::string gentle = bytes("Exponential 2.0");
+  std::string sharp = bytes("Exponential 8.0");
+  std::string flat = bytes("Exponential 0.0");
+  std::string linear = bytes("Linear");
+  CHECK(!gentle.empty());
+  CHECK(gentle != sharp);       // the curvature is audible
+  CHECK(flat == linear);        // ...and zero curvature is no curve at all
+  CHECK(linear != gentle);
+}
+
+TEST(build_adsr_curvature_is_bounded) {
+  // Past the bound the exponential is a step in all but name, and far
+  // past it e^-k overflows into NaN samples: the build says so instead.
+  TempDir tp;
+  tp.write("x.synth", R"(
+open Core open Core.Osc open Core.Fx open Core.Arrange open Core.Render
+let _ = sine 220.0 *. adsr ~decay_curve:(Exponential 1000.0) ~attack:0s
+                           ~decay:200ms ~sustain:0.25 ~release:60ms
+                           ~hold:200ms
+  |> sample ~from:0s ~to:300ms |> render ~name:"out" ~rate:8000.0 ;;
+)");
+  tp.write("build.json", projectManifest("bounded", {"x.synth"}));
+  BuildResult r = buildProject(tp.dir.string());
+  CHECK(!r.ok);
+  bool said = false;
+  for (auto& d : r.diags.items)
+    if (d.message.find("curvature") != std::string::npos) said = true;
+  CHECK(said);
+}
+
 TEST(build_mix_matches_hand_rolled) {
   const char* derived = R"(
 open Core open Core.Osc open Core.Fx open Core.Arrange open Core.Render open Core.Time
@@ -4194,8 +4305,8 @@ TEST(build_controls_declared_with_defaults) {
   TempDir tp;
   tp.write("a.synth", R"(
 open Core open Core.Arrange open Core.Render open Core.Sig
-let gain : Scalar = Control.knob ~name:"gain" ~min:0.0 ~max:1.0 ~default:0.25 ;;
-let cutoff : Scalar = Control.slider ~name:"cutoff" ~min:100.0 ~max:2000.0 ~default:700.0 ;;
+let gain : Scalar = (Control.knob ~name:"gain" ~min:0.0 ~max:1.0 ~default:0.25).value ;;
+let cutoff : Scalar = (Control.slider ~name:"cutoff" ~min:100.0 ~max:2000.0 ~default:700.0).value ;;
 let _ = render "demo" 8000.0 (sample (constant gain) 0s 100ms) ;;
 )");
   tp.write("build.json", projectManifest("controls", {"a.synth"}));
@@ -4232,7 +4343,7 @@ TEST(build_controls_overrides_apply_and_clamp) {
   TempDir tp;
   tp.write("a.synth", R"(
 open Core open Core.Arrange open Core.Render open Core.Sig
-let gain : Scalar = Control.slider ~name:"gain" ~min:0.0 ~max:1.0 ~default:0.25 ;;
+let gain : Scalar = (Control.slider ~name:"gain" ~min:0.0 ~max:1.0 ~default:0.25).value ;;
 let _ = render "demo" 8000.0 (sample (constant gain) 0s 100ms) ;;
 )");
   tp.write("build.json", projectManifest("overrides", {"a.synth"}));
@@ -4274,8 +4385,8 @@ TEST(build_controls_redeclaration_rules) {
   TempDir tp;
   tp.write("ok.synth", R"(
 open Core open Core.Arrange open Core.Render open Core.Sig
-let a : Scalar = Control.slider ~name:"amt" ~min:0.0 ~max:1.0 ~default:0.5 ;;
-let b : Scalar = Control.slider ~name:"amt" ~min:0.0 ~max:1.0 ~default:0.5 ;;
+let a : Scalar = (Control.slider ~name:"amt" ~min:0.0 ~max:1.0 ~default:0.5).value ;;
+let b : Scalar = (Control.slider ~name:"amt" ~min:0.0 ~max:1.0 ~default:0.5).value ;;
 let _ = render "ok" 8000.0 (sample (constant (a +. b)) 0s 10ms) ;;
 )");
   tp.write("build.json", projectManifest("redecl", {"ok.synth"}));
@@ -4285,8 +4396,8 @@ let _ = render "ok" 8000.0 (sample (constant (a +. b)) 0s 10ms) ;;
 
   tp.write("ok.synth", R"(
 open Core open Core.Arrange open Core.Render open Core.Sig
-let a : Scalar = Control.slider ~name:"amt" ~min:0.0 ~max:1.0 ~default:0.5 ;;
-let b : Scalar = Control.knob ~name:"amt" ~min:0.0 ~max:2.0 ~default:0.5 ;;
+let a : Scalar = (Control.slider ~name:"amt" ~min:0.0 ~max:1.0 ~default:0.5).value ;;
+let b : Scalar = (Control.knob ~name:"amt" ~min:0.0 ~max:2.0 ~default:0.5).value ;;
 let _ = render "ok" 8000.0 (sample (constant (a +. b)) 0s 10ms) ;;
 )");
   BuildResult r2 = buildProject(tp.dir.string());
@@ -4299,7 +4410,7 @@ TEST(build_controls_validation_errors) {
   // max must exceed min.
   tp.write("a.synth", R"(
 open Core open Core.Arrange open Core.Render open Core.Sig
-let x : Scalar = Control.slider ~name:"x" ~min:1.0 ~max:1.0 ~default:1.0 ;;
+let x : Scalar = (Control.slider ~name:"x" ~min:1.0 ~max:1.0 ~default:1.0).value ;;
 let _ = render "t" 8000.0 (sample (constant x) 0s 10ms) ;;
 )");
   tp.write("build.json", projectManifest("badrange", {"a.synth"}));
@@ -4309,11 +4420,236 @@ let _ = render "t" 8000.0 (sample (constant x) 0s 10ms) ;;
   // The default must sit inside [min, max].
   tp.write("a.synth", R"(
 open Core open Core.Arrange open Core.Render open Core.Sig
-let x : Scalar = Control.slider ~name:"x" ~min:0.0 ~max:1.0 ~default:2.0 ;;
+let x : Scalar = (Control.slider ~name:"x" ~min:0.0 ~max:1.0 ~default:2.0).value ;;
 let _ = render "t" 8000.0 (sample (constant x) 0s 10ms) ;;
 )");
   BuildResult r2 = buildProject(tp.dir.string());
   CHECK(!r2.ok);
+}
+
+TEST(build_int_slider_toggle_and_choice_declare_their_kinds) {
+  TempDir tp;
+  tp.write("a.synth", R"(
+open Core open Core.Osc open Core.Arrange open Core.Render open Core.Sig
+let voices : Int = (Control.int_slider ~name:"voices" ~min:1 ~max:8 ~default:3).value ;;
+let bright : Bool = (Control.toggle ~name:"bright" ~default:true).value ;;
+let shape : String = (Control.choice ~name:"shape" ~options:["soft"; "hard"]).value ;;
+let depth : Scalar Option = (Control.opt ~name:"depth" ~value:0.2).value ;;
+let quiet : Scalar Option = (Control.opt ~on:false ~name:"quiet" ~value:0.9).value ;;
+let level : Scalar =
+  Math.to_scalar voices *. (if bright then 1.0 else 0.5)
+    *. Option.value ~default:0.0 ~o:depth
+    +. Option.value ~default:0.0 ~o:quiet ;;
+let _ = render (Str.cat "demo-" shape) 8000.0
+               (sample (constant level) 0s 100ms) ;;
+)");
+  tp.write("build.json", projectManifest("kinds", {"a.synth"}));
+  BuildResult r = buildProject(tp.dir.string());
+  for (auto& d : r.diags.items) std::cerr << d.message << "\n";
+  CHECK(r.ok);
+  CHECK(r.controls.size() == 5);
+  CHECK(r.controls[0].name == "voices");
+  CHECK(r.controls[0].kind == "int_slider");
+  CHECK_NEAR(r.controls[0].min, 1.0, 1e-12);
+  CHECK_NEAR(r.controls[0].max, 8.0, 1e-12);
+  CHECK_NEAR(r.controls[0].value, 3.0, 1e-12);
+  // A tickbox is 0/1, whichever way it was declared...
+  CHECK(r.controls[1].name == "bright");
+  CHECK(r.controls[1].kind == "toggle");
+  CHECK_NEAR(r.controls[1].min, 0.0, 1e-12);
+  CHECK_NEAR(r.controls[1].max, 1.0, 1e-12);
+  CHECK_NEAR(r.controls[1].value, 1.0, 1e-12);
+  // ...a choice is an index over its options, which reach the metadata
+  // as labels...
+  CHECK(r.controls[2].name == "shape");
+  CHECK(r.controls[2].kind == "choice");
+  CHECK(r.controls[2].options == std::vector<std::string>({"soft", "hard"}));
+  CHECK_NEAR(r.controls[2].max, 1.0, 1e-12);
+  CHECK_NEAR(r.controls[2].value, 0.0, 1e-12);  // the first option
+  // ...and `opt` is a plain tickbox in front of a value: ticked unless
+  // ~on says otherwise.
+  CHECK(r.controls[3].name == "depth");
+  CHECK(r.controls[3].kind == "toggle");
+  CHECK_NEAR(r.controls[3].defaultValue, 1.0, 1e-12);
+  CHECK(r.controls[4].name == "quiet");
+  CHECK_NEAR(r.controls[4].defaultValue, 0.0, 1e-12);
+
+  // The defaults drive the render: 3 voices, bright, depth on (0.2),
+  // quiet off.
+  WavData w = readWav((tp.dir / "_build" / "artifacts" / "demo-soft.wav")
+                          .string());
+  CHECK_NEAR(w.channels[0][100], 0.6, 0.01);
+  std::string meta = slurp(tp.dir / "_build" / "metadata.json");
+  CHECK(meta.find("\"kind\": \"int_slider\"") != std::string::npos);
+  CHECK(meta.find("\"options\": [\"soft\", \"hard\"]") != std::string::npos);
+}
+
+TEST(build_discrete_control_overrides_snap_to_whole_steps) {
+  TempDir tp;
+  tp.write("a.synth", R"(
+open Core open Core.Osc open Core.Arrange open Core.Render open Core.Sig
+let voices : Int = (Control.int_slider ~name:"voices" ~min:1 ~max:8 ~default:3).value ;;
+let bright : Bool = (Control.toggle ~name:"bright" ~default:true).value ;;
+let pick : Scalar = (Control.choice ~name:"pick" ~options:[0.1; 0.2; 0.3]).value ;;
+let depth : Scalar Option = (Control.opt ~name:"depth" ~value:0.5).value ;;
+let level : Scalar =
+  Math.to_scalar voices *. (if bright then 1.0 else 0.5) *. pick
+    +. Option.value ~default:0.0 ~o:depth ;;
+let _ = render "demo" 8000.0 (sample (constant level) 0s 100ms) ;;
+)");
+  tp.write("build.json", projectManifest("snap", {"a.synth"}));
+  fs::create_directories(tp.dir / "_build");
+  {
+    // A fractional step, an out-of-range index, a tickbox off: every
+    // discrete value lands on a whole step inside its range.
+    std::ofstream out(tp.dir / "_build" / "controls.json");
+    out << R"({"overrides": {"voices": 6.4, "bright": 0, "pick": 9,
+                             "depth": 0}})";
+  }
+  BuildResult r = buildProject(tp.dir.string());
+  for (auto& d : r.diags.items) std::cerr << d.message << "\n";
+  CHECK(r.ok);
+  CHECK_NEAR(r.controls[0].value, 6.0, 1e-12);
+  CHECK_NEAR(r.controls[1].value, 0.0, 1e-12);
+  CHECK_NEAR(r.controls[2].value, 2.0, 1e-12);  // clamped to the last option
+  CHECK_NEAR(r.controls[3].value, 0.0, 1e-12);  // unticked: None
+  // 6 voices, not bright (0.5), third option (0.3), depth off: 0.9.
+  WavData w = readWav((tp.dir / "_build" / "artifacts" / "demo.wav").string());
+  CHECK_NEAR(w.channels[0][100], 0.9, 0.01);
+}
+
+TEST(build_choice_validation_and_redeclaration) {
+  TempDir tp;
+  // Nothing to choose from is a build error.
+  tp.write("a.synth", R"(
+open Core open Core.Arrange open Core.Render open Core.Sig
+let x : Scalar = (Control.choice ~name:"x" ~options:[]).value ;;
+let _ = render "t" 8000.0 (sample (constant x) 0s 10ms) ;;
+)");
+  tp.write("build.json", projectManifest("choice", {"a.synth"}));
+  BuildResult r = buildProject(tp.dir.string());
+  CHECK(!r.ok);
+
+  // The same options twice is the same control...
+  tp.write("a.synth", R"(
+open Core open Core.Arrange open Core.Render open Core.Sig
+let x : Scalar = (Control.choice ~name:"x" ~options:[0.25; 0.75]).value ;;
+let y : Scalar = (Control.choice ~name:"x" ~options:[0.25; 0.75]).value ;;
+let _ = render "t" 8000.0 (sample (constant (x +. y)) 0s 10ms) ;;
+)");
+  BuildResult r2 = buildProject(tp.dir.string());
+  for (auto& d : r2.diags.items) std::cerr << d.message << "\n";
+  CHECK(r2.ok);
+  CHECK(r2.controls.size() == 1);
+
+  // ...but the same name over different options is not.
+  tp.write("a.synth", R"(
+open Core open Core.Arrange open Core.Render open Core.Sig
+let x : Scalar = (Control.choice ~name:"x" ~options:[0.25; 0.75]).value ;;
+let y : Scalar = (Control.choice ~name:"x" ~options:[0.25; 0.5; 0.75]).value ;;
+let _ = render "t" 8000.0 (sample (constant (x +. y)) 0s 10ms) ;;
+)");
+  BuildResult r3 = buildProject(tp.dir.string());
+  CHECK(!r3.ok);
+
+  // A toggle and an int slider are different kinds under one name, too.
+  tp.write("a.synth", R"(
+open Core open Core.Arrange open Core.Render open Core.Sig
+let a : Bool = (Control.toggle ~name:"n" ~default:true).value ;;
+let b : Int = (Control.int_slider ~name:"n" ~min:0 ~max:4 ~default:1).value ;;
+let _ = render "t" 8000.0
+               (sample (constant (Math.to_scalar b
+                                    *. (if a then 1.0 else 0.0))) 0s 10ms) ;;
+)");
+  BuildResult r4 = buildProject(tp.dir.string());
+  CHECK(!r4.ok);
+}
+
+TEST(build_choice_picks_any_value_the_options_hold) {
+  // The options are ordinary values of any type - the control only ever
+  // carries their index - so a choice can pick a whole voice.
+  TempDir tp;
+  tp.write("a.synth", R"(
+open Core open Core.Osc open Core.Arrange open Core.Render
+let voice : Scalar Signal =
+  (Control.choice ~name:"voice" ~options:[sine 220.0; saw 220.0]).value ;;
+let _ = render "demo" 8000.0 (sample voice 0s 100ms) ;;
+)");
+  tp.write("build.json", projectManifest("pick", {"a.synth"}));
+  fs::create_directories(tp.dir / "_build");
+  {
+    std::ofstream out(tp.dir / "_build" / "controls.json");
+    out << R"({"overrides": {"voice": 1}})";
+  }
+  BuildResult r = buildProject(tp.dir.string());
+  for (auto& d : r.diags.items) std::cerr << d.message << "\n";
+  CHECK(r.ok);
+  // Values with no reading are labelled by position.
+  CHECK(r.controls[0].options == std::vector<std::string>({"1", "2"}));
+  WavData picked = readWav((tp.dir / "_build" / "artifacts" / "demo.wav")
+                               .string());
+  tp.write("b.synth", R"(
+open Core open Core.Osc open Core.Arrange open Core.Render
+let _ = render "demo" 8000.0 (sample (saw 220.0) 0s 100ms) ;;
+)");
+  TempDir plain;
+  plain.write("b.synth", slurp(tp.dir / "b.synth"));
+  plain.write("build.json", projectManifest("plain", {"b.synth"}));
+  BuildResult rp = buildProject(plain.dir.string());
+  CHECK(rp.ok);
+  WavData saw = readWav((plain.dir / "_build" / "artifacts" / "demo.wav")
+                            .string());
+  CHECK(picked.channels[0].size() == saw.channels[0].size());
+  for (size_t i = 0; i < saw.channels[0].size(); i++)
+    CHECK_NEAR(picked.channels[0][i], saw.channels[0][i], 1e-12);
+}
+
+TEST(build_choice_labels_variant_options_by_constructor) {
+  // A choice over a variant - the shape an enum-like option list takes -
+  // labels its tickboxes with the constructor names, the one readable
+  // thing about a value whose structure does not cross the boundary.
+  TempDir tp;
+  tp.write("a.synth", R"(
+open Core open Core.Osc open Core.Fx open Core.Arrange open Core.Render
+let curve : Fx.Curve =
+  (Control.choice ~name:"decay curve"
+                  ~options:[Fx.Linear; Fx.Exponential 5.0]).value ;;
+let _ = sine 220.0 *. adsr ~decay_curve:curve ~attack:3ms ~decay:110ms
+                           ~sustain:0.5 ~release:60ms ~hold:200ms
+  |> sample ~from:0s ~to:400ms |> render ~name:"demo" ~rate:8000.0 ;;
+)");
+  tp.write("build.json", projectManifest("labels", {"a.synth"}));
+  BuildResult r = buildProject(tp.dir.string());
+  for (auto& d : r.diags.items) std::cerr << d.message << "\n";
+  CHECK(r.ok);
+  CHECK(r.controls.size() == 1);
+  // A plain payload rides along in the label, so two curvatures of the
+  // same constructor stay tellable apart.
+  CHECK(r.controls[0].options ==
+        std::vector<std::string>({"Linear", "Exponential 5"}));
+
+  // Picking the second option reaches the envelope: the same file with
+  // Exponential written in renders byte for byte.
+  {
+    std::ofstream out(tp.dir / "_build" / "controls.json");
+    out << R"({"overrides": {"decay curve": 1}})";
+  }
+  BuildResult r2 = buildProject(tp.dir.string());
+  CHECK(r2.ok);
+  std::string picked = slurp(tp.dir / "_build" / "artifacts" / "demo.wav");
+  TempDir lit;
+  lit.write("a.synth", R"(
+open Core open Core.Osc open Core.Fx open Core.Arrange open Core.Render
+let _ = sine 220.0 *. adsr ~decay_curve:(Exponential 5.0) ~attack:3ms
+                           ~decay:110ms ~sustain:0.5 ~release:60ms
+                           ~hold:200ms
+  |> sample ~from:0s ~to:400ms |> render ~name:"demo" ~rate:8000.0 ;;
+)");
+  lit.write("build.json", projectManifest("labels", {"a.synth"}));
+  BuildResult r3 = buildProject(lit.dir.string());
+  CHECK(r3.ok);
+  CHECK(picked == slurp(lit.dir / "_build" / "artifacts" / "demo.wav"));
+  CHECK(!picked.empty());
 }
 
 TEST(build_multi_slider_declares_lanes_with_sum_bounds) {
@@ -4321,10 +4657,10 @@ TEST(build_multi_slider_declares_lanes_with_sum_bounds) {
   tp.write("a.synth", R"(
 open Core open Core.Control open Core.Arrange open Core.Render open Core.Sig
 let env : Scalar list =
-  Control.multi_slider ~name:"env" ~sum_min:0.0 ~sum_max:1.0
+  (Control.multi_slider ~name:"env" ~sum_min:0.0 ~sum_max:1.0
     ~lanes:[ { name = "attack";  min = 0.0; max = 0.5; default = 0.05 };
              { name = "decay";   min = 0.0; max = 0.5; default = 0.15 };
-             { name = "sustain"; min = 0.0; max = 1.0; default = 0.60 } ] ;;
+             { name = "sustain"; min = 0.0; max = 1.0; default = 0.60 } ]).value ;;
 let a : Scalar = List.nth ~xs:env ~i:0 ~default:0.0 ;;
 let _ = render "demo" 8000.0 (sample (constant a) 0s 100ms) ;;
 )");
@@ -4360,9 +4696,9 @@ TEST(build_multi_slider_projects_overrides_into_the_sum_bounds) {
   tp.write("a.synth", R"(
 open Core open Core.Control open Core.Arrange open Core.Render open Core.Sig
 let env : Scalar list =
-  Control.multi_slider ~name:"env" ~sum_min:0.5 ~sum_max:1.0
+  (Control.multi_slider ~name:"env" ~sum_min:0.5 ~sum_max:1.0
     ~lanes:[ { name = "a"; min = 0.0; max = 1.0; default = 0.25 };
-             { name = "b"; min = 0.0; max = 1.0; default = 0.25 } ] ;;
+             { name = "b"; min = 0.0; max = 1.0; default = 0.25 } ]).value ;;
 let a : Scalar = List.nth ~xs:env ~i:0 ~default:0.0 ;;
 let _ = render "demo" 8000.0 (sample (constant a) 0s 100ms) ;;
 )");
@@ -4435,11 +4771,11 @@ TEST(build_multi_slider_redeclaration_rules) {
   tp.write("a.synth", R"(
 open Core open Core.Control open Core.Arrange open Core.Render open Core.Sig
 let g : Scalar list =
-  Control.multi_slider ~name:"env" ~sum_min:0.0 ~sum_max:1.0
-    ~lanes:[ { name = "a"; min = 0.0; max = 1.0; default = 0.3 } ] ;;
+  (Control.multi_slider ~name:"env" ~sum_min:0.0 ~sum_max:1.0
+    ~lanes:[ { name = "a"; min = 0.0; max = 1.0; default = 0.3 } ]).value ;;
 let h : Scalar list =
-  Control.multi_slider ~name:"env" ~sum_min:0.0 ~sum_max:1.0
-    ~lanes:[ { name = "a"; min = 0.0; max = 1.0; default = 0.3 } ] ;;
+  (Control.multi_slider ~name:"env" ~sum_min:0.0 ~sum_max:1.0
+    ~lanes:[ { name = "a"; min = 0.0; max = 1.0; default = 0.3 } ]).value ;;
 let x : Scalar = List.nth ~xs:g ~i:0 ~default:0.0
                  +. List.nth ~xs:h ~i:0 ~default:0.0 ;;
 let _ = render "t" 8000.0 (sample (constant x) 0s 10ms) ;;
@@ -4454,11 +4790,11 @@ let _ = render "t" 8000.0 (sample (constant x) 0s 10ms) ;;
   tp.write("a.synth", R"(
 open Core open Core.Control open Core.Arrange open Core.Render open Core.Sig
 let g : Scalar list =
-  Control.multi_slider ~name:"env" ~sum_min:0.0 ~sum_max:1.0
-    ~lanes:[ { name = "a"; min = 0.0; max = 1.0; default = 0.3 } ] ;;
+  (Control.multi_slider ~name:"env" ~sum_min:0.0 ~sum_max:1.0
+    ~lanes:[ { name = "a"; min = 0.0; max = 1.0; default = 0.3 } ]).value ;;
 let h : Scalar list =
-  Control.multi_slider ~name:"env" ~sum_min:0.0 ~sum_max:2.0
-    ~lanes:[ { name = "a"; min = 0.0; max = 1.0; default = 0.3 } ] ;;
+  (Control.multi_slider ~name:"env" ~sum_min:0.0 ~sum_max:2.0
+    ~lanes:[ { name = "a"; min = 0.0; max = 1.0; default = 0.3 } ]).value ;;
 let x : Scalar = List.nth ~xs:g ~i:0 ~default:0.0
                  +. List.nth ~xs:h ~i:0 ~default:0.0 ;;
 let _ = render "t" 8000.0 (sample (constant x) 0s 10ms) ;;
@@ -4468,10 +4804,10 @@ let _ = render "t" 8000.0 (sample (constant x) 0s 10ms) ;;
   // So is a plain control colliding with a lane's name.
   tp.write("a.synth", R"(
 open Core open Core.Control open Core.Arrange open Core.Render open Core.Sig
-let s : Scalar = Control.slider ~name:"env.a" ~min:0.0 ~max:1.0 ~default:0.5 ;;
+let s : Scalar = (Control.slider ~name:"env.a" ~min:0.0 ~max:1.0 ~default:0.5).value ;;
 let g : Scalar list =
-  Control.multi_slider ~name:"env" ~sum_min:0.0 ~sum_max:1.0
-    ~lanes:[ { name = "a"; min = 0.0; max = 1.0; default = 0.3 } ] ;;
+  (Control.multi_slider ~name:"env" ~sum_min:0.0 ~sum_max:1.0
+    ~lanes:[ { name = "a"; min = 0.0; max = 1.0; default = 0.3 } ]).value ;;
 let x : Scalar = s +. List.nth ~xs:g ~i:0 ~default:0.0 ;;
 let _ = render "t" 8000.0 (sample (constant x) 0s 10ms) ;;
 )");
@@ -4482,13 +4818,14 @@ TEST(build_panel_groups_controls_and_targets) {
   TempDir tp;
   tp.write("a.synth", R"(
 open Core open Core.Control open Core.Arrange open Core.Render open Core.Sig
-let gain : Scalar = Control.knob ~name:"gain" ~min:0.0 ~max:1.0 ~default:0.5 ;;
-let env : Scalar list =
+let gain : Scalar Control =
+  Control.knob ~name:"gain" ~min:0.0 ~max:1.0 ~default:0.5 ;;
+let env : Scalar list Control =
   Control.multi_slider ~name:"env" ~sum_min:0.0 ~sum_max:1.0
     ~lanes:[ { name = "attack"; min = 0.0; max = 0.5; default = 0.05 };
              { name = "decay";  min = 0.0; max = 0.5; default = 0.15 } ] ;;
-let _ = render "demo" 8000.0 (sample (constant gain) 0s 50ms) ;;
-let _ = Ui.panel ~name:"Voice" ~controls:["gain"; "env"] ~targets:["demo"] ;;
+let _ = render "demo" 8000.0 (sample (constant gain.value) 0s 50ms) ;;
+let _ = Ui.panel ~name:"Voice" ~controls:[gain.ui; env.ui] ~targets:["demo"] ;;
 )");
   tp.write("build.json", projectManifest("panel", {"a.synth"}));
   BuildResult r = buildProject(tp.dir.string());
@@ -4500,14 +4837,16 @@ let _ = Ui.panel ~name:"Voice" ~controls:["gain"; "env"] ~targets:["demo"] ;;
   // than expanding to its lanes, so the dev app can draw the group as
   // one linked widget.
   CHECK(r.panels[0].controls.size() == 2);
-  CHECK(r.panels[0].controls[0] == "gain");
-  CHECK(r.panels[0].controls[1] == "env");
+  CHECK(r.panels[0].controls[0].name == "gain");
+  CHECK(r.panels[0].controls[1].name == "env");
   CHECK(r.panels[0].targets.size() == 1);
   CHECK(r.panels[0].targets[0] == "demo");
   std::string meta = slurp(tp.dir / "_build" / "metadata.json");
   CHECK(meta.find("\"panels\"") != std::string::npos);
   CHECK(meta.find("\"name\": \"Voice\"") != std::string::npos);
-  CHECK(meta.find("\"controls\": [\"gain\", \"env\"]") != std::string::npos);
+  CHECK(meta.find("\"controls\": [{\"name\": \"gain\", \"depth\": 0}, "
+                  "{\"name\": \"env\", \"depth\": 0}]") !=
+        std::string::npos);
   CHECK(meta.find("\"targets\": [\"demo\"]") != std::string::npos);
 }
 
@@ -4533,17 +4872,18 @@ TEST(build_panel_member_names_must_resolve) {
   auto withPanel = [](const std::string& panel) {
     return "\nopen Core open Core.Control open Core.Arrange open Core.Render "
            "open Core.Sig\n"
-           "let gain : Scalar = Control.knob ~name:\"gain\" ~min:0.0 "
+           "let gain : Scalar Control = Control.knob ~name:\"gain\" ~min:0.0 "
            "~max:1.0 ~default:0.5 ;;\n"
-           "let _ = render \"demo\" 8000.0 (sample (constant gain) 0s 50ms) "
-           ";;\n" +
+           "let _ = render \"demo\" 8000.0 (sample (constant gain.value) 0s "
+           "50ms) ;;\n" +
            panel + "\n";
   };
   // A panel naming a control that does not exist fails the build...
   {
     TempDir tp;
     tp.write("a.synth",
-             withPanel("let _ = Ui.panel ~name:\"P\" ~controls:[\"nope\"] "
+             withPanel("let _ = Ui.panel ~name:\"P\" "
+                       "~controls:[Widget \"nope\"] "
                        "~targets:[\"demo\"] ;;"));
     tp.write("build.json", projectManifest("bad", {"a.synth"}));
     BuildResult r = buildProject(tp.dir.string());
@@ -4559,7 +4899,7 @@ TEST(build_panel_member_names_must_resolve) {
   {
     TempDir tp;
     tp.write("a.synth",
-             withPanel("let _ = Ui.panel ~name:\"P\" ~controls:[\"gain\"] "
+             withPanel("let _ = Ui.panel ~name:\"P\" ~controls:[gain.ui] "
                        "~targets:[\"nope\"] ;;"));
     tp.write("build.json", projectManifest("bad", {"a.synth"}));
     BuildResult r = buildProject(tp.dir.string());
@@ -4570,15 +4910,32 @@ TEST(build_panel_member_names_must_resolve) {
         named = true;
     CHECK(named);
   }
-  // A panel may name a member declared later in the file: resolution
-  // waits until evaluation has seen every declaration.
+  // A panel names controllers, which are ordinary values: the
+  // declaration has to come first, like every other reference.
   {
     TempDir tp;
     tp.write("a.synth", R"(
 open Core open Core.Control open Core.Arrange open Core.Render open Core.Sig
-let _ = Ui.panel ~name:"P" ~controls:["gain"] ~targets:["demo"] ;;
-let gain : Scalar = Control.knob ~name:"gain" ~min:0.0 ~max:1.0 ~default:0.5 ;;
-let _ = render "demo" 8000.0 (sample (constant gain) 0s 50ms) ;;
+let _ = Ui.panel ~name:"P" ~controls:[gain.ui] ~targets:["demo"] ;;
+let gain : Scalar Control =
+  Control.knob ~name:"gain" ~min:0.0 ~max:1.0 ~default:0.5 ;;
+let _ = render "demo" 8000.0 (sample (constant gain.value) 0s 50ms) ;;
+)");
+    tp.write("build.json", projectManifest("fwd", {"a.synth"}));
+    BuildResult r = buildProject(tp.dir.string());
+    CHECK(!r.ok);
+  }
+  // A target, on the other hand, is still named: it may be declared
+  // anywhere in the file, since resolution waits for evaluation to see
+  // every render call.
+  {
+    TempDir tp;
+    tp.write("a.synth", R"(
+open Core open Core.Control open Core.Arrange open Core.Render open Core.Sig
+let gain : Scalar Control =
+  Control.knob ~name:"gain" ~min:0.0 ~max:1.0 ~default:0.5 ;;
+let _ = Ui.panel ~name:"P" ~controls:[gain.ui] ~targets:["demo"] ;;
+let _ = render "demo" 8000.0 (sample (constant gain.value) 0s 50ms) ;;
 )");
     tp.write("build.json", projectManifest("fwd", {"a.synth"}));
     BuildResult r = buildProject(tp.dir.string());
@@ -4587,36 +4944,127 @@ let _ = render "demo" 8000.0 (sample (constant gain) 0s 50ms) ;;
   }
 }
 
+TEST(build_component_declares_its_parts_only_when_taken) {
+  // The point of controllers: a component declares a dependent control
+  // inside the branch that needs it, and the panel that names the
+  // component follows - no control, no member, no bookkeeping.
+  auto source = R"(
+open Core open Core.Osc open Core.Arrange open Core.Render open Core.Sig
+type Shape = | Flat | Curved ;;
+let curve ~label:String : Scalar Control =
+  let shape : Shape Control =
+    Control.choice ~name:label ~options:[Flat; Curved] in
+  match shape.value with
+  | Flat -> Control.nest ~value:0.0 ~parts:[shape.ui]
+  | Curved ->
+      let rate : Scalar Control =
+        Control.slider ~name:(Str.cat label " rate") ~min:0.5 ~max:12.0
+                       ~default:5.0 in
+      Control.nest ~value:rate.value ~parts:[shape.ui; rate.ui] ;;
+let gain : Scalar Control =
+  Control.knob ~name:"gain" ~min:0.0 ~max:1.0 ~default:0.5 ;;
+let bend : Scalar Control = curve ~label:"bend" ;;
+let _ = render "demo" 8000.0
+               (sample (constant (gain.value +. bend.value *. 0.01)) 0s
+                       50ms) ;;
+let _ = Ui.panel ~name:"P" ~controls:[gain.ui; bend.ui] ~targets:["demo"] ;;
+)";
+  TempDir tp;
+  tp.write("a.synth", source);
+  tp.write("build.json", projectManifest("component", {"a.synth"}));
+  BuildResult flat = buildProject(tp.dir.string());
+  for (auto& d : flat.diags.items) std::cerr << d.message << "\n";
+  CHECK(flat.ok);
+  // The untaken arm's slider was never declared, and the component's one
+  // part draws exactly where the plain control would.
+  CHECK(flat.controls.size() == 2);
+  CHECK(flat.controls[0].name == "gain");  // declaration order
+  CHECK(flat.controls[1].name == "bend");
+  CHECK(flat.panels[0].controls.size() == 2);
+  CHECK(flat.panels[0].controls[1].name == "bend");
+  CHECK(flat.panels[0].controls[1].depth == 0);
+
+  // Pick the other option and the part appears - as a control, and as a
+  // panel member indented under the head it belongs to.
+  {
+    std::ofstream out(tp.dir / "_build" / "controls.json");
+    out << R"({"overrides": {"bend": 1}})";
+  }
+  BuildResult curved = buildProject(tp.dir.string());
+  for (auto& d : curved.diags.items) std::cerr << d.message << "\n";
+  CHECK(curved.ok);
+  CHECK(curved.controls.size() == 3);
+  CHECK(curved.panels[0].controls.size() == 3);
+  CHECK(curved.panels[0].controls[1].name == "bend");
+  CHECK(curved.panels[0].controls[1].depth == 0);
+  CHECK(curved.panels[0].controls[2].name == "bend rate");
+  CHECK(curved.panels[0].controls[2].depth == 1);
+}
+
+TEST(build_panel_takes_controllers_not_names) {
+  // A panel member is a controller a declaration handed back, so a
+  // mistyped name is a type error long before it is a missing control -
+  // and a hand-built Widget still has to resolve.
+  auto build = [](const std::string& panel) {
+    TempDir tp;
+    tp.write("a.synth",
+             "\nopen Core open Core.Arrange open Core.Render open Core.Sig\n"
+             "let gain : Scalar Control = Control.knob ~name:\"gain\" "
+             "~min:0.0 ~max:1.0 ~default:0.5 ;;\n"
+             "let _ = render \"demo\" 8000.0 (sample (constant gain.value) "
+             "0s 50ms) ;;\n" +
+                 panel + "\n");
+    tp.write("build.json", projectManifest("ctlpanel", {"a.synth"}));
+    return buildProject(tp.dir.string());
+  };
+  CHECK(build("let _ = Ui.panel ~name:\"P\" ~controls:[gain.ui] "
+              "~targets:[\"demo\"] ;;").ok);
+  // A String where a Controller belongs does not type-check.
+  CHECK(!build("let _ = Ui.panel ~name:\"P\" ~controls:[\"gain\"] "
+               "~targets:[\"demo\"] ;;").ok);
+  // Nesting reaches the metadata as depth on the members.
+  BuildResult nested =
+      build("let _ = Ui.panel ~name:\"P\" "
+            "~controls:[Nested_controller [gain.ui]] ~targets:[\"demo\"] ;;");
+  CHECK(nested.ok);
+  CHECK(nested.panels[0].controls.size() == 1);
+  CHECK(nested.panels[0].controls[0].depth == 0);  // a lone part is the head
+}
+
 TEST(build_panel_redeclaration_and_duplicate_members_are_errors) {
   auto build = [](const std::string& body) {
     TempDir tp;
     tp.write("a.synth",
              "\nopen Core open Core.Control open Core.Arrange "
              "open Core.Render open Core.Sig\n"
-             "let gain : Scalar = Control.knob ~name:\"gain\" ~min:0.0 "
-             "~max:1.0 ~default:0.5 ;;\n"
-             "let _ = render \"demo\" 8000.0 (sample (constant gain) 0s "
-             "50ms) ;;\n" +
+             "let gain : Scalar Control = Control.knob ~name:\"gain\" "
+             "~min:0.0 ~max:1.0 ~default:0.5 ;;\n"
+             "let _ = render \"demo\" 8000.0 (sample (constant gain.value) "
+             "0s 50ms) ;;\n" +
                  body + "\n");
     tp.write("build.json", projectManifest("dup", {"a.synth"}));
     return buildProject(tp.dir.string()).ok;
   };
   // Unlike a control, a panel yields no value, so there is no reason to
   // declare one twice - even identically.
-  CHECK(!build("let _ = Ui.panel ~name:\"P\" ~controls:[\"gain\"] "
+  CHECK(!build("let _ = Ui.panel ~name:\"P\" ~controls:[gain.ui] "
                "~targets:[\"demo\"] ;;\n"
-               "let _ = Ui.panel ~name:\"P\" ~controls:[\"gain\"] "
+               "let _ = Ui.panel ~name:\"P\" ~controls:[gain.ui] "
                "~targets:[\"demo\"] ;;"));
   // Listing a member twice would draw the same widget twice.
-  CHECK(!build("let _ = Ui.panel ~name:\"P\" ~controls:[\"gain\"; \"gain\"] "
+  // A member repeated anywhere in the tree, nesting included.
+  CHECK(!build("let _ = Ui.panel ~name:\"P\" ~controls:[gain.ui; gain.ui] "
                "~targets:[\"demo\"] ;;"));
-  CHECK(!build("let _ = Ui.panel ~name:\"P\" ~controls:[\"gain\"] "
+  CHECK(!build("let _ = Ui.panel ~name:\"P\" "
+               "~controls:[Nested_controller [gain.ui; gain.ui]] "
+               "~targets:[\"demo\"] ;;"));
+  CHECK(!build("let _ = Ui.panel ~name:\"P\" ~controls:[gain.ui] "
                "~targets:[\"demo\"; \"demo\"] ;;"));
   // An empty panel name has no identity to key window state on.
-  CHECK(!build("let _ = Ui.panel ~name:\"\" ~controls:[\"gain\"] "
+  CHECK(!build("let _ = Ui.panel ~name:\"\" ~controls:[gain.ui] "
                "~targets:[\"demo\"] ;;"));
   // The control-only and target-only shapes are both legitimate.
-  CHECK(build("let _ = Ui.panel ~name:\"P\" ~controls:[\"gain\"] "
+  CHECK(build("let _ = Ui.panel ~name:\"P\" ~controls:[gain.ui] "
               "~targets:[] ;;"));
   CHECK(build("let _ = Ui.panel ~name:\"P\" ~controls:[] "
               "~targets:[\"demo\"] ;;"));
@@ -4629,12 +5077,12 @@ TEST(build_panel_edits_do_not_invalidate_the_audio_cache) {
   auto source = [](const std::string& panelName) {
     return "\nopen Core open Core.Control open Core.Arrange "
            "open Core.Render open Core.Sig\n"
-           "let gain : Scalar = Control.slider ~name:\"gain\" ~min:0.0 "
-           "~max:1.0 ~default:0.25 ;;\n"
-           "let _ = render \"demo\" 8000.0 (sample (constant gain) 0s "
+           "let gain : Scalar Control = Control.slider ~name:\"gain\" "
+           "~min:0.0 ~max:1.0 ~default:0.25 ;;\n"
+           "let _ = render \"demo\" 8000.0 (sample (constant gain.value) 0s "
            "50ms) ;;\n"
            "let _ = Ui.panel ~name:\"" +
-           panelName + "\" ~controls:[\"gain\"] ~targets:[\"demo\"] ;;\n";
+           panelName + "\" ~controls:[gain.ui] ~targets:[\"demo\"] ;;\n";
   };
   tp.write("a.synth", source("Before"));
   tp.write("build.json", projectManifest("panelcache", {"a.synth"}));
@@ -4656,7 +5104,7 @@ TEST(build_controls_cache_invalidates_on_override_change) {
   TempDir tp;
   tp.write("a.synth", R"(
 open Core open Core.Arrange open Core.Render open Core.Sig open Core.Osc
-let gain : Scalar = Control.slider ~name:"gain" ~min:0.0 ~max:1.0 ~default:0.25 ;;
+let gain : Scalar = (Control.slider ~name:"gain" ~min:0.0 ~max:1.0 ~default:0.25).value ;;
 let _ = render "uses_control" 8000.0 (sample (constant gain) 0s 50ms) ;;
 )");
   tp.write("build.json", projectManifest("ctlcache", {"a.synth"}));
@@ -4692,7 +5140,7 @@ TEST(build_watch_rebuilds_on_override_change) {
   TempDir tp;
   tp.write("a.synth", R"(
 open Core open Core.Arrange open Core.Render open Core.Sig
-let gain : Scalar = Control.slider ~name:"gain" ~min:0.0 ~max:1.0 ~default:0.25 ;;
+let gain : Scalar = (Control.slider ~name:"gain" ~min:0.0 ~max:1.0 ~default:0.25).value ;;
 let _ = render "t" 8000.0 (sample (constant gain) 0s 10ms) ;;
 )");
   tp.write("build.json", projectManifest("ctlwatch", {"a.synth"}));

@@ -788,7 +788,9 @@ class Interp {
     if (it != panelsByName_.end())
       throw EvalError("panel '" + p.name + "' redeclared (also declared in " +
                       it->second.file + ")");
-    // Duplicates inside one panel would draw the same widget twice.
+    // Duplicates inside one panel would draw the same widget twice -
+    // nesting included, since a composite's parts are members like any
+    // other.
     auto dupe = [&p](const std::vector<std::string>& names, const char* what) {
       std::set<std::string> seen;
       for (auto& n : names)
@@ -796,10 +798,20 @@ class Interp {
           throw EvalError("panel '" + p.name + "': " + what + " '" + n +
                           "' listed twice");
     };
-    dupe(p.controls, "control");
+    std::vector<std::string> controlNames;
+    for (auto& m : p.controls) controlNames.push_back(m.name);
+    dupe(controlNames, "control");
     dupe(p.targets, "target");
     panelsByName_.emplace(p.name, p);
     if (panels_) panels_->push_back(std::move(p));
+  }
+
+  // The kinds whose value is a whole number: an integer slider's step, a
+  // tickbox's 0/1, a choice's option index.
+  static bool discreteControl(ControlDecl::Kind kind) {
+    return kind == ControlDecl::Kind::IntSlider ||
+           kind == ControlDecl::Kind::Toggle ||
+           kind == ControlDecl::Kind::Choice;
   }
 
   // Register a live control declaration and resolve its value for this
@@ -808,10 +820,30 @@ class Interp {
   // back), and a conflicting redeclaration is a build error.
   double registerControl(ControlDecl c) {
     if (c.name.empty()) throw EvalError("control: empty control name");
-    if (!(c.max > c.min))
+    // A choice's range is its option list: one tickbox per option, the
+    // value their index. It is the one kind whose range may be a single
+    // point (a one-option list is a legal, if inert, declaration).
+    if (c.kind == ControlDecl::Kind::Choice) {
+      if (c.options.empty())
+        throw EvalError("choice '" + c.name + "': the option list is empty");
+      c.min = 0;
+      c.max = (double)(c.options.size() - 1);
+    } else if (c.kind == ControlDecl::Kind::Toggle) {
+      c.min = 0;
+      c.max = 1;
+    } else if (!(c.max > c.min)) {
       throw EvalError("control '" + c.name + "': max (" +
                       std::to_string(c.max) + ") must exceed min (" +
                       std::to_string(c.min) + ")");
+    }
+    // The discrete kinds are whole numbers end to end: bounds, default,
+    // and every value a rebuild resolves.
+    if (discreteControl(c.kind) &&
+        (c.min != std::round(c.min) || c.max != std::round(c.max) ||
+         c.def != std::round(c.def)))
+      throw EvalError("control '" + c.name +
+                      "': this control's range and default must be whole "
+                      "numbers");
     if (c.def < c.min || c.def > c.max)
       throw EvalError("control '" + c.name + "': default " +
                       std::to_string(c.def) + " is outside [" +
@@ -821,17 +853,21 @@ class Interp {
     if (it != controlsByName_.end()) {
       const ControlDecl& prev = it->second;
       if (prev.kind != c.kind || prev.min != c.min || prev.max != c.max ||
-          prev.def != c.def)
+          prev.def != c.def || prev.options != c.options)
         throw EvalError("control '" + c.name +
-                        "' redeclared with a different kind or range (also "
-                        "declared in " + prev.file + ")");
+                        "' redeclared with a different kind, range or "
+                        "options (also declared in " + prev.file + ")");
       return prev.value;
     }
     c.value = c.def;
     if (overrides_) {
       auto ov = overrides_->find(c.name);
-      if (ov != overrides_->end())
+      if (ov != overrides_->end()) {
         c.value = std::clamp(ov->second, c.min, c.max);
+        // A hand-edited (or stale) overrides file can hold anything; a
+        // discrete control still only ever evaluates to a whole number.
+        if (discreteControl(c.kind)) c.value = std::round(c.value);
+      }
     }
     double v = c.value;
     controlsByName_.emplace(c.name, c);

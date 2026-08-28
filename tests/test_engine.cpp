@@ -36,7 +36,7 @@ TEST(engine_exp_decay) {
 
 TEST(engine_adsr_shape) {
   // attack 1s to 1.0, decay 1s to 0.5, hold until 4s, release 1s.
-  SigPtr s = makeAdsr(1.0, 1.0, 0.5, 1.0, 4.0);
+  SigPtr s = makeAdsr(1.0, 1.0, 0.5, 1.0, 4.0, 0.0, 0.0);
   Rendered r = renderWindow(s, 0.0, 6.0, 2.0);
   CHECK_NEAR(r.interleaved[1], 0.5, 1e-9);   // t=0.5: mid-attack
   CHECK_NEAR(r.interleaved[2], 1.0, 1e-9);   // t=1: attack peak
@@ -44,6 +44,21 @@ TEST(engine_adsr_shape) {
   CHECK_NEAR(r.interleaved[6], 0.5, 1e-9);   // t=3: sustaining
   CHECK_NEAR(r.interleaved[9], 0.25, 1e-9);  // t=4.5: mid-release
   CHECK_NEAR(r.interleaved[11], 0.0, 1e-9);  // t=5.5: done
+}
+
+TEST(engine_adsr_exponential_curves) {
+  // Same envelope, exponential decay and release: the endpoints are the
+  // linear ones, the middle of each segment sits below the straight line.
+  SigPtr s = makeAdsr(1.0, 1.0, 0.5, 1.0, 4.0, 5.0, 5.0);
+  Rendered r = renderWindow(s, 0.0, 6.0, 2.0);
+  CHECK_NEAR(r.interleaved[2], 1.0, 1e-9);   // t=1: attack peak, unchanged
+  CHECK_NEAR(r.interleaved[4], 0.5, 1e-9);   // t=2: decay lands on sustain
+  CHECK_NEAR(r.interleaved[6], 0.5, 1e-9);   // t=3: sustaining
+  CHECK_NEAR(r.interleaved[11], 0.0, 1e-9);  // t=5.5: done
+  CHECK(r.interleaved[3] < 0.75 - 1e-3);     // t=1.5: mid-decay, below the ramp
+  CHECK(r.interleaved[3] > 0.5);             // ...and still above sustain
+  CHECK(r.interleaved[9] < 0.25 - 1e-3);     // t=4.5: mid-release, below it too
+  CHECK(r.interleaved[9] > 0.0);
 }
 
 TEST(engine_place_windowing) {
@@ -605,7 +620,7 @@ TEST(engine_parallel_matches_sequential) {
   // sequential result.
   double rate = 8000.0;
   auto voice = [&](double freq) {
-    SigPtr env = makeAdsr(0.01, 0.1, 0.4, 0.2, 0.3);
+    SigPtr env = makeAdsr(0.01, 0.1, 0.4, 0.2, 0.3, 0.0, 0.0);
     SigPtr osc = makeBinOp(SigBinOp::Mul, makeOsc(OscKind::Saw, freq), env);
     return makeFilter(FilterKind::Lowpass, 1200.0, osc);
   };
@@ -654,7 +669,7 @@ TEST(engine_silence_shortcircuit_is_exact) {
   // small), and an envelope past its release must gate a voice to exact
   // silence even inside the window.
   double rate = 8000.0;
-  SigPtr env = makeAdsr(0.01, 0.05, 0.5, 0.1, 0.1);  // ends at 0.2s
+  SigPtr env = makeAdsr(0.01, 0.05, 0.5, 0.1, 0.1, 0.0, 0.0);  // ends at 0.2s
   SigPtr voice = makeBinOp(SigBinOp::Mul, makeOsc(OscKind::Saw, 440.0), env);
   SigPtr placed = makePlace(voice, 0.0, 1.0, 1.0);  // window [1s, 2s)
   Rendered r = renderWindow(makeMix({placed}), 0.0, 3.0, rate);
@@ -750,7 +765,7 @@ TEST(engine_sample_cache_slices_at_odd_offsets) {
   SigPtr voice = makeFilter(
       FilterKind::Lowpass, 900.0,
       makeBinOp(SigBinOp::Mul, makeOsc(OscKind::Saw, 220.0),
-                makeAdsr(0.01, 0.05, 0.5, 0.1, 0.15)));
+                makeAdsr(0.01, 0.05, 0.5, 0.1, 0.15, 0.0, 0.0)));
   Rendered ref = renderWindow(voice, 0.0, 0.25, rate);
   double ats[3] = {0.013, 0.531, 1.2071};
   std::vector<SigPtr> placed;
@@ -769,7 +784,7 @@ TEST(engine_sample_cache_slices_at_odd_offsets) {
 static SigPtr crossBuildVoice(double cutoff) {
   return makeFilter(FilterKind::Lowpass, cutoff,
                     makeBinOp(SigBinOp::Mul, makeOsc(OscKind::Saw, 220.0),
-                              makeAdsr(0.01, 0.05, 0.5, 0.1, 0.15)));
+                              makeAdsr(0.01, 0.05, 0.5, 0.1, 0.15, 0.0, 0.0)));
 }
 
 TEST(engine_content_hash_structural) {

@@ -175,8 +175,16 @@ void writeMetadata(const std::string& path, const BuildResult& r,
       << ", \"max\": " << formatDouble(c.max)
       << ", \"default\": " << formatDouble(c.defaultValue)
       << ", \"value\": " << formatDouble(c.value);
-    // Group fields only for grouped lanes, so metadata for a project
-    // without any multi_slider stays byte-identical.
+    // The option labels only for a choice, and the group fields only for
+    // grouped lanes, so metadata for a project that uses neither stays
+    // byte-identical.
+    if (!c.options.empty()) {
+      j << ", \"options\": [";
+      for (size_t k = 0; k < c.options.size(); k++)
+        j << "\"" << jsonEscape(c.options[k]) << "\""
+          << (k + 1 < c.options.size() ? ", " : "");
+      j << "]";
+    }
     if (!c.group.empty())
       j << ", \"group\": \"" << jsonEscape(c.group)
         << "\", \"group_index\": " << c.groupIndex
@@ -198,8 +206,15 @@ void writeMetadata(const std::string& path, const BuildResult& r,
     j << ",\n  \"panels\": [\n";
     for (size_t i = 0; i < r.panels.size(); i++) {
       const PanelInfo& p = r.panels[i];
-      j << "    {\"name\": \"" << jsonEscape(p.name) << "\", \"controls\": ";
-      nameList(p.controls);
+      j << "    {\"name\": \"" << jsonEscape(p.name) << "\", \"controls\": [";
+      // A member carries the depth it had in the panel's controller
+      // tree, which is what lets the dev app draw a composite's parts as
+      // one indented block.
+      for (size_t k = 0; k < p.controls.size(); k++)
+        j << "{\"name\": \"" << jsonEscape(p.controls[k].name)
+          << "\", \"depth\": " << p.controls[k].depth << "}"
+          << (k + 1 < p.controls.size() ? ", " : "");
+      j << "]";
       j << ", \"targets\": ";
       nameList(p.targets);
       j << "}" << (i + 1 < r.panels.size() ? "," : "") << "\n";
@@ -613,11 +628,15 @@ static BuildResult buildUnitImpl(const std::string& projectDir,
     ci.name = c.name;
     ci.kind = c.kind == ControlDecl::Kind::Knob          ? "knob"
               : c.kind == ControlDecl::Kind::MultiSlider ? "multi_slider"
+              : c.kind == ControlDecl::Kind::IntSlider   ? "int_slider"
+              : c.kind == ControlDecl::Kind::Toggle      ? "toggle"
+              : c.kind == ControlDecl::Kind::Choice      ? "choice"
                                                          : "slider";
     ci.min = c.min;
     ci.max = c.max;
     ci.defaultValue = c.def;
     ci.value = c.value;
+    ci.options = c.options;
     ci.group = c.group;
     ci.groupIndex = c.groupIndex;
     ci.sumMin = c.sumMin;
@@ -627,7 +646,8 @@ static BuildResult buildUnitImpl(const std::string& projectDir,
   for (auto& p : panels) {
     PanelInfo pi;
     pi.name = p.name;
-    pi.controls = p.controls;
+    for (auto& m : p.controls)
+      pi.controls.push_back(PanelInfo::Member{m.name, m.depth});
     pi.targets = p.targets;
     r.panels.push_back(std::move(pi));
   }
@@ -688,11 +708,11 @@ static BuildResult buildUnitImpl(const std::string& projectDir,
       if (!c.group.empty()) groupNames.insert(c.group);
     }
     for (auto& p : panels) {
-      for (auto& n : p.controls)
-        if (!controlNames.count(n) && !groupNames.count(n)) {
+      for (auto& m : p.controls)
+        if (!controlNames.count(m.name) && !groupNames.count(m.name)) {
           r.diags.error(p.file, p.span,
                         "panel '" + p.name + "': no control or control group "
-                        "named '" + n + "'");
+                        "named '" + m.name + "'");
           evalOk = false;
         }
       for (auto& n : p.targets)

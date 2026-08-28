@@ -126,18 +126,26 @@ struct RenderTarget {
   const TopDef* declDef = nullptr;
 };
 
-// A live control collected from a `slider`/`knob` call (Core.Control): a
-// named build-time Scalar parameter with a range and a default, which the
-// dev app can override between rebuilds through the unit's controls.json.
-// `value` is what this build used: the active override, clamped to
-// [min, max], or `def`.
+// A live control collected from a Core.Control call: a named build-time
+// parameter with a range and a default, which the dev app can override
+// between rebuilds through the unit's controls.json. `value` is what
+// this build used: the active override, clamped to [min, max] - and
+// snapped to a whole number for the discrete kinds - or `def`.
+//
+// Every kind is one number here, whatever the language sees: IntSlider
+// carries whole bounds, Toggle 0 or 1, and Choice the selected option's
+// index over [0, options.size() - 1].
 struct ControlDecl {
-  enum class Kind { Slider, Knob, MultiSlider };
+  enum class Kind { Slider, Knob, MultiSlider, IntSlider, Toggle, Choice };
   Kind kind = Kind::Slider;
   std::string name;  // stable identifier, unique project-wide
   double min = 0, max = 1;
   double def = 0;
   double value = 0;
+  // Choice only: one label per option, in declaration order - what the
+  // dev app writes beside each tickbox. The option values themselves
+  // never leave the declaring external.
+  std::vector<std::string> options;
   // MultiSlider lanes only: the group this lane belongs to, its position
   // in the group, and the bounds the whole group's sum satisfies. `name`
   // is "<group>.<lane>", so lanes are ordinary controls downstream.
@@ -166,14 +174,21 @@ struct ControlGroupDecl {
 
 // A `panel` call (Core.Ui): a named grouping that pairs some of the
 // project's controls with some of its render targets so the dev app can
-// show them together. Members are recorded as written - a control member
-// may name a whole multi_slider group rather than its lanes - and are
-// resolved against the declared controls and targets once evaluation has
-// seen all of them. Presentation only: a panel never reaches the engine
-// and never affects a rendered artifact.
+// show them together. A control member is a name plus the nesting depth
+// it had in the `Controller` tree the call passed - depth 0 for a
+// control the panel names directly, deeper for the parts of a composite,
+// which the app draws as one indented block. Members are recorded as
+// written - one may name a whole multi_slider group rather than its
+// lanes - and are resolved against the declared controls and targets
+// once evaluation has seen all of them. Presentation only: a panel never
+// reaches the engine and never affects a rendered artifact.
 struct PanelDecl {
+  struct Member {
+    std::string name;
+    int depth = 0;
+  };
   std::string name;  // panel identifier and title, unique project-wide
-  std::vector<std::string> controls;
+  std::vector<Member> controls;
   std::vector<std::string> targets;
   std::string file;  // source file that declared it (for diagnostics)
   Span span{};

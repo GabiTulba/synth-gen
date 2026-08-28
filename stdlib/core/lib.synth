@@ -35,6 +35,24 @@ type 'a Signal ;;
 type 'a Sample = { sig : 'a Signal; from : Timestamp; to : Timestamp } ;;
 type 'a Option = | None | Some of 'a ;;
 
+(* `Controller` is what a panel draws: one declared widget, or several
+   shown as one component. A component's first part is its head and
+   draws where the panel put it; the rest belong to that head and draw
+   one level in, so a component of one part looks exactly like the plain
+   control it wraps. Nesting is grouping and layout only - every leaf is
+   an ordinary control, overridden and rebuilt exactly like a control a
+   panel names on its own.
+
+   `'a Control` is what declaring a live control yields: the value this
+   build resolved, and the controller that shows it. Panels take
+   controllers rather than names, so a control's name is written once,
+   where it is declared - and a control that a branch never declared is
+   a controller no panel can name. *)
+
+type Controller = | Widget of String
+                  | Nested_controller of Controller list ;;
+type 'a Control = { value : 'a; ui : Controller } ;;
+
 (* --- Math & Bool (math.cpp) ------------------------------------------ *)
 
 module Math = struct
@@ -377,9 +395,43 @@ module Fx = struct
   let reverb ~decay:Timestamp ~damping:Scalar ~mix:Scalar
       ~input:'a Signal : 'a Signal = external "effects.cpp" ;;
   let exp_decay ~rate:Scalar : Scalar Signal = external "effects.cpp" ;;
-  let adsr ~attack:Timestamp ~decay:Timestamp ~sustain:Scalar
-      ~release:Timestamp ~hold:Timestamp : Scalar Signal =
-    external "effects.cpp" ;;
+  (* The shape of a falling envelope segment. `Linear` descends at a
+     constant rate; `Exponential k` follows e^-kx, dropping fast and
+     tailing off - the fall of a plucked string, and what an analog
+     envelope does - with k saying how sharply: around 3 is a gentle
+     bend, 5 the analog-ish default, 10 and up nearly a spike. A
+     negative k is the mirror (slow first, then steep), 0 is `Linear`
+     again, and |k| is bounded by 64. Every curve lands on its endpoint
+     exactly: a decay on `sustain`, a release on silence. *)
+  type Curve = | Linear | Exponential of Scalar ;;
+  (* The envelope primitive, with each segment's shape spelled as the
+     bare curvature it stands for (0 = a straight ramp) - the only form
+     the external boundary carries. `adsr` just below is the spelling to
+     reach for: it names the shapes and defaults them. *)
+  let adsr_curved ~attack:Timestamp ~decay:Timestamp ~sustain:Scalar
+      ~release:Timestamp ~hold:Timestamp ~decay_curvature:Scalar
+      ~release_curvature:Scalar : Scalar Signal = external "effects.cpp" ;;
+  (* The envelope: linear attack to 1, decay to `sustain`, sustain until
+     `hold`, then release to 0 - identically zero past
+     max hold (attack +. decay) +. release. The decay and release
+     segments take their shape from the optional curves, Linear unless
+     asked otherwise; the attack is always linear. *)
+  let adsr ?(decay_curve = Linear : Curve)
+      ?(release_curve = Linear : Curve) ~attack:Timestamp
+      ~decay:Timestamp ~sustain:Scalar ~release:Timestamp
+      ~hold:Timestamp : Scalar Signal =
+    let decay_curvature : Scalar =
+      match decay_curve with
+      | Linear -> 0.0
+      | Exponential k -> k in
+    let release_curvature : Scalar =
+      match release_curve with
+      | Linear -> 0.0
+      | Exponential k -> k in
+    adsr_curved ~attack:attack ~decay:decay ~sustain:sustain
+                ~release:release ~hold:hold
+                ~decay_curvature:decay_curvature
+                ~release_curvature:release_curvature ;;
   let lowpass ~cutoff:Scalar ~input:'a Signal : 'a Signal =
     external "effects.cpp" ;;
   let highpass ~cutoff:Scalar ~input:'a Signal : 'a Signal =
@@ -409,14 +461,15 @@ module Fx = struct
   (* The voice-window idiom written once, fixing the convention: the
      window ends where the envelope does, at
      max hold (attack + decay) + release. *)
-  let gated ~attack:Timestamp ~decay:Timestamp ~sustain:Scalar
-      ~release:Timestamp ~hold:Timestamp ~input:Scalar Signal
-      : Scalar Sample =
+  let gated ?decay_curve:Curve ?release_curve:Curve ~attack:Timestamp
+      ~decay:Timestamp ~sustain:Scalar ~release:Timestamp
+      ~hold:Timestamp ~input:Scalar Signal : Scalar Sample =
     let body : Timestamp =
       if hold >. attack +. decay then hold else attack +. decay in
     Arrange.sample
-      ~signal:(input *. adsr ~attack:attack ~decay:decay ~sustain:sustain
-                            ~release:release ~hold:hold)
+      ~signal:(input *. adsr ?decay_curve ?release_curve ~attack:attack
+                             ~decay:decay ~sustain:sustain
+                             ~release:release ~hold:hold)
       ~from:0s ~to:(body +. release) ;;
   (* Feedforward echo stack: input + sum of delay(by*i) * gain^i for
      i in 1..n - the hand-unrolled dry + delay*g + delay^2*g^2 pattern. *)
@@ -447,19 +500,85 @@ module Render = struct
       ~stems:(String, 'a Sample) list : unit = external "render.cpp" ;;
 end ;;
 
-(* --- Live controls (control.cpp) - named build-time Scalar parameters
-   with a range and a default. The dev app shows each one as a slider or
-   knob; moving it writes an override into the unit's controls.json and
-   an attached `synthc watch` rebuilds with the new value (clamped to
-   [min, max]). Control names share one project-wide name space:
-   redeclaring a name with the same kind and range yields the same
-   value; a conflicting redeclaration is a build error. ---------------- *)
+(* --- Live controls (control.cpp) - named build-time parameters with a
+   default: a Scalar on a slider or a knob, an Int on a whole-step
+   slider, a Bool in a tickbox, or one option picked out of a list. The
+   dev app draws each one; moving it writes an override into the unit's
+   controls.json and an attached `synthc watch` rebuilds with the new
+   value (clamped to the declared range, snapped to a step where the
+   control is discrete). Control names share one project-wide name
+   space: redeclaring a name with the same kind, range and options
+   yields the same value; a conflicting redeclaration is a build
+   error. ------------------------------------------------------------- *)
 
 module Control = struct
+  (* --- The value primitives ---------------------------------------------
+     One entry point per widget, each resolving just the value: the
+     override an attached dev tool wrote, or the default. The functions
+     below pair each with the `Controller` a panel shows it with, which
+     is the spelling to reach for. *)
+  let slider_value ~name:String ~min:Scalar ~max:Scalar ~default:Scalar
+      : Scalar = external "control.cpp" ;;
+  let knob_value ~name:String ~min:Scalar ~max:Scalar ~default:Scalar
+      : Scalar = external "control.cpp" ;;
+  let int_slider_value ~name:String ~min:Int ~max:Int ~default:Int : Int =
+    external "control.cpp" ;;
+  let toggle_value ~name:String ~default:Bool : Bool =
+    external "control.cpp" ;;
+  let choice_value ~name:String ~options:'a list : 'a =
+    external "control.cpp" ;;
+  (* --- Combinators over a control ---------------------------------------
+     `map` keeps the widget and changes the value it stands for; `nest`
+     makes several controllers one component with a value of its own.
+     Together they are all a composite needs: declare the parts, decide
+     the value, hand back one control. *)
+  let map ~f:('a -> 'b) ~c:'a Control : 'b Control =
+    { value = f c.value; ui = c.ui } ;;
+  let nest ~value:'a ~parts:Controller list : 'a Control =
+    { value = value; ui = Nested_controller parts } ;;
+  (* --- The controls ------------------------------------------------------
+     A Scalar on a slider or a knob. *)
   let slider ~name:String ~min:Scalar ~max:Scalar ~default:Scalar
-      : Scalar = external "control.cpp" ;;
+      : Scalar Control =
+    { value = slider_value ~name:name ~min:min ~max:max ~default:default;
+      ui = Widget name } ;;
   let knob ~name:String ~min:Scalar ~max:Scalar ~default:Scalar
-      : Scalar = external "control.cpp" ;;
+      : Scalar Control =
+    { value = knob_value ~name:name ~min:min ~max:max ~default:default;
+      ui = Widget name } ;;
+  (* The same slider quantized to whole steps, for the parameters that
+     are counts rather than amounts: voices, divisions, repeats,
+     indices. Bounds, default and value are Ints throughout - an
+     override lands on a step, never between two. *)
+  let int_slider ~name:String ~min:Int ~max:Int ~default:Int : Int Control =
+    { value = int_slider_value ~name:name ~min:min ~max:max
+                               ~default:default;
+      ui = Widget name } ;;
+  (* A tickbox: one Bool, on or off. *)
+  let toggle ~name:String ~default:Bool : Bool Control =
+    { value = toggle_value ~name:name ~default:default;
+      ui = Widget name } ;;
+  (* One option out of a list, drawn as a tickbox per option and
+     evaluating to the option itself - of whatever type the list holds,
+     so the choice can be a name, a frequency, a whole voice. The first
+     option is the default; an empty list has nothing to choose and is a
+     build error. Only the chosen index crosses to the host, so the dev
+     app labels each tickbox with the option's own value where a value
+     reads as text (String, number, Timestamp, Bool) and with its
+     position otherwise. *)
+  let choice ~name:String ~options:'a list : 'a Control =
+    { value = choice_value ~name:name ~options:options; ui = Widget name } ;;
+  (* A value with a tickbox in front of it: ticked it is Some value,
+     unticked None - the control an optional parameter takes directly
+     (`voice ?depth:(Control.opt ~name:"depth" ~value:0.4)`). `?on` is
+     where the tickbox starts, ticked unless said otherwise. The tickbox
+     is an ordinary toggle named `name`, so it overrides and rebuilds
+     like every other control; `value` is an ordinary expression,
+     evaluated whether or not the tick is on. *)
+  let opt ?(on = true : Bool) ~name:String ~value:'a
+      : 'a Option Control =
+    let tick : Bool Control = toggle ~name:name ~default:on in
+    { value = (if tick.value then Some value else None); ui = tick.ui } ;;
   (* One lane of a multi_slider: its own range and default, named within
      the group. *)
   type Lane = { name : String; min : Scalar; max : Scalar;
@@ -478,10 +597,15 @@ module Control = struct
      sliders; the dev app draws the group as linked sliders that stop at
      the sum budget. *)
   let multi_slider ~name:String ~sum_min:Scalar ~sum_max:Scalar
-      ~lanes:Lane list : Scalar list =
-    multi_slider_lanes ~name:name ~sum_min:sum_min ~sum_max:sum_max
-      ~lanes:(List.map ~f:(fun l:Lane -> (l.name, l.min, l.max, l.default))
-                       ~xs:lanes) ;;
+      ~lanes:Lane list : Scalar list Control =
+    { value = multi_slider_lanes ~name:name ~sum_min:sum_min
+                ~sum_max:sum_max
+                ~lanes:(List.map
+                          ~f:(fun l:Lane -> (l.name, l.min, l.max, l.default))
+                          ~xs:lanes);
+      (* The group is one widget as far as a panel is concerned; the app
+         draws its lanes linked. *)
+      ui = Widget name } ;;
 end ;;
 
 (* --- Dev-app panels (ui.cpp) - presentation only. A panel names some
@@ -496,8 +620,35 @@ end ;;
    redeclaring one is a build error. --------------------------------- *)
 
 module Ui = struct
-  let panel ~name:String ~controls:String list ~targets:String list
-      : unit = external "ui.cpp" ;;
+  (* The boundary-crossing form of panel: a variant keeps no structure
+     across it, so `panel` flattens its controller tree to (name, depth)
+     pairs first - the move multi_slider makes with its lane records. *)
+  let panel_members ~name:String ~members:(String, Int) list
+      ~targets:String list : unit = external "ui.cpp" ;;
+  let panel ~name:String ~controls:Controller list ~targets:String list
+      : unit =
+    let rec flatten ~c:Controller ~depth:Int : (String, Int) list =
+      match c with
+      | Widget n -> [(n, depth)]
+      (* A component's first part is its head and keeps the depth the
+         panel gave it; the rest belong to that head and sit one level
+         in. So a component of one part draws exactly like the plain
+         control it wraps. *)
+      | Nested_controller parts ->
+          (match parts with
+           | Nil -> []
+           | Cons (head, rest) ->
+               List.append
+                 ~xs:(flatten ~c:head ~depth:depth)
+                 ~ys:(List.concat
+                        ~xss:(List.map
+                                ~f:(fun part:Controller ->
+                                      flatten ~c:part ~depth:(depth + 1))
+                                ~xs:rest))) in
+    panel_members ~name:name ~targets:targets
+      ~members:(List.concat
+                  ~xss:(List.map ~f:(fun c:Controller -> flatten ~c:c ~depth:0)
+                                 ~xs:controls)) ;;
 end ;;
 
 (* --- Audio import (io.cpp) - build inputs, resolved relative to the
@@ -1346,10 +1497,13 @@ module Dsp = struct
     Osc.am ~carrier:carrier ~modulator:modulator ~depth:depth ;;
   (* envelopes, filters, distortion, time effects *)
   let exp_decay ~rate:Scalar : Scalar Signal = Fx.exp_decay ~rate:rate ;;
-  let adsr ~attack:Timestamp ~decay:Timestamp ~sustain:Scalar
+  (* The curves are Fx.Curve values (Fx.Linear / Fx.Exponential); an
+     unfilled one falls through to Fx.adsr's own default, Linear. *)
+  let adsr ?decay_curve:Fx.Curve ?release_curve:Fx.Curve
+      ~attack:Timestamp ~decay:Timestamp ~sustain:Scalar
       ~release:Timestamp ~hold:Timestamp : Scalar Signal =
-    Fx.adsr ~attack:attack ~decay:decay ~sustain:sustain
-            ~release:release ~hold:hold ;;
+    Fx.adsr ?decay_curve ?release_curve ~attack:attack ~decay:decay
+            ~sustain:sustain ~release:release ~hold:hold ;;
   let lowpass ~cutoff:Scalar ~input:'a Signal : 'a Signal =
     Fx.lowpass ~cutoff:cutoff ~input:input ;;
   let highpass ~cutoff:Scalar ~input:'a Signal : 'a Signal =
@@ -1376,11 +1530,12 @@ module Dsp = struct
   let reverb ~decay:Timestamp ~damping:Scalar ~mix:Scalar
       ~input:'a Signal : 'a Signal =
     Fx.reverb ~decay:decay ~damping:damping ~mix:mix ~input:input ;;
-  let gated ~attack:Timestamp ~decay:Timestamp ~sustain:Scalar
+  let gated ?decay_curve:Fx.Curve ?release_curve:Fx.Curve
+      ~attack:Timestamp ~decay:Timestamp ~sustain:Scalar
       ~release:Timestamp ~hold:Timestamp ~input:Scalar Signal
       : Scalar Sample =
-    Fx.gated ~attack:attack ~decay:decay ~sustain:sustain
-             ~release:release ~hold:hold ~input:input ;;
+    Fx.gated ?decay_curve ?release_curve ~attack:attack ~decay:decay
+             ~sustain:sustain ~release:release ~hold:hold ~input:input ;;
   let echoes ~by:Timestamp ~gain:Scalar ~n:Int ~input:'a Signal
       : 'a Signal = Fx.echoes ~by:by ~gain:gain ~n:n ~input:input ;;
   (* arrangement *)
@@ -1414,17 +1569,17 @@ module Dsp = struct
     Render.render_vis ~name:name ~rate:rate ~sample:sample ;;
   (* live controls *)
   let slider ~name:String ~min:Scalar ~max:Scalar ~default:Scalar
-      : Scalar =
+      : Scalar Control =
     Control.slider ~name:name ~min:min ~max:max ~default:default ;;
   let knob ~name:String ~min:Scalar ~max:Scalar ~default:Scalar
-      : Scalar =
+      : Scalar Control =
     Control.knob ~name:name ~min:min ~max:max ~default:default ;;
   let multi_slider ~name:String ~sum_min:Scalar ~sum_max:Scalar
-      ~lanes:Control.Lane list : Scalar list =
+      ~lanes:Control.Lane list : Scalar list Control =
     Control.multi_slider ~name:name ~sum_min:sum_min ~sum_max:sum_max
                          ~lanes:lanes ;;
   (* dev-app panels *)
-  let panel ~name:String ~controls:String list ~targets:String list
+  let panel ~name:String ~controls:Controller list ~targets:String list
       : unit = Ui.panel ~name:name ~controls:controls ~targets:targets ;;
   (* time conversions *)
   let to_sec ~x:Scalar : Timestamp = Time.to_sec ~x:x ;;

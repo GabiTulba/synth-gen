@@ -471,17 +471,40 @@ struct ExpDecayNode final : SigNode {
   }
 };
 
-// Envelope shape: linear attack to 1 over [0, a); linear decay to `sustain`
-// over [a, a+d); sustain until `hold`; linear release to 0 over
-// [hold, hold+r); 0 afterwards.
+// Curvatures this close to zero are the straight ramp: the exponential
+// form degenerates into 0/0 there, and the two shapes are already
+// indistinguishable well above it.
+constexpr double kEnvCurvatureEps = 1e-6;
+
+// One falling envelope segment: `from` at x = 0 down to `to` at x = 1,
+// as a straight ramp (curvature 0) or along the exponential e^-kx,
+// rescaled so both endpoints are hit exactly whatever k is - a decay
+// lands on `sustain`, a release on silence, curve regardless. Positive k
+// falls fast and tails off; negative k is the mirror.
+inline double envFall(double k, double from, double to, double x) {
+  if (std::fabs(k) < kEnvCurvatureEps) return from + (to - from) * x;
+  const double end = std::exp(-k);
+  return to + (from - to) * (std::exp(-k * x) - end) / (1.0 - end);
+}
+
+// Envelope shape: linear attack to 1 over [0, a); decay to `sustain` over
+// [a, a+d); sustain until `hold`; release to 0 over [hold, hold+r); 0
+// afterwards. The decay and release segments carry a curvature each
+// (0 = straight ramp), independently of each other; the attack is always
+// linear.
 struct AdsrNode final : SigNode {
   double a, d, s, r, hold;
-  AdsrNode(double a_, double d_, double s_, double r_, double h)
-      : a(a_), d(d_), s(s_), r(r_), hold(h) {
+  double decayCurve, releaseCurve;
+  AdsrNode(double a_, double d_, double s_, double r_, double h,
+           double dc, double rc)
+      : a(a_), d(d_), s(s_), r(r_), hold(h), decayCurve(dc),
+        releaseCurve(rc) {
     contentHash = hashDouble(
-        hashDouble(hashDouble(hashDouble(hashDouble(hashTag(8), a), d), s),
-                   r),
-        hold);
+        hashDouble(hashDouble(hashDouble(hashDouble(hashDouble(
+                                  hashDouble(hashTag(8), a), d), s), r),
+                              hold),
+                   decayCurve),
+        releaseCurve);
   }
   int channels() const override { return 1; }
   bool computeBlock(RenderCtx& ctx, NodeState&, int64_t start, int frames,
@@ -495,10 +518,12 @@ struct AdsrNode final : SigNode {
       double v;
       if (t < 0) v = 0;
       else if (t < a) v = a > 0 ? t / a : 1.0;
-      else if (t < a + d) v = d > 0 ? 1.0 - (1.0 - s) * ((t - a) / d) : s;
+      else if (t < a + d)
+        v = d > 0 ? envFall(decayCurve, 1.0, s, (t - a) / d) : s;
       else if (t < releaseStart) v = s;
       else if (t < releaseStart + r)
-        v = r > 0 ? s * (1.0 - (t - releaseStart) / r) : 0.0;
+        v = r > 0 ? envFall(releaseCurve, s, 0.0, (t - releaseStart) / r)
+                  : 0.0;
       else v = 0;
       out[f] = v;
     }
@@ -1775,8 +1800,17 @@ SigPtr makeReverb(double decay, double damping, double mix, SigPtr input) {
   return std::make_shared<ReverbNode>(decay, damping, mix, std::move(input));
 }
 SigPtr makeExpDecay(double rate) { return std::make_shared<ExpDecayNode>(rate); }
-SigPtr makeAdsr(double a, double d, double s, double r, double hold) {
-  return std::make_shared<AdsrNode>(a, d, s, r, hold);
+SigPtr makeAdsr(double a, double d, double s, double r, double hold,
+                double decayCurve, double releaseCurve) {
+  // Past this the exponential is a step in all but name, and far past it
+  // e^-k overflows into NaN samples - better to say so at construction.
+  for (double k : {decayCurve, releaseCurve})
+    if (!(std::fabs(k) <= kMaxEnvCurvature))
+      throw EngineError("adsr: segment curvature " + std::to_string(k) +
+                        " is outside [-" + std::to_string(kMaxEnvCurvature) +
+                        ", " + std::to_string(kMaxEnvCurvature) + "]");
+  return std::make_shared<AdsrNode>(a, d, s, r, hold, decayCurve,
+                                    releaseCurve);
 }
 SigPtr makeConst(double v) { return std::make_shared<ConstNode>(v); }
 SigPtr makeTime() { return std::make_shared<TimeNode>(); }

@@ -36,9 +36,9 @@ idioms that tie them together.
 | `Core.Osc` | Oscillators (`sine`, `saw`, `square`, their bandlimited `saw_bl`/`square_bl` variants, `noise`) and modulation (`fm`, `pm`, `am`) | `stdlib/core/oscillators.cpp` |
 | `Core.Time` | Timestamp construction & sequences: `to_sec`/`to_ms`/`to_min` and their inverses `of_sec`/`of_ms`/`of_min`, the duration quotient (`div`/`rem`), `time_steps`, `jitter` | `stdlib/core/math.cpp`, `lists.cpp` |
 | `Core.Arrange` | Combination and arrangement: `mix_all`, `channels`, `channel`, `sample`, `place`, `place_multi` | `stdlib/core/sampling.cpp` |
-| `Core.Fx` | Envelopes (`exp_decay`, `adsr`), filters (`lowpass`, `highpass`, the modulated `lowpass_mod`/`highpass_mod`, the resonant `resonant`), control (`follow`), distortion (`hard_clip`, `soft_clip`), time effects (`delay`, `feedback`, `resample`, `reverb`), and the voice sugar (`gated`, `echoes`) | `stdlib/core/effects.cpp` + SynthGraph sugar |
+| `Core.Fx` | Envelopes (`exp_decay`, `adsr` and its primitive `adsr_curved`, with the `Curve` shapes `Linear`/`Exponential`), filters (`lowpass`, `highpass`, the modulated `lowpass_mod`/`highpass_mod`, the resonant `resonant`), control (`follow`), distortion (`hard_clip`, `soft_clip`), time effects (`delay`, `feedback`, `resample`, `reverb`), and the voice sugar (`gated`, `echoes`) | `stdlib/core/effects.cpp` + SynthGraph sugar |
 | `Core.Render` | The effects: `render`, `render_vis`, `render_stems`, `render_vis_stems` | `stdlib/core/render.cpp` |
-| `Core.Control` | Live controls: `slider`, `knob`, `multi_slider` — named build-time Scalar parameters the dev app can override between rebuilds | `stdlib/core/control.cpp` |
+| `Core.Control` | Live controls: `slider`, `knob`, `int_slider`, `toggle`, `choice`, `opt`, `multi_slider`, and the component combinators `map`/`nest` — named build-time parameters the dev app can override between rebuilds, each yielding an `'a Control` | `stdlib/core/control.cpp` + SynthGraph sugar |
 | `Core.Io` | Audio import: `load_mono`, `load_multi` | `stdlib/core/io.cpp` |
 | `Core.Sig` | Signal constructors: `constant`, `constant_multi`, `time`, `signal`, `signal_multi`, `select` | `stdlib/core/signals.cpp` |
 | `Core.Groove` | The sequencing tier: `pattern`, `humanized`, `mask`, `euclid` | written in SynthGraph (`lib.synth`) |
@@ -251,14 +251,35 @@ choice if there is one, mine otherwise".
 
 ### `Core.Fx`
 
-- **`adsr attack decay sustain release hold`** — durations are
-  Timestamps, the sustain level a Scalar, and `hold` is the gate
-  length: the envelope sustains until `hold`, then releases.
-  **The segments are linear** (musically relevant: for an exponential
-  decay shape, multiply `exp_decay` in, or shape a product of
-  envelopes) and the envelope is identically zero past
+- **`adsr ?decay_curve ?release_curve attack decay sustain release hold`**
+  — durations are Timestamps, the sustain level a Scalar, and `hold` is
+  the gate length: the envelope sustains until `hold`, then releases.
+  The envelope is identically zero past
   `max hold (attack +. decay) +. release`, which is what gates placed
   tails into structural silence.
+  The two optional curves are `Fx.Curve` values — `Linear` (the
+  default) or `Exponential k` — and shape the falling segments
+  independently:
+
+  ```
+  type Curve = | Linear | Exponential of Scalar
+  ```
+
+  `Exponential k` follows `e^-kx`, dropping fast and tailing off — the
+  fall of a plucked string — with `k` saying how sharply: around 3 is a
+  gentle bend, 5 the analog-ish middle, 10 and up nearly a spike. A
+  negative `k` is the mirror (slow first, then steep), `Exponential 0.0`
+  *is* `Linear`, and `|k|` is bounded by 64 — past that the shape is a
+  step in all but name, and far past it `e^-k` would overflow into NaN
+  samples, so the build stops instead. Every curve is normalized to its
+  segment's endpoints, so a decay still lands exactly on `sustain` and a
+  release exactly on silence whatever `k` is. **The attack is always
+  linear**, and so is everything else unless a curve says otherwise (an
+  existing call's output is unchanged). `adsr_curved` is the primitive
+  underneath, taking the two shapes as the bare curvatures they stand
+  for (`~decay_curvature` / `~release_curvature`, `0.0` for a ramp) —
+  the form the external boundary carries; `adsr` is the spelling to
+  reach for.
 - **`lowpass` / `highpass`** are one-pole 6 dB/oct designs evaluated
   statefully from the epoch; a placed sample's filters warm up from the
   source's own timeline. Fixed cutoffs are cheap tone-shaping.
@@ -304,11 +325,13 @@ choice if there is one, mine otherwise".
 - **`hard_clip`** clamps flat at ±threshold; **`soft_clip`** saturates
   as `threshold·tanh(x/threshold)`. Thresholds must be positive. Drive
   is the ordinary idiom: `soft_clip 0.5 (x *. 3.0)`.
-- **`gated ~attack ~decay ~sustain ~release ~hold ~input`** — the
-  voice-window idiom written once: `input *. adsr ...`, cut to the
-  envelope's own end `[0s, max hold (attack +. decay) +. release)`. This
-  fixes the window convention (see Idioms): `hold` is the sounding
-  length, the window is the envelope's end.
+- **`gated ?decay_curve ?release_curve ~attack ~decay ~sustain ~release
+  ~hold ~input`** — the voice-window idiom written once:
+  `input *. adsr ...`, cut to the envelope's own end
+  `[0s, max hold (attack +. decay) +. release)`. This fixes the window
+  convention (see Idioms): `hold` is the sounding length, the window is
+  the envelope's end. The curves are `adsr`'s, passed straight through
+  (an unfilled one takes `adsr`'s default, `Linear`).
 - **`echoes ~by ~gain ~n ~input`** — the feedforward echo stack
   `input + Σᵢ delay(by·i) · gainⁱ` for `i` in 1..n, replacing the
   hand-unrolled `dry + delay¹·g + delay²·g²` pattern. Feedforward;
@@ -331,6 +354,19 @@ choice if there is one, mine otherwise".
 
 ### `Core.Control`
 
+Every control here yields an **`'a Control`** — a record pairing the value
+this build resolved with the controller a panel shows it with:
+
+```
+type Controller = | Widget of String | Nested_controller of Controller list
+type 'a Control = { value : 'a; ui : Controller }
+```
+
+`c.value` is what the graph uses; `c.ui` is what `Ui.panel` takes. The name
+is written once, where the control is declared — a panel never spells it
+again — and a control some branch never declared leaves no controller for a
+panel to name.
+
 - **`slider name min max default`** / **`knob name min max default`**
   declare a named live control and evaluate to its value for this
   build: the override an attached `synth-dev` wrote into the unit's
@@ -339,11 +375,89 @@ choice if there is one, mine otherwise".
   the default must lie in range, and names share one project-wide name
   space — redeclaring a name with the same kind and range yields the
   same value, a conflicting redeclaration is a build error. The value
-  is an ordinary Scalar, fixed for the whole build, so evaluation stays
+  is an ordinary value, fixed for the whole build, so evaluation stays
   pure and renders stay deterministic; moving a slider is a rebuild,
   not a modulation (use signals for that). The worked example is
   `examples/controls`; the file format and daemon wiring live in
   [`build-system.md`](build-system.md).
+
+- **`int_slider name min max default`** is the same control quantized
+  to whole steps: bounds, default and value are `Int`s, so it is the
+  one to reach for when the parameter is a count rather than an amount
+  (voices, divisions, repeats, an index into a list). An override lands
+  on a step — a fractional value in a hand-edited `controls.json`
+  rounds — and the bounds follow the slider rules (`max` must exceed
+  `min`, the default must be in range).
+
+- **`toggle name default`** is a tickbox: one `Bool`, on or off.
+
+- **`choice name options`** picks one option out of a list, drawn as a
+  tickbox per option, and evaluates to **the option itself** — of
+  whatever type the list holds, so a choice can be a name, a frequency,
+  or a whole voice:
+
+  ```
+  let voice : Scalar Signal =
+    Control.choice ~name:"voice" ~options:[sine 220.0; saw 220.0] ;;
+  let shape : String =
+    Control.choice ~name:"shape" ~options:["soft"; "hard"] ;;
+  ```
+
+  The first option is the default, and an empty list has nothing to
+  choose: that is a build error. Only the selected *index* crosses to
+  the host, so the dev app labels each tickbox with the option's own
+  value where a value reads as text (`String`, number, `Timestamp`,
+  `Bool`) and with its position (`1`, `2`, …) otherwise. Redeclaring a
+  choice under the same name requires the same options.
+
+- **`opt ?on name value`** puts a tickbox in front of a value: ticked it
+  is `Some value`, unticked `None` — the control an optional parameter
+  takes directly.
+
+  ```
+  let voice : Scalar Signal =
+    pluck ?depth:(Control.opt ~name:"depth" ~value:0.4) 220.0 ;;
+  ```
+
+  `?on` is where the tickbox starts, ticked unless said otherwise
+  (`~on:false`). It is `toggle` plus a payload — the tickbox is an
+  ordinary control named `name` — and `value` is an ordinary
+  expression, evaluated whether or not the tick is on.
+
+- **`map ~f ~c`** keeps a control's widget and changes the value it
+  stands for; **`nest ~value ~parts`** makes several controllers one
+  component with a value of its own. A component's first part is its
+  head and draws where the panel put it, the rest one level in — so a
+  component of one part looks exactly like the plain control it wraps.
+  Together they are all a composite needs:
+
+  ```
+  type CurveShape = | Linear | Exponential ;;
+
+  (* The rate slider is declared inside the arm that needs it, so while
+     Linear is picked it does not exist at all. *)
+  let curve_control ~label:String : Fx.Curve Control =
+    let shape : CurveShape Control =
+      Control.choice ~name:label ~options:[Linear; Exponential] in
+    match shape.value with
+    | Linear -> Control.nest ~value:Fx.Linear ~parts:[shape.ui]
+    | Exponential ->
+        let rate : Scalar Control =
+          Control.slider ~name:(Str.cat label " rate") ~min:0.5 ~max:12.0
+                         ~default:5.0 in
+        Control.nest ~value:(Fx.Exponential rate.value)
+                     ~parts:[shape.ui; rate.ui] ;;
+  ```
+
+  The panel that names `(curve_control ~label:"decay").ui` gets the row
+  and — only while Exponential is picked — the slider indented under it.
+  `examples/controls` runs this.
+
+- **The `*_value` primitives** (`slider_value`, `knob_value`,
+  `int_slider_value`, `toggle_value`, `choice_value`, and
+  `multi_slider_lanes`) are the externals underneath, resolving the value
+  alone. The functions above are their spelling; reach for a primitive
+  only to build a control vocabulary of your own.
 
 - **`multi_slider name sum_min sum_max lanes`** declares several
   controls whose values are *related*: each lane is a named Scalar in
@@ -385,7 +499,7 @@ choice if there is one, mine otherwise".
 ### `Core.Ui`
 
 - **`panel name controls targets`** groups part of a project for the dev
-  app: the named controls and the named render targets are shown
+  app: the given controllers and the named render targets are shown
   together in one window — the knobs on top, each target's waveform
   beneath. A panel is the dev app's whole unit of UI, so this is how you
   decide what is shown beside what, and it is what keeps a project with
@@ -395,19 +509,24 @@ choice if there is one, mine otherwise".
 
   ```
   open Core.Ui
-  let _ = Ui.panel ~name:"Drums" ~controls:["drums.gain"; "drums.decay"]
+  let _ = Ui.panel ~name:"Drums" ~controls:[gain.ui; decay.ui]
                    ~targets:["song-drums"] ;;
   ```
 
-  Members are given by **name**, not by value: a control declaration
-  evaluates to a bare Scalar and a `render` to unit, so the name is the
-  only handle either one leaves behind. Every name must resolve to a
-  declared control, control group or render target — a typo fails the
-  build rather than silently dropping a widget — and the check runs
-  after evaluation, so a panel may name something declared further down
-  the file. A control member may name a whole `multi_slider` **group**
-  (`"env"`) instead of listing its lanes, and the group is drawn as the
-  usual linked budget bar.
+  Controls are given as **controllers** — the `ui` half of what a
+  declaration handed back — so a member cannot be misspelled and a
+  control the build never declared cannot be named. A controller may be
+  a whole component (`Nested_controller`), which draws as its head plus
+  its parts one level in; a `multi_slider` group is a single controller
+  that draws as the usual linked budget bar. Since controllers are
+  values, a panel comes *after* the declarations it shows.
+
+  Targets are still given by **name**: a `render` evaluates to unit, so
+  its name is the only handle it leaves behind. Every target name must
+  resolve — a typo fails the build rather than silently dropping a
+  waveform — and that check runs after evaluation, so a panel may name a
+  target declared further down the file. A hand-built `Widget "name"`
+  member is checked the same way.
 
   Panel names have their own project-wide name space, separate from
   controls and targets. Unlike a control, redeclaring a panel is always

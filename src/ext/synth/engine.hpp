@@ -40,8 +40,15 @@ SigPtr makeDelay(double by, SigPtr input);
 // node's state, not in the (acyclic) signal graph.
 SigPtr makeReverb(double decay, double damping, double mix, SigPtr input);
 SigPtr makeExpDecay(double rate);
+// Attack is always a linear ramp; the decay and release segments take
+// their shape from a curvature each, independently. A curvature of 0 is
+// a straight ramp; positive falls fast and tails off (the larger, the
+// sharper - the fall spans e^0..e^-k before it is rescaled onto the
+// segment's endpoints); negative is the mirror, slow first then steep.
+// Both are bounded by kMaxEnvCurvature.
+constexpr double kMaxEnvCurvature = 64.0;
 SigPtr makeAdsr(double attack, double decay, double sustain, double release,
-                double hold);
+                double hold, double decayCurve, double releaseCurve);
 SigPtr makeConst(double value);  // broadcast scalar
 SigPtr makeTime();               // t in seconds (broadcast ramp)
 SigPtr makeFilter(FilterKind kind, double cutoff, SigPtr input);

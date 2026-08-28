@@ -1645,13 +1645,79 @@ let _ = render_stems ~name:"mix" ~rate:8000.0
   CHECK(d2.hasErrors());
 }
 
+TEST(checker_control_int_toggle_choice_and_opt) {
+  TempProject tp;
+  // Each control lands in the type its widget carries: an Int, a Bool,
+  // the option type itself, and an Option of whatever `opt` wraps.
+  std::string f = tp.write("ok.synth", R"(
+open Core open Core.Osc open Core.Fx open Core.Sig
+let voices : Int = (Control.int_slider ~name:"voices" ~min:1 ~max:8 ~default:3).value ;;
+let bright : Bool = (Control.toggle ~name:"bright" ~default:false).value ;;
+let shape : String = (Control.choice ~name:"shape" ~options:["soft"; "hard"]).value ;;
+let cut : Scalar = (Control.choice ~name:"cut" ~options:[400.0; 900.0]).value ;;
+let voice : Scalar Signal =
+  (Control.choice ~name:"voice" ~options:[sine 220.0; saw 220.0]).value ;;
+let depth : Scalar Option = (Control.opt ~name:"depth" ~value:0.4).value ;;
+let dur : Timestamp Option =
+  (Control.opt ~on:false ~name:"tail" ~value:250ms).value ;;
+(* map keeps the widget and changes the value it stands for; nest binds
+   several controllers into one component. *)
+let scaled : Scalar Control =
+  Control.map ~f:(fun hz:Scalar -> hz *. 2.0)
+              ~c:(Control.slider ~name:"tone" ~min:100.0 ~max:900.0
+                                 ~default:400.0) ;;
+let pair : Scalar Control =
+  Control.nest ~value:(cut +. scaled.value)
+               ~parts:[scaled.ui; Widget "cut"] ;;
+let _ = Ui.panel ~name:"P" ~controls:[pair.ui] ~targets:[] ;;
+let used : Scalar Signal =
+  lowpass ~cutoff:cut ~input:voice
+    *. (if bright then 1.0 else 0.5)
+    *. Math.to_scalar voices
+    *. Option.value ~default:0.0 ~o:depth ;;
+)");
+  DiagnosticBag diags;
+  Program prog = checkProject({f}, diags);
+  for (auto& d : diags.items)
+    std::cerr << renderDiagnostic(d, prog.modules.empty() ? std::string{}
+                                       : userMod(prog).parsed.source);
+  CHECK(!diags.hasErrors());
+
+  // A choice is homogeneous: its result is the options' own type.
+  std::string g = tp.write("bad.synth", R"(
+open Core
+let x : Scalar = (Control.choice ~name:"x" ~options:["a"; "b"]).value ;;
+)");
+  DiagnosticBag d2;
+  checkProject({g}, d2);
+  CHECK(d2.hasErrors());
+
+  // An int slider's bounds are Ints, not Scalars.
+  std::string h = tp.write("bad2.synth", R"(
+open Core
+let n : Int = (Control.int_slider ~name:"n" ~min:0.0 ~max:4.0 ~default:1.0).value ;;
+)");
+  DiagnosticBag d3;
+  checkProject({h}, d3);
+  CHECK(d3.hasErrors());
+
+  // `opt` yields an Option, not the bare value.
+  std::string i = tp.write("bad3.synth", R"(
+open Core
+let x : Scalar = (Control.opt ~name:"x" ~value:0.5).value ;;
+)");
+  DiagnosticBag d4;
+  checkProject({i}, d4);
+  CHECK(d4.hasErrors());
+}
+
 TEST(checker_control_slider_and_knob) {
   TempProject tp;
   // The controls are ordinary Scalars usable anywhere a Scalar is.
   std::string f = tp.write("ok.synth", R"(
 open Core open Core.Osc open Core.Fx open Core.Arrange open Core.Render open Core.Io open Core.Time open Core.Sig open Core.Math
-let cutoff : Scalar = Control.slider ~name:"cutoff" ~min:100.0 ~max:2000.0 ~default:700.0 ;;
-let gain : Scalar = Control.knob ~name:"gain" ~min:0.0 ~max:1.0 ~default:0.5 ;;
+let cutoff : Scalar = (Control.slider ~name:"cutoff" ~min:100.0 ~max:2000.0 ~default:700.0).value ;;
+let gain : Scalar = (Control.knob ~name:"gain" ~min:0.0 ~max:1.0 ~default:0.5).value ;;
 let voice : Scalar Signal = lowpass cutoff (saw 110.0) *. gain ;;
 )");
   DiagnosticBag diags;
@@ -1664,7 +1730,7 @@ let voice : Scalar Signal = lowpass cutoff (saw 110.0) *. gain ;;
   // The arguments are typed: a String where a Scalar bound is due fails.
   std::string g = tp.write("bad.synth", R"(
 open Core open Core.Osc open Core.Fx open Core.Arrange open Core.Render open Core.Io open Core.Time open Core.Sig open Core.Math
-let x : Scalar = Control.slider ~name:"x" ~min:"low" ~max:1.0 ~default:0.5 ;;
+let x : Scalar = (Control.slider ~name:"x" ~min:"low" ~max:1.0 ~default:0.5).value ;;
 )");
   DiagnosticBag d2;
   checkProject({g}, d2);
@@ -1673,7 +1739,7 @@ let x : Scalar = Control.slider ~name:"x" ~min:"low" ~max:1.0 ~default:0.5 ;;
   // ...and the result is a Scalar, not a Signal.
   std::string h = tp.write("bad2.synth", R"(
 open Core open Core.Osc open Core.Fx open Core.Arrange open Core.Render open Core.Io open Core.Time open Core.Sig open Core.Math
-let x : Scalar Signal = Control.knob ~name:"x" ~min:0.0 ~max:1.0 ~default:0.5 ;;
+let x : Scalar Signal = (Control.knob ~name:"x" ~min:0.0 ~max:1.0 ~default:0.5).value ;;
 )");
   DiagnosticBag d3;
   checkProject({h}, d3);
@@ -2919,6 +2985,20 @@ TEST(checker_core_is_a_real_library_of_externals) {
   CHECK(core->typeDecls.count("Scale.Prog") == 1);
   CHECK(core->defTypes.count("Math.hash") == 1);
   CHECK(core->defTypes.count("Time.div") == 1);
+  // ...including the envelope curve type and the primitive `Fx.adsr`
+  // wraps...
+  CHECK(core->typeDecls.count("Fx.Curve") == 1);
+  CHECK(core->defTypes.count("Fx.adsr_curved") == 1);
+  // ...the whole live-control roster, each over its value primitive...
+  for (const char* n : {"Control.slider", "Control.knob", "Control.int_slider",
+                        "Control.toggle", "Control.choice", "Control.opt",
+                        "Control.slider_value", "Control.knob_value",
+                        "Control.int_slider_value", "Control.toggle_value",
+                        "Control.choice_value"})
+    CHECK(core->defTypes.count(n) == 1);
+  // ...and the controller types panels are named with.
+  CHECK(core->typeDecls.count("Controller") == 1);
+  CHECK(core->typeDecls.count("Control") == 1);
   // ...nothing lives at the top level...
   for (auto& [name, type] : core->defTypes)
     CHECK(name.find('.') != std::string::npos);
@@ -2928,9 +3008,28 @@ TEST(checker_core_is_a_real_library_of_externals) {
   std::set<std::string> inSynthGraph = {"List",  "Option", "Pitch", "Tempo",
                                         "Scale", "Score",  "Groove", "Mix",
                                         "Dsp"};
-  std::set<std::string> sugar = {"Math.pi",    "Math.min",  "Math.max",
-                                 "Math.clamp", "Math.lerp", "Fx.gated",
-                                 "Fx.echoes",  "Control.multi_slider"};
+  // Core's SynthGraph-written sugar outside the modules above: the
+  // envelope's curve wrapper, the voice-window idioms, and every live
+  // control (each pairs its value primitive with the Controller a panel
+  // shows it with).
+  std::set<std::string> sugar = {"Math.pi",
+                                 "Math.min",
+                                 "Math.max",
+                                 "Math.clamp",
+                                 "Math.lerp",
+                                 "Fx.adsr",
+                                 "Fx.gated",
+                                 "Fx.echoes",
+                                 "Control.map",
+                                 "Control.nest",
+                                 "Control.slider",
+                                 "Control.knob",
+                                 "Control.int_slider",
+                                 "Control.toggle",
+                                 "Control.choice",
+                                 "Control.opt",
+                                 "Control.multi_slider",
+                                 "Ui.panel"};
   std::function<bool(const std::string&, const std::vector<TopDef>&)>
       allExternal = [&](const std::string& prefix,
                         const std::vector<TopDef>& ds) {
@@ -4283,6 +4382,46 @@ let e : Int = let x = Some 5 in f ?x 10 ;;
   for (auto& d : diags.items)
     std::cerr << renderDiagnostic(d, userMod(prog).parsed.source);
   CHECK(!diags.hasErrors());
+}
+
+TEST(checker_adsr_curves_are_optional_and_typed) {
+  TempProject tp;
+  // Core's envelope: both curves optional and Fx.Curve-typed, filled by
+  // either spelling, from Fx or through the Dsp re-export.
+  std::string f = tp.write("e.synth", R"(
+open Core open Core.Fx
+let plain : Scalar Signal =
+  adsr ~attack:5ms ~decay:100ms ~sustain:0.4 ~release:200ms ~hold:1s ;;
+let curved : Scalar Signal =
+  adsr ~decay_curve:(Exponential 5.0) ~release_curve:Fx.Linear ~attack:5ms
+       ~decay:100ms ~sustain:0.4 ~release:200ms ~hold:1s ;;
+let passed : Scalar Signal =
+  Dsp.adsr ?decay_curve:(Some (Exponential 3.0)) ?release_curve:None
+           ~attack:5ms ~decay:100ms ~sustain:0.4 ~release:200ms
+           ~hold:1s ;;
+let window : Scalar Sample =
+  gated ~release_curve:(Exponential 8.0) ~attack:5ms ~decay:100ms
+        ~sustain:0.4 ~release:200ms ~hold:1s
+        ~input:(Osc.sine ~freq:220.0) ;;
+)");
+  DiagnosticBag diags;
+  Program prog = checkProject({f}, diags);
+  for (auto& d : diags.items)
+    std::cerr << renderDiagnostic(d, userMod(prog).parsed.source);
+  CHECK(!diags.hasErrors());
+}
+
+TEST(checker_adsr_curve_argument_must_be_a_curve) {
+  TempProject tp;
+  std::string f = tp.write("e.synth", R"(
+open Core open Core.Fx
+let bad : Scalar Signal =
+  adsr ~decay_curve:true ~attack:5ms ~decay:100ms ~sustain:0.4
+       ~release:200ms ~hold:1s ;;
+)");
+  DiagnosticBag diags;
+  checkProject({f}, diags);
+  CHECK(diags.hasErrors());
 }
 
 TEST(checker_optional_pass_requires_optional_param) {

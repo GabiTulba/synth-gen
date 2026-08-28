@@ -353,6 +353,35 @@ TEST(metadata_parses_controls) {
   CHECK(m.meta.controls[0].groupIndex == -1);
 }
 
+TEST(metadata_parses_discrete_control_kinds) {
+  TempDir tp;
+  tp.write("metadata.json", R"({
+  "project": "p", "status": "ok", "diagnostics": [], "targets": [],
+  "controls": [
+    {"name": "voices", "kind": "int_slider", "min": 1, "max": 8,
+     "default": 3, "value": 6},
+    {"name": "bright", "kind": "toggle", "min": 0, "max": 1, "default": 1,
+     "value": 0},
+    {"name": "shape", "kind": "choice", "min": 0, "max": 1, "default": 0,
+     "value": 1, "options": ["soft", "hard"]}
+  ]
+})");
+  MetadataLoadResult m =
+      loadProjectMetadata((tp.dir / "metadata.json").string());
+  CHECK(m.ok);
+  CHECK(m.meta.controls.size() == 3);
+  CHECK(m.meta.controls[0].kind == "int_slider");
+  CHECK_NEAR(m.meta.controls[0].value, 6.0, 1e-9);
+  CHECK(m.meta.controls[0].options.empty());
+  CHECK(m.meta.controls[1].kind == "toggle");
+  CHECK_NEAR(m.meta.controls[1].value, 0.0, 1e-9);
+  // A choice carries its labels; the value is the selected index.
+  CHECK(m.meta.controls[2].kind == "choice");
+  CHECK(m.meta.controls[2].options.size() == 2);
+  CHECK(m.meta.controls[2].options[1] == "hard");
+  CHECK_NEAR(m.meta.controls[2].value, 1.0, 1e-9);
+}
+
 TEST(metadata_parses_multi_slider_group_lanes) {
   TempDir tp;
   tp.write("metadata.json", R"({
@@ -430,8 +459,9 @@ TEST(control_overrides_roundtrip_through_a_build) {
   TempDir tp;
   tp.write("song.synth", R"(
 open Core open Core.Arrange open Core.Render open Core.Sig
-let gain : Scalar = Control.slider ~name:"gain" ~min:0.0 ~max:1.0 ~default:0.25 ;;
-let _ = render "beep" 8000.0 (sample (constant gain) 0s 100ms) ;;
+let gain : Scalar Control =
+  Control.slider ~name:"gain" ~min:0.0 ~max:1.0 ~default:0.25 ;;
+let _ = render "beep" 8000.0 (sample (constant gain.value) 0s 100ms) ;;
 )");
   tp.write("build.json", projectManifest("ctl-demo", {"song.synth"}));
   BuildResult r = buildProject(tp.dir.string());
@@ -530,13 +560,14 @@ TEST(metadata_loads_panels_from_a_real_build) {
   TempDir tp;
   tp.write("a.synth", R"(
 open Core open Core.Control open Core.Arrange open Core.Render open Core.Sig
-let gain : Scalar = Control.knob ~name:"gain" ~min:0.0 ~max:1.0 ~default:0.5 ;;
-let env : Scalar list =
+let gain : Scalar Control =
+  Control.knob ~name:"gain" ~min:0.0 ~max:1.0 ~default:0.5 ;;
+let env : Scalar list Control =
   Control.multi_slider ~name:"env" ~sum_min:0.0 ~sum_max:1.0
     ~lanes:[ { name = "attack"; min = 0.0; max = 0.5; default = 0.05 };
              { name = "decay";  min = 0.0; max = 0.5; default = 0.15 } ] ;;
-let _ = render "demo" 8000.0 (sample (constant gain) 0s 50ms) ;;
-let _ = Ui.panel ~name:"Voice" ~controls:["gain"; "env"] ~targets:["demo"] ;;
+let _ = render "demo" 8000.0 (sample (constant gain.value) 0s 50ms) ;;
+let _ = Ui.panel ~name:"Voice" ~controls:[gain.ui; env.ui] ~targets:["demo"] ;;
 )");
   tp.write("build.json", projectManifest("panels-demo", {"a.synth"}));
   BuildResult r = buildProject(tp.dir.string());
@@ -549,10 +580,41 @@ let _ = Ui.panel ~name:"Voice" ~controls:["gain"; "env"] ~targets:["demo"] ;;
   // "env" stays the group name; expanding it to lanes is the app's job
   // at draw time, so the group can be drawn as one linked widget.
   CHECK(m.meta.panels[0].controls.size() == 2);
-  CHECK(m.meta.panels[0].controls[0] == "gain");
-  CHECK(m.meta.panels[0].controls[1] == "env");
+  CHECK(m.meta.panels[0].controls[0].name == "gain");
+  CHECK(m.meta.panels[0].controls[1].name == "env");
   CHECK(m.meta.panels[0].targets.size() == 1);
   CHECK(m.meta.panels[0].targets[0] == "demo");
+}
+
+TEST(metadata_reads_nested_panel_members_from_a_real_build) {
+  // A component's parts reach the app as members one level in, which is
+  // what it indents them by.
+  TempDir tp;
+  tp.write("a.synth", R"(
+open Core open Core.Arrange open Core.Render open Core.Sig
+let gain : Scalar Control =
+  Control.knob ~name:"gain" ~min:0.0 ~max:1.0 ~default:0.5 ;;
+let trim : Scalar Control =
+  Control.slider ~name:"trim" ~min:0.0 ~max:1.0 ~default:0.5 ;;
+let pair : Scalar Control =
+  Control.nest ~value:(gain.value *. trim.value)
+               ~parts:[gain.ui; trim.ui] ;;
+let _ = render "demo" 8000.0 (sample (constant pair.value) 0s 50ms) ;;
+let _ = Ui.panel ~name:"Voice" ~controls:[pair.ui] ~targets:["demo"] ;;
+)");
+  tp.write("build.json", projectManifest("nested-demo", {"a.synth"}));
+  BuildResult r = buildProject(tp.dir.string());
+  for (auto& d : r.diags.items) std::cerr << d.message << "\n";
+  CHECK(r.ok);
+
+  MetadataLoadResult m = loadProjectMetadata(r.metadataPath);
+  CHECK(m.ok);
+  CHECK(m.meta.panels.size() == 1);
+  CHECK(m.meta.panels[0].controls.size() == 2);
+  CHECK(m.meta.panels[0].controls[0].name == "gain");
+  CHECK(m.meta.panels[0].controls[0].depth == 0);  // the head
+  CHECK(m.meta.panels[0].controls[1].name == "trim");
+  CHECK(m.meta.panels[0].controls[1].depth == 1);  // ...and its part
 }
 
 TEST(metadata_without_panels_reports_none) {
@@ -562,6 +624,22 @@ TEST(metadata_without_panels_reports_none) {
   MetadataLoadResult m = loadProjectMetadata((tp.dir / "m.json").string());
   CHECK(m.ok);
   CHECK(m.meta.panels.empty());
+}
+
+TEST(metadata_reads_panel_members_written_as_bare_names) {
+  // Metadata from before panels carried depth: a bare string is a
+  // member at depth 0.
+  TempDir tp;
+  tp.write("m.json", R"({"project": "p", "status": "ok", "targets": [],
+                         "controls": [],
+                         "panels": [{"name": "P", "controls": ["gain"],
+                                     "targets": []}]})");
+  MetadataLoadResult m = loadProjectMetadata((tp.dir / "m.json").string());
+  CHECK(m.ok);
+  CHECK(m.meta.panels.size() == 1);
+  CHECK(m.meta.panels[0].controls.size() == 1);
+  CHECK(m.meta.panels[0].controls[0].name == "gain");
+  CHECK(m.meta.panels[0].controls[0].depth == 0);
 }
 
 TEST(metadata_malformed_panels_are_dropped_not_fatal) {
@@ -589,7 +667,7 @@ TEST(metadata_malformed_panels_are_dropped_not_fatal) {
   CHECK(m.meta.panels[1].name == "Good");
   // Non-string and empty members are dropped, the good one kept.
   CHECK(m.meta.panels[1].controls.size() == 1);
-  CHECK(m.meta.panels[1].controls[0] == "a");
+  CHECK(m.meta.panels[1].controls[0].name == "a");
 }
 
 TEST(resolve_panels_covers_everything_a_project_declares) {
@@ -618,8 +696,8 @@ TEST(resolve_panels_covers_everything_a_project_declares) {
     CHECK(p.size() == 1);
     CHECK(p[0].name == "demo");
     CHECK(p[0].controls.size() == 2);
-    CHECK(p[0].controls[0] == "gain");
-    CHECK(p[0].controls[1] == "env");
+    CHECK(p[0].controls[0].name == "gain");
+    CHECK(p[0].controls[1].name == "env");
     CHECK(p[0].targets.size() == 2);
   }
 
@@ -627,7 +705,7 @@ TEST(resolve_panels_covers_everything_a_project_declares) {
   {
     ProjectMeta full = meta;
     full.panels.push_back(
-        PanelMeta{"All", {"gain", "env"}, {"one", "two"}});
+        PanelMeta{"All", {{"gain", 0}, {"env", 0}}, {"one", "two"}});
     std::vector<PanelMeta> p = resolvePanels(full);
     CHECK(p.size() == 1);
     CHECK(p[0].name == "All");
@@ -636,13 +714,13 @@ TEST(resolve_panels_covers_everything_a_project_declares) {
   // A partial one leaves the rest in an "ungrouped" panel.
   {
     ProjectMeta part = meta;
-    part.panels.push_back(PanelMeta{"Some", {"gain"}, {"one"}});
+    part.panels.push_back(PanelMeta{"Some", {{"gain", 0}}, {"one"}});
     std::vector<PanelMeta> p = resolvePanels(part);
     CHECK(p.size() == 2);
     CHECK(p[0].name == "Some");
     CHECK(p[1].name == "ungrouped");
     CHECK(p[1].controls.size() == 1);
-    CHECK(p[1].controls[0] == "env");
+    CHECK(p[1].controls[0].name == "env");
     CHECK(p[1].targets.size() == 1);
     CHECK(p[1].targets[0] == "two");
   }
@@ -651,14 +729,14 @@ TEST(resolve_panels_covers_everything_a_project_declares) {
   // come back whole in the remainder.
   {
     ProjectMeta lane = meta;
-    lane.panels.push_back(PanelMeta{"Lane", {"env.attack"}, {}});
+    lane.panels.push_back(PanelMeta{"Lane", {{"env.attack", 0}}, {}});
     std::vector<PanelMeta> p = resolvePanels(lane);
     CHECK(p.size() == 2);
     CHECK(p[1].name == "ungrouped");
     // "gain" and the group (via its still-unclaimed decay lane).
     CHECK(p[1].controls.size() == 2);
-    CHECK(p[1].controls[0] == "gain");
-    CHECK(p[1].controls[1] == "env");
+    CHECK(p[1].controls[0].name == "gain");
+    CHECK(p[1].controls[1].name == "env");
   }
 
   // An empty project produces no panels rather than an empty one.

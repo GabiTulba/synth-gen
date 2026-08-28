@@ -75,6 +75,10 @@ MetadataLoadResult loadProjectMetadata(const std::string& path) {
       m.max = c.getNumber("max", 1);
       m.def = c.getNumber("default");
       m.value = c.getNumber("value", m.def);
+      if (const json::Value* opts = c.get("options");
+          opts && opts->kind == json::Value::Kind::Array)
+        for (auto& o : opts->array)
+          if (o.kind == json::Value::Kind::String) m.options.push_back(o.string);
       m.group = c.getString("group");
       m.groupIndex = (int)c.getNumber("group_index", -1);
       m.sumMin = c.getNumber("sum_min");
@@ -100,7 +104,20 @@ MetadataLoadResult loadProjectMetadata(const std::string& path) {
       PanelMeta m;
       m.name = p.getString("name");
       if (m.name.empty()) continue;
-      m.controls = names(p, "controls");
+      // A control member is {"name", "depth"}; a bare string is the
+      // pre-controller spelling and reads as depth 0.
+      if (const json::Value* cs = p.get("controls");
+          cs && cs->kind == json::Value::Kind::Array)
+        for (auto& c : cs->array) {
+          if (c.kind == json::Value::Kind::String && !c.string.empty())
+            m.controls.push_back(PanelMember{c.string, 0});
+          else if (c.kind == json::Value::Kind::Object) {
+            std::string n = c.getString("name");
+            if (!n.empty())
+              m.controls.push_back(
+                  PanelMember{std::move(n), (int)c.getNumber("depth", 0)});
+          }
+        }
       m.targets = names(p, "targets");
       r.meta.panels.push_back(std::move(m));
     }
@@ -113,7 +130,7 @@ std::vector<PanelMeta> resolvePanels(const ProjectMeta& meta) {
   std::vector<PanelMeta> out = meta.panels;
   std::set<std::string> claimedControls, claimedTargets;
   for (auto& p : meta.panels) {
-    claimedControls.insert(p.controls.begin(), p.controls.end());
+    for (auto& m : p.controls) claimedControls.insert(m.name);
     claimedTargets.insert(p.targets.begin(), p.targets.end());
   }
   PanelMeta rest;
@@ -124,7 +141,7 @@ std::vector<PanelMeta> resolvePanels(const ProjectMeta& meta) {
     const std::string& key = c.group.empty() ? c.name : c.group;
     if (claimedControls.count(key) || claimedControls.count(c.name)) continue;
     if (!c.group.empty() && !seenGroups.insert(c.group).second) continue;
-    rest.controls.push_back(key);
+    rest.controls.push_back(PanelMember{key, 0});
   }
   for (auto& t : meta.targets)
     if (!claimedTargets.count(t.name)) rest.targets.push_back(t.name);

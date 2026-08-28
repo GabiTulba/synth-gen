@@ -5080,6 +5080,17 @@ TEST(build_a_panel_key_is_one_character) {
   CHECK(saidThat(r, "is not a single character"));
 }
 
+TEST(build_a_panel_key_is_not_a_digit) {
+  // The dev app addresses windows by number and rows by letter, so a
+  // digit would name the wrong thing.
+  BuildResult r = buildKeys(
+      "let _ = Ui.panel ~name:\"P\" "
+      "~controls:[Ui.key ~k:\"2\" ~c:pair.ui; trim2.ui] "
+      "~targets:[\"demo\"] ;;");
+  CHECK(!r.ok);
+  CHECK(saidThat(r, "is a digit"));
+}
+
 TEST(build_the_same_key_in_another_panel_is_fine) {
   // The labels are a window's, so two windows may each use "g".
   BuildResult r = buildKeys(

@@ -531,9 +531,10 @@ panel to name.
   member is checked the same way.
 
 - **`key k c`** reserves the key the panel's window reaches a
-  controller by. With that window focused, `f` labels its rows and this
-  one always answers to `k`, wherever it sits in the list and whatever
-  is added above it.
+  controller by. Every row shows the key at the head of its name, and
+  with that window focused pressing it selects the row — so this one
+  always answers to `k`, wherever it sits in the list and whatever is
+  added above it.
 
   ```
   let _ = Ui.panel ~name:"Kick"
@@ -549,8 +550,9 @@ panel to name.
   the same control listed in two panels can answer to a different key in
   each, and a control's declaration says nothing about the layout.
 
-  `k` is one character. On a component it lands on the head row — the
-  one the panel shows the component by. Rows nobody has spoken for take
+  `k` is one **letter**: the dev app addresses its windows by digit, so
+  a digit here is a build error. On a component it lands on the head row
+  — the one the panel shows the component by. Rows nobody has spoken for take
   the first free key in panel order, so reserving one never costs
   another row its label, and a window with no reservations labels
   exactly as it did before they existed.

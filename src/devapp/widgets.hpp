@@ -3,6 +3,7 @@
 #include <string>
 #include <vector>
 
+#include "layout.hpp"
 #include "metadata.hpp"
 #include "player.hpp"
 #include "wav.hpp"
@@ -93,20 +94,34 @@ struct WavePanel {
   bool hasSelection() const { return selStart >= 0 && selEnd > selStart; }
 };
 
+// The key a row answers to, at the head of its name: "[s] sustain". The
+// keys are always on screen rather than summoned, so this is how every
+// row is titled.
+std::string rowLabel(const std::string& key, const std::string& name);
+
 // One ungrouped control: a knob, slider, tickbox or option list, its
 // name, the pending marker and its reset button. Returns true while it
 // is waiting on a rebuild.
-bool drawOneControl(UnitState& u, const ControlMeta& c);
+bool drawOneControl(UnitState& u, const ControlMeta& c,
+                    const std::string& key = {});
 
 // One multi_slider group: lanes that share a budget for their sum, each
-// drawn against the band the others leave it.
+// drawn against the band the others leave it. `laneKeys` is the key
+// each lane answers to, in lane order, and `laneRects` collects where
+// they landed - a lane is a row like any other, selected and nudged on
+// its own.
 bool drawControlGroup(UnitState& u, const std::vector<ControlMeta>& controls,
-                      size_t first, size_t count);
+                      size_t first, size_t count, const std::string& key = {},
+                      const std::vector<std::string>* laneKeys = nullptr,
+                      std::map<std::string, Rect>* laneRects = nullptr);
 
 // The lanes of one group, found by name. False when no such group
 // exists, which is how a caller tells a group member from a control.
 bool drawGroupByName(UnitState& u, const std::vector<ControlMeta>& controls,
-                     const std::string& group, bool& anyDirty);
+                     const std::string& group, bool& anyDirty,
+                     const std::string& key = {},
+                     const std::vector<std::string>* laneKeys = nullptr,
+                     std::map<std::string, Rect>* laneRects = nullptr);
 
 // The waveform: min/max envelope lanes per channel, wheel zoom about the
 // cursor, right-drag pan, left-drag selection, and playback of the

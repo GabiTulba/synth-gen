@@ -14,10 +14,14 @@ namespace synth::devapp {
 // keyboard steps through can never disagree.
 
 // One row of a window, in the order it is drawn. Panel windows are made
-// of controls, groups and targets; the overview is made of the panels
-// themselves, one tickbox each.
+// of controls, groups, the lanes inside a group, and targets; the
+// overview is made of the panels themselves, one tickbox each.
+//
+// A group is a row of its own - the budget bar it draws - and each of
+// its lanes is a row under it, because a lane is the thing with a value
+// to select and nudge.
 struct WindowElement {
-  enum class Kind { Control, Group, Target, Panel };
+  enum class Kind { Control, Group, Lane, Target, Panel };
   Kind kind = Kind::Control;
   // The control, group or target's name - or, for a panel row, the
   // window id of the panel it ticks, since two units may each declare
@@ -75,24 +79,23 @@ struct Match {
 std::vector<Match> searchItems(const std::vector<SearchItem>& items,
                                std::string_view query);
 
-// The hint labels for `n` elements, home row first. All labels are the
-// same length, so no label is a prefix of another and typing is never
-// ambiguous.
-std::vector<std::string> hintLabels(size_t n);
+// Keys for `n` rows, home row first. All are the same length, so no key
+// is a prefix of another and the typing is never ambiguous.
+std::vector<std::string> autoKeys(size_t n);
 
-// The same, honouring what the panel reserved: a row with a key keeps
-// it, and the rest take the labels left over, in order. A reservation
-// therefore costs no other row its label, and the panel's own order
-// still decides who gets what among the unkeyed. Reservations are
-// unique by the time they are here - the build refuses a panel that
-// asks for one twice - so nothing here has to arbitrate.
-std::vector<std::string> hintLabelsFor(const std::vector<WindowElement>& es);
+// The key each row of a window answers to, shown at the head of its
+// name. A row the panel reserved one for (Core.Ui.key) keeps it, and
+// the rest take what is left over, in order - so a reservation costs no
+// other row its key, and the panel's own order decides the rest.
+// Reservations are unique by the time they are here: the build refuses
+// a panel that asks for one twice.
+std::vector<std::string> rowKeys(const std::vector<WindowElement>& es);
 
-// What the letters typed so far amount to: one label exactly, the start
-// of at least one, or nothing that can ever match. On Exact, `index` is
-// the element picked.
-enum class HintMatch { None, Prefix, Exact };
-HintMatch matchHint(const std::vector<std::string>& labels,
-                    std::string_view typed, size_t& index);
+// What the keys typed so far amount to: one row exactly, the start of
+// at least one, or nothing that can ever match. On Exact, `index` is
+// the row picked.
+enum class KeyMatch { None, Prefix, Exact };
+KeyMatch matchKey(const std::vector<std::string>& keys,
+                  std::string_view typed, size_t& index);
 
 }  // namespace synth::devapp

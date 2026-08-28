@@ -155,9 +155,12 @@ struct AppState {
   // Where each window's rows landed this frame, by element name, so the
   // hint badges and the focus ring can be drawn over them.
   std::map<std::string, std::map<std::string, Rect>> elementRects;
-  std::vector<std::string> hintOrder;  // the focused window's elements
-  std::vector<std::string> hintKeys;   // ...and the label each answers to
-  std::string hintTyped;
+  // The focused window's rows and the key each answers to, refreshed
+  // every frame: with the keys always on screen, a bare letter is an
+  // address rather than a command.
+  std::vector<std::string> rowOrder;
+  std::vector<std::string> rowKeysNow;
+  std::string rowTyped;  // a part-typed key, for windows with many rows
   std::vector<SearchItem> index;
   std::vector<Match> matches;
   std::string searchQuery;
@@ -739,10 +742,11 @@ void drawTabBar(AppState& app, float width) {
 // One target inside a window: the row of facts - status, duration, rate,
 // channels - and then the waveform itself, fully interactive.
 void drawTargetElement(AppState& app, const TargetMeta& t, float waveHeight,
-                       std::set<std::string>& wanted, WavePanel** shown) {
+                       std::set<std::string>& wanted, WavePanel** shown,
+                       const std::string& key) {
   ImGui::PushID(t.name.c_str());
   ImGui::Spacing();
-  ImGui::SeparatorText(t.name.c_str());
+  ImGui::SeparatorText(rowLabel(key, t.name).c_str());
 
   if (t.status != "ok") {
     ImGui::TextColored(kRed, "%s", t.error.empty() ? "not built"
@@ -823,6 +827,12 @@ void applyWaveRequest(AppState& app, WavePanel& w) {
 void drawOverviewBody(AppState& app, const WindowRef& self) {
   std::map<std::string, Rect>& rects = app.elementRects[windowId(self)];
   rects.clear();
+  std::map<std::string, std::string> keyOf;
+  {
+    std::vector<WindowElement> es = app.elementsOf(self);
+    std::vector<std::string> ks = rowKeys(es);
+    for (size_t i = 0; i < es.size(); i++) keyOf[es[i].name] = ks[i];
+  }
   bool anyMissing = false;
   for (size_t i = 0; i < app.units.size(); i++) {
     UnitState& u = app.units[i];
@@ -864,7 +874,9 @@ void drawOverviewBody(AppState& app, const WindowRef& self) {
       bool open = in != 0;
       ImVec2 top = ImGui::GetCursorScreenPos();
       float rowW = std::max(16.0f, ImGui::GetContentRegionAvail().x);
-      if (ImGui::Checkbox((p.name + "###p" + p.name).c_str(), &open))
+      if (ImGui::Checkbox(
+              (rowLabel(keyOf[windowId(ref)], p.name) + "###p" + p.name).c_str(),
+              &open))
         app.togglePanel(ref);
       if (in) {
         ImGui::SameLine();
@@ -927,9 +939,14 @@ void drawPanelBody(AppState& app, UnitState& u, const PanelMeta& panel,
   // each and the window scrolls.
   float perTarget = drawable > 1 ? 150.0f * gUiScale : -1.0f;
 
+  std::vector<std::string> keys = rowKeys(els);
   bool anyDirty = false;
   int indented = 0;
-  for (const WindowElement& e : els) {
+  for (size_t i = 0; i < els.size(); i++) {
+    const WindowElement& e = els[i];
+    // A lane is drawn by the group above it, which needs all their keys
+    // at once; the loop skips them so nothing is drawn twice.
+    if (e.kind == WindowElement::Kind::Lane) continue;
     while (indented < e.depth) {
       ImGui::Indent(12.0f * gUiScale);
       indented++;
@@ -946,18 +963,25 @@ void drawPanelBody(AppState& app, UnitState& u, const PanelMeta& panel,
       case WindowElement::Kind::Control:
         for (const ControlMeta& c : controls)
           if (c.name == e.name && c.group.empty())
-            anyDirty |= drawOneControl(u, c);
+            anyDirty |= drawOneControl(u, c, keys[i]);
         break;
-      case WindowElement::Kind::Group:
-        drawGroupByName(u, controls, e.name, anyDirty);
+      case WindowElement::Kind::Group: {
+        std::vector<std::string> laneKeys;
+        for (size_t j = i + 1;
+             j < els.size() && els[j].kind == WindowElement::Kind::Lane; j++)
+          laneKeys.push_back(keys[j]);
+        drawGroupByName(u, controls, e.name, anyDirty, keys[i], &laneKeys,
+                        &rects);
         break;
+      }
       case WindowElement::Kind::Target:
         for (const TargetMeta& t : u.loaded.meta.targets)
           if (t.name == e.name)
-            drawTargetElement(app, t, perTarget, wanted, &wave);
+            drawTargetElement(app, t, perTarget, wanted, &wave, keys[i]);
         break;
+      case WindowElement::Kind::Lane:
       case WindowElement::Kind::Panel:
-        break;  // the overview's rows, which this window does not have
+        break;  // drawn by the group above, and not a panel's row at all
     }
     if (selected && wave && app.deferred.wave != Action::None)
       applyWaveRequest(app, *wave);
@@ -1027,7 +1051,7 @@ struct ScopedWindowScale {
 // owns the geometry, so ImGui's own bar and its ini have no say) and a
 // scrolling body.
 void drawLeaf(AppState& app, const PlacedWindow& pw,
-              std::set<std::string>& wanted) {
+              std::set<std::string>& wanted, int number) {
   const WindowRef& ref = pw.window;
   std::string id = windowId(ref);
   Tab& tab = app.tab();
@@ -1073,6 +1097,13 @@ void drawLeaf(AppState& app, const PlacedWindow& pw,
   // A window inside the focused container is not itself focused, but it
   // is about to be moved or closed with it, so it does not read as
   // inactive either.
+  // The number this window answers to: the digits address windows the
+  // way the letters address rows, and both are on screen rather than
+  // remembered.
+  if (number >= 1 && number <= 9) {
+    ImGui::TextDisabled("%d", number);
+    ImGui::SameLine();
+  }
   ImGui::PushStyleColor(ImGuiCol_Text,
                         pw.focused || pw.inFocus
                             ? ImVec4(0.85f, 1.0f, 0.90f, 1.0f)
@@ -1224,41 +1255,6 @@ void drawOutline(AppState& app, const Rect& area) {
   ImGui::Separator();
   ImGui::TextDisabled("Alt+t to close");
   ImGui::End();
-}
-
-// The focused window's rows, each with the key that jumps to it.
-void drawHints(AppState& app, const Placement& p) {
-  const PlacedWindow* focused = nullptr;
-  for (const PlacedWindow& w : p.windows)
-    if (w.focused) focused = &w;
-  if (!focused) return;
-  auto rects = app.elementRects.find(windowId(focused->window));
-  if (rects == app.elementRects.end()) return;
-  const std::vector<std::string>& labels = app.hintKeys;
-  if (labels.size() != app.hintOrder.size()) return;
-  ImDrawList* dl = ImGui::GetForegroundDrawList();
-  for (size_t i = 0; i < app.hintOrder.size(); i++) {
-    auto r = rects->second.find(app.hintOrder[i]);
-    if (r == rects->second.end()) continue;
-    // A row scrolled out of its window keeps its rectangle from when it
-    // was last drawn; labelling it would put a badge outside the window.
-    if (r->second.y < focused->rect.y ||
-        r->second.y > focused->rect.y + focused->rect.h)
-      continue;
-    const std::string& label = labels[i];
-    // A label the typing has ruled out fades rather than vanishing, so
-    // the rows do not jump about under a half-typed hint.
-    bool live = label.rfind(app.hintTyped, 0) == 0;
-    ImVec2 at(r->second.x + 2, r->second.y + 1);
-    ImVec2 size = ImGui::CalcTextSize(label.c_str());
-    dl->AddRectFilled(at, ImVec2(at.x + size.x + 8, at.y + size.y + 4),
-                      live ? IM_COL32(235, 200, 110, 235)
-                           : IM_COL32(90, 90, 100, 160),
-                      3.0f);
-    dl->AddText(ImVec2(at.x + 4, at.y + 2),
-                live ? IM_COL32(20, 20, 20, 255) : IM_COL32(60, 60, 60, 255),
-                label.c_str());
-  }
 }
 
 // A ring around the row the keyboard has hold of. The focused *window*
@@ -1581,14 +1577,14 @@ Chord readChord() {
 // The rows of the focused window, in draw order: what Tab steps through
 // and what the hints label - together with the label each one answers
 // to, which is the panel's reservation where it made one.
-void refreshHintOrder(AppState& app) {
-  app.hintOrder.clear();
-  app.hintKeys.clear();
+void refreshRows(AppState& app) {
+  app.rowOrder.clear();
+  app.rowKeysNow.clear();
   auto w = focusedWindow(app.tab());
   if (!w) return;
   std::vector<WindowElement> es = app.elementsOf(*w);
-  app.hintKeys = hintLabelsFor(es);
-  for (const WindowElement& e : es) app.hintOrder.push_back(e.name);
+  app.rowKeysNow = rowKeys(es);
+  for (const WindowElement& e : es) app.rowOrder.push_back(e.name);
 }
 
 unsigned contextBits(AppState& app) {
@@ -1602,22 +1598,25 @@ unsigned contextBits(AppState& app) {
     for (const WindowElement& e : app.elementsOf(app.sel.window))
       if (e.name == app.sel.element) {
         ctx |= CtxRow;
-        // A linked group is not one value to nudge, and a panel tickbox
-        // is not a value at all - both can still be activated.
+        // A group is a budget bar, not a value, and a panel tickbox is
+        // not one either; a lane under that bar very much is.
         if (e.kind == WindowElement::Kind::Target) ctx |= CtxWave;
-        if (e.kind == WindowElement::Kind::Control) ctx |= CtxWidget;
+        if (e.kind == WindowElement::Kind::Control ||
+            e.kind == WindowElement::Kind::Lane)
+          ctx |= CtxWidget;
       }
   return ctx;
 }
 
-// The control the selection is on, if it is on one at all (a group or a
-// waveform is not one control, and the nudge keys leave it alone).
+// The control the selection is on, if it is on one at all - a lane of a
+// group included, since a lane is a row with a value. A group's own row
+// and a waveform are not controls, and the nudge keys leave them alone.
 ControlMeta* selectedControl(AppState& app, UnitState** unit) {
   if (!app.sel.active()) return nullptr;
   UnitState* u = app.unitFor(app.sel.window.unit);
   if (!u) return nullptr;
   for (ControlMeta& c : u->loaded.meta.controls)
-    if (c.name == app.sel.element && c.group.empty()) {
+    if (c.name == app.sel.element) {
       *unit = u;
       return &c;
     }
@@ -1638,7 +1637,21 @@ void adjustSelected(AppState& app, double frac) {
     next = (double)ui.value + (frac > 0 ? 1 : -1);
   else
     next = (double)ui.value + frac * (c->max - c->min);
-  ui.value = (float)std::clamp(next, c->min, c->max);
+
+  double lo = c->min, hi = c->max;
+  if (!c->group.empty()) {
+    // A lane may only take what the others have left it, which is the
+    // same band the mouse drag is clamped to - so no lane ever moves
+    // because another one did.
+    double others = 0;
+    for (const ControlMeta& m : u->loaded.meta.controls)
+      if (m.group == c->group && m.name != c->name)
+        others += (double)u->controlUi[m.name].value;
+    ControlBand band = controlLaneBand(*c, others);
+    lo = band.lo;
+    hi = band.hi;
+  }
+  ui.value = (float)std::clamp(next, lo, hi);
   noteControlEdit(*u, ui, /*released=*/true);
 }
 
@@ -1667,18 +1680,18 @@ void activateSelected(AppState& app) {
 }
 
 void stepSelection(AppState& app, int by) {
-  refreshHintOrder(app);
-  if (app.hintOrder.empty()) return;
+  refreshRows(app);
+  if (app.rowOrder.empty()) return;
   auto w = focusedWindow(app.tab());
   if (!w) return;
   int at = -1;
   if (app.sel.active() && app.sel.window == *w)
-    for (size_t i = 0; i < app.hintOrder.size(); i++)
-      if (app.hintOrder[i] == app.sel.element) at = (int)i;
-  int n = (int)app.hintOrder.size();
+    for (size_t i = 0; i < app.rowOrder.size(); i++)
+      if (app.rowOrder[i] == app.sel.element) at = (int)i;
+  int n = (int)app.rowOrder.size();
   int next = at < 0 ? (by > 0 ? 0 : n - 1) : (at + by % n + n) % n;
   app.sel.window = *w;
-  app.sel.element = app.hintOrder[(size_t)next];
+  app.sel.element = app.rowOrder[(size_t)next];
 }
 
 void applyAction(AppState& app, const KeyMachine::Step& s) {
@@ -1734,13 +1747,9 @@ void applyAction(AppState& app, const KeyMachine::Step& s) {
       break;
     case Action::ToggleOutline: app.outline = !app.outline; break;
     case Action::ToggleWhichKey: app.whichKey = !app.whichKey; break;
-    case Action::EnterHint:
-      app.hintTyped.clear();
-      refreshHintOrder(app);
-      break;
     case Action::LeaveMode:
       app.sel.clear();
-      app.hintTyped.clear();
+      app.rowTyped.clear();
       break;
     case Action::Scroll: app.deferred.scrollLines = (float)s.step; break;
     case Action::ScrollPage: app.deferred.scrollPages = (float)s.step; break;
@@ -1769,35 +1778,47 @@ void applyAction(AppState& app, const KeyMachine::Step& s) {
   }
 }
 
-// Hint mode: the letters are the labels, not shortcuts. Returns true
-// when a key was consumed here - it must not go on to the map as well,
-// or one press of `f` picks the label `f` and then reopens the labels.
-bool typeHints(AppState& app) {
-  const std::vector<std::string>& labels = app.hintKeys;
-  bool consumed = false;
-  for (int i = 0; i < 26; i++) {
-    if (!ImGui::IsKeyPressed((ImGuiKey)(ImGuiKey_A + i), false)) continue;
-    consumed = true;
-    app.hintTyped += (char)('a' + i);
-    size_t picked = 0;
-    switch (matchHint(labels, app.hintTyped, picked)) {
-      case HintMatch::Exact:
-        if (auto w = focusedWindow(app.tab())) {
-          app.sel.window = *w;
-          app.sel.element = app.hintOrder[picked];
-        }
-        app.hintTyped.clear();
-        app.keys.mode = Mode::Normal;
-        return true;
-      case HintMatch::Prefix: break;
-      case HintMatch::None:
-        // Nothing can start with what has been typed: give up rather
-        // than leaving the labels up with no way out but Escape.
-        app.hintTyped.clear();
-        break;
+// Bare keys name what is on screen rather than a command: a digit is
+// one of this tab's windows, a letter is a row of the focused one. Both
+// wear the key they answer to, so nothing here has to be remembered.
+//
+// Returns true when the press was spent addressing something - the
+// machine then stops it, so one press never also runs a shortcut.
+bool takeBareKey(AppState& app, Chord c) {
+  if (!c.valid() || c.alt || c.ctrl || c.shift) return false;
+  // A tapped Alt is waiting for its key: that letter is a command.
+  if (app.keys.sticky) return false;
+
+  if (c.key >= Key::D1 && c.key <= Key::D9) {
+    size_t want = (size_t)((int)c.key - (int)Key::D1);
+    std::vector<WindowRef> ws = windowsIn(app.tab());
+    if (want < ws.size()) {
+      focusWindow(app.tab(), ws[want]);
+      app.sel.clear();
+      app.rowTyped.clear();
+      refreshRows(app);
     }
+    return true;  // a number is a window address, used or not
   }
-  return consumed;
+
+  if (c.key < Key::A || c.key > Key::Z) return false;
+  app.rowTyped += (char)('a' + ((int)c.key - (int)Key::A));
+  size_t picked = 0;
+  switch (matchKey(app.rowKeysNow, app.rowTyped, picked)) {
+    case KeyMatch::Exact:
+      if (auto w = focusedWindow(app.tab())) {
+        app.sel.window = *w;
+        app.sel.element = app.rowOrder[picked];
+      }
+      app.rowTyped.clear();
+      break;
+    case KeyMatch::Prefix:
+      break;  // a window with more rows than letters: wait for the rest
+    case KeyMatch::None:
+      app.rowTyped.clear();
+      break;
+  }
+  return true;  // letters belong to the rows, matched or not
 }
 
 // Alt tapped on its own arms the prefix; Alt used as a modifier for
@@ -1823,24 +1844,25 @@ void trackAltTap(AppState& app) {
 }
 
 void handleInput(AppState& app, unsigned ctx) {
-  // The only thing the app decides for itself: whether the press was a
-  // hint label, which needs the labels it just drew. Everything else -
-  // whether it is spent, what it means, what mode it leaves behind - is
-  // the machine's, in one place, in one order.
-  bool captured = app.keys.mode == Mode::Hint && typeHints(app);
   trackAltTap(app);
-
   Chord c = readChord();
-  if (c.valid() && app.altHeld) app.altArmed = false;
+  if (!c.valid()) return;
+  // A key pressed while Alt is down is Alt being used as a modifier,
+  // not tapped.
+  if (app.altHeld) app.altArmed = false;
 
+  // The only thing the app decides for itself: whether the press
+  // addressed something on screen, which needs the rows it just drew.
+  // Everything else - whether it is spent, what it means, what mode it
+  // leaves behind - is the machine's, in one place, in one order.
+  bool captured = app.keys.mode == Mode::Normal && takeBareKey(app, c);
   KeyMachine::Step s = app.keys.dispatch(c, captured, ctx);
   switch (s.kind) {
     case KeyMachine::Step::Kind::Pending:
       app.pendingSince = ImGui::GetTime();
       break;
     case KeyMachine::Step::Kind::Fired:
-      if (s.action == Action::EnterResize || s.action == Action::EnterHint ||
-          s.action == Action::EnterSelect)
+      if (s.action == Action::EnterResize || s.action == Action::EnterSelect)
         app.pendingSince = ImGui::GetTime();
       applyAction(app, s);
       break;
@@ -1918,14 +1940,15 @@ void drawFrame(AppState& app) {
   drawContainerFrames(placement);
 
   std::set<std::string> wanted;
-  for (const PlacedWindow& pw : placement.windows) drawLeaf(app, pw, wanted);
+  // Layout order is tree order, which is what the numbers count.
+  for (size_t i = 0; i < placement.windows.size(); i++)
+    drawLeaf(app, placement.windows[i], wanted, (int)i + 1);
   if (placement.windows.empty()) drawEmptyTab(app, area);
   dragDividers(app, placement, area);
   releaseUnusedWaves(app, wanted);
 
   drawFocusRing(app);
   if (app.outline) drawOutline(app, area);
-  if (app.keys.mode == Mode::Hint) drawHints(app, placement);
   if (app.keys.mode == Mode::Search) drawSearch(app, area);
   if (app.keys.mode == Mode::Rename) drawRename(app, area);
   if (app.keys.mode == Mode::Help) drawHelp(app, area, ctx);
@@ -2144,11 +2167,11 @@ int main(int argc, char** argv) {
     }
 
     // ...and every overlay: one frame per mode, with a row selected, so
-    // the smoke test draws the search, help, hint and which-key surfaces
-    // as well as the tiling. An unbalanced Begin/End in any of them is
-    // an assert here rather than a crash in front of the user.
+    // the smoke test draws the search, help, select and which-key
+    // surfaces as well as the tiling. An unbalanced Begin/End in any of
+    // them is an assert here rather than a crash in front of the user.
     if (selfTest && frames >= 1 && frames <= 4) {
-      static const Mode modes[] = {Mode::Search, Mode::Help, Mode::Hint,
+      static const Mode modes[] = {Mode::Search, Mode::Help, Mode::Select,
                                    Mode::Resize};
       app.keys.mode = modes[frames - 1];  // one frame each
       app.outline = true;
@@ -2161,7 +2184,7 @@ int main(int argc, char** argv) {
           app.sel.element = els[0].name;
         }
       }
-      refreshHintOrder(app);
+      refreshRows(app);
     }
 
     // The one seam the unit tests cannot reach: real key events becoming
@@ -2194,24 +2217,18 @@ int main(int argc, char** argv) {
           // spent on its own frame and the digit arrives bare.
           {15, ImGuiKey_None, true},
           {19, ImGuiKey_1, false},
-          // f, then a label that is *also* a normal-mode shortcut: the
-          // press that picks a row must not reach the map behind it and
-          // reopen the labels. `f` is the fourth label, so a window with
-          // four or more rows exercises it.
-          {21, ImGuiKey_J, true},   // focus a window with rows in it
-          {23, ImGuiKey_F, false},  // label them
-          {25, ImGuiKey_F, false},  // take the row labelled `f`
-          {27, ImGuiKey_A, false},  // (or the first, where there is no `f`)
-          // ...and the overview's own rows, which are panel tickboxes:
-          // label them, take the first, and press it.
-          {29, ImGuiKey_K, true},   // back up to the overview
-          {31, ImGuiKey_F, false},
-          {33, ImGuiKey_A, false},
-          {35, ImGuiKey_Enter, false},
+          // A bare digit is a window of this tab and a bare letter is a
+          // row of the focused one - both addresses, both claimed before
+          // the map ever sees them.
+          {21, ImGuiKey_2, false},  // the second window of the tab
+          {23, ImGuiKey_A, false},  // its first row
+          {25, ImGuiKey_1, false},  // back to the first window
+          {27, ImGuiKey_A, false},  // its first row: a panel tickbox
+          {29, ImGuiKey_Enter, false},  // press it
           // Two notches smaller, so the report can say the style came
           // back: a scale left applied would compound every frame.
-          {37, ImGuiKey_Minus, false, true},
-          {39, ImGuiKey_Minus, false, true},
+          {31, ImGuiKey_Minus, false, true},
+          {33, ImGuiKey_Minus, false, true},
       };
       for (const Press& k : script) {
         if (k.frame != frames) continue;
@@ -2258,7 +2275,7 @@ int main(int argc, char** argv) {
     }
     app.maybeSave(dtMs);
 
-    if (selfTest && ++frames >= 41) done = true;
+    if (selfTest && ++frames >= 37) done = true;
     if (!selfTest && !vsync) {
       double frameMs = (double)(SDL_GetPerformanceCounter() - now) * 1000.0 /
                        (double)SDL_GetPerformanceFrequency();
@@ -2272,7 +2289,7 @@ int main(int argc, char** argv) {
     // behind, and they are the point of the exercise.
     std::string endedIn = modeName(app.keys.mode);
     std::string picked = app.sel.active() ? app.sel.element : "(none)";
-    size_t labelled = app.hintOrder.size();
+    size_t labelled = app.rowOrder.size();
     app.keys.reset();  // the mode cycling in the loop above is over
     app.sel.clear();
     size_t loadedCount = 0, targetCount = 0, diagCount = 0, controlCount = 0;
@@ -2306,8 +2323,7 @@ int main(int argc, char** argv) {
     // above, so this says the same thing however the app was last left.
     std::printf("self-test: typed keys left tab %d selected\n",
                 app.activeTab);
-    std::printf("self-test: hints labelled %zu row(s), left mode %s, "
-                "selection '%s'\n",
+    std::printf("self-test: %zu row(s) keyed, left mode %s, selection '%s'\n",
                 labelled, endedIn.c_str(), picked.c_str());
     for (auto& [id, scale] : app.windowScales) {
       int at = gFonts.indexNear(gFonts.base * scale);

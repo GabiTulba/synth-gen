@@ -628,11 +628,12 @@ module Ui = struct
      it - the same control listed in two panels can answer to a
      different key in each.
 
-     `k` is one character. On a component it lands on the head row, the
-     one the panel shows the component by. Rows nobody has spoken for
-     take the first free key, so reserving one key never costs the
-     others theirs. Two reservations of one key in a panel, or two keys
-     for one controller, is a build error. *)
+     `k` is one letter - the digits address the windows themselves, so
+     a digit here is a build error. On a component it lands on the head
+     row, the one the panel shows the component by. Rows nobody has
+     spoken for take the first free key, so reserving one key never
+     costs the others theirs. Two reservations of one key in a panel, or
+     two keys for one controller, is a build error. *)
   let key ~k:String ~c:Controller : Controller = Keyed (k, c) ;;
 
   (* The boundary-crossing form of panel: a variant keeps no structure

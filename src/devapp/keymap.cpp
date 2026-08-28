@@ -121,11 +121,10 @@ std::vector<Binding> buildTable() {
       "show shortcuts as you type them");
 
   // --- inside the focused window ---------------------------------------
-  add(v, N, ch(Key::F), Action::EnterHint, 0, 0, CtxAny, "window",
-      "label every widget; type a label to pick one");
-  add(v, N, ch(Key::J), Action::Scroll, 0, 3, CtxAny, "window",
-      "scroll down");
-  add(v, N, ch(Key::K), Action::Scroll, 0, -3, CtxAny, "window", "scroll up");
+  add(v, N, ch(Key::Down), Action::Scroll, 0, 3, CtxAny, "window",
+      "scroll down (Ctrl+d for half a page)");
+  add(v, N, ch(Key::Up), Action::Scroll, 0, -3, CtxAny, "window",
+      "scroll up");
   add(v, N, ctrl(Key::D), Action::ScrollPage, 0, 0.5, CtxAny, "window",
       "half a page down");
   add(v, N, ctrl(Key::U), Action::ScrollPage, 0, -0.5, CtxAny, "window",
@@ -140,22 +139,18 @@ std::vector<Binding> buildTable() {
       "let go of the selected widget");
 
   // --- a selected control ----------------------------------------------
-  add(v, N, ch(Key::L), Action::WidgetAdjust, 0, 0.04, CtxWidget, "widget",
-      "nudge it up (Shf for a fine step)");
-  add(v, N, ch(Key::H), Action::WidgetAdjust, 0, -0.04, CtxWidget, "widget",
-      "nudge it down");
-  add(v, N, shift(Key::L), Action::WidgetAdjust, 0, 0.004, CtxWidget, "widget",
-      "", false);
-  add(v, N, shift(Key::H), Action::WidgetAdjust, 0, -0.004, CtxWidget, "widget",
-      "", false);
   add(v, N, ch(Key::Right), Action::WidgetAdjust, 0, 0.04, CtxWidget, "widget",
-      "", false);
+      "nudge it up (Shf for a fine step)");
   add(v, N, ch(Key::Left), Action::WidgetAdjust, 0, -0.04, CtxWidget, "widget",
-      "", false);
+      "nudge it down");
+  add(v, N, shift(Key::Right), Action::WidgetAdjust, 0, 0.004, CtxWidget,
+      "widget", "", false);
+  add(v, N, shift(Key::Left), Action::WidgetAdjust, 0, -0.004, CtxWidget,
+      "widget", "", false);
   add(v, N, ch(Key::Enter), Action::WidgetActivate, 0, 0, CtxRow, "widget",
       "flip a tickbox, take the next option, or show/hide a panel");
-  add(v, N, ch(Key::R), Action::WidgetReset, 0, 0, CtxWidget, "widget",
-      "back to the value the source declares");
+  add(v, N, alt(Key::Backspace), Action::WidgetReset, 0, 0, CtxWidget,
+      "widget", "back to the value the source declares");
   add(v, N, ch(Key::Tab), Action::WidgetStep, 1, 0, CtxAny, "window",
       "select the next widget (Shf+Tab for the one before)");
   add(v, N, shift(Key::Tab), Action::WidgetStep, -1, 0, CtxAny, "window", "",
@@ -168,9 +163,9 @@ std::vector<Binding> buildTable() {
       "zoom in");
   add(v, N, ch(Key::Minus), Action::WaveZoom, 0, 1.5, CtxWave, "wave",
       "zoom out");
-  add(v, N, ch(Key::D0), Action::WaveFit, 0, 0, CtxWave, "wave",
+  add(v, N, alt(Key::D0), Action::WaveFit, 0, 0, CtxWave, "wave",
       "fit the whole artifact");
-  add(v, N, ch(Key::P), Action::WaveLoop, 0, 0, CtxWave, "wave",
+  add(v, N, alt(Key::P), Action::WaveLoop, 0, 0, CtxWave, "wave",
       "loop what you play");
 
   // --- resize mode ------------------------------------------------------
@@ -242,8 +237,6 @@ std::vector<Binding> buildTable() {
 
   // --- the capture modes ------------------------------------------------
   // The app reads the typing itself; only these reach the machine.
-  add(v, Mode::Hint, ch(Key::Escape), Action::LeaveMode, 0, 0, CtxAny, "hint",
-      "give up on the labels");
   add(v, Mode::Search, ch(Key::Escape), Action::LeaveMode, 0, 0, CtxAny,
       "search", "close the search");
   add(v, Mode::Search, ch(Key::Enter), Action::SearchAccept, 0, 0, CtxAny,
@@ -289,7 +282,6 @@ const char* modeName(Mode m) {
     case Mode::Normal: return "normal";
     case Mode::Resize: return "resize";
     case Mode::Select: return "select";
-    case Mode::Hint: return "hint";
     case Mode::Search: return "search";
     case Mode::Rename: return "rename";
     case Mode::Help: return "help";
@@ -298,14 +290,13 @@ const char* modeName(Mode m) {
 }
 
 bool modeCapturesText(Mode m) {
-  return m == Mode::Hint || m == Mode::Search || m == Mode::Rename;
+  return m == Mode::Search || m == Mode::Rename;
 }
 
 Mode modeAfter(Mode from, Action a) {
   switch (a) {
     case Action::EnterResize: return Mode::Resize;
     case Action::EnterSelect: return Mode::Select;
-    case Action::EnterHint: return Mode::Hint;
     case Action::OpenSearch: return Mode::Search;
     case Action::OpenHelp: return Mode::Help;
     case Action::RenameTab: return Mode::Rename;
@@ -449,6 +440,7 @@ std::string keyName(Key k) {
     case Key::Period: return ".";
     case Key::Minus: return "-";
     case Key::Equal: return "=";
+    case Key::Backspace: return "Backspace";
     default: return "";
   }
 }

@@ -177,12 +177,13 @@ from it, so it cannot drift out of date.
 | `Alt+d`, `Alt+/` | search |
 | `Alt+t` / `Alt+w` | the tree outline / the which-key pane |
 | `?` | the shortcuts that apply right here |
-| `f` | label every widget; type a label to select it |
+| a letter | select the row that shows it |
+| a digit | focus the window that shows it |
 | `Tab` / `Shf+Tab` | select the next row / the one before |
 | `Ctrl+=` / `Ctrl+-` / `Ctrl+0` | draw this window bigger / smaller / at 100% |
-| `h` `l` (`Shf` for finer) | nudge the selected control; `r` puts it back to its default |
+| `Left` `Right` (`Shf` for finer) | nudge the selected control; `Alt+Backspace` puts it back to its default |
 | `Enter` | flip a tickbox, take the next option, or show/hide a panel from the overview |
-| `Space`, `-` `=`, `0`, `p` | on a selected waveform: play/stop, zoom, fit, loop |
+| `Space`, `-` `=`, `Alt+0`, `Alt+p` | on a selected waveform: play/stop, zoom, fit, loop |
 
 - **Search** (`Alt+d`) matches, in one list: tabs by name *or* index (a
   bare number goes straight to that tab), windows by panel name —
@@ -190,13 +191,23 @@ from it, so it cannot drift out of date.
   the individual controls and waveforms inside them. Accepting an
   element result focuses its window *and* selects that element, so
   `Alt+d`, `sust`, `Enter`, `l` finds a knob and turns it up.
-- **Hints** (`f`) put a letter on every row of the focused window;
-  typing it selects that row. A panel can reserve the letter for a row
-  with `Core.Ui.key` where it lists the controller, and that row then
-  always answers to it; everything else takes the first free letter in
-  panel order, so a reservation costs no other row its label. Automatic
-  labels are all the same length and never start with a reserved
-  letter, so the typing is never ambiguous.
+- **Every row wears its key**, at the head of its name: `[s] adsr
+  sustain amp`. Press the letter and that row is selected — no mode, no
+  modifier, nothing to summon. A panel can reserve a row's letter with
+  `Core.Ui.key` where it lists the controller; everything else takes the
+  first free letter in panel order, so a reservation costs no other row
+  its key. Automatic keys are all the same length and never start with a
+  reserved letter, so the typing is never ambiguous.
+- **Every window wears its number**, counted in tree order — the same
+  order the layout reads in. A bare digit focuses that window. Numbers
+  and letters divide the bare keys between them: digits address the
+  windows of this tab, letters address the rows of the focused one, and
+  normal mode binds neither, so a row's key can never be shadowed by a
+  command.
+- A `multi_slider` **lane is a row of its own**, keyed and nudged
+  separately, under the budget bar its group draws. Nudging one is
+  clamped to the band the other lanes leave it, exactly as dragging it
+  is, so no lane ever moves because another one did.
 - A keyboard edit goes through exactly the same path as a drag: it
   writes the unit's `controls.json` and shows the same pending `*`.
 
@@ -311,7 +322,7 @@ from it, so it cannot drift out of date.
   them, tap `Alt` and switch tab, label the rows and pick one — and
   reports what they left behind. That is the only coverage the seam
   between a key event and a chord has, and it runs against two projects,
-  one of which has enough rows for a hint label that is also a shortcut.
+  one of which has several windows and rows to address.
 
 ### How it is put together
 
@@ -319,15 +330,16 @@ from it, so it cannot drift out of date.
 lives there: the container tree and its i3 operations
 (`layout.{hpp,cpp}`), the shortcut table and its state machine
 (`keymap.{hpp,cpp}`), the search index, the window-element enumeration
-and the hint labels (`search.{hpp,cpp}`), plus metadata, project state,
+and the row keys (`search.{hpp,cpp}`), plus metadata, project state,
 the audio player and the waveform maths.
 
 **One machine owns every key press.** `KeyMachine::dispatch` is the only
 way in, and it is a stack of small machines tried in a fixed order — the
 first to claim a press ends it:
 
-1. **capture** — the mode read the press itself (a hint label, a search
-   query, a tab's new name);
+1. **capture** — the press addressed something on screen (a row's key, a
+   window's number) or the mode read it as typing (a search query, a
+   tab's new name);
 2. **overlay** — the help page, which any press closes;
 3. **capture's leftovers** — in such a mode only its control keys go on,
    so a letter never reaches the map behind it;
@@ -335,12 +347,13 @@ first to claim a press ends it:
 5. **map** — the binding table for the current mode.
 
 Nothing outside gets a second say, which is what stops a press acting at
-two levels: picking the hint labelled `f` and *then* being read as `f`,
-the key that opens the labels. The one thing the app decides for itself
-is whether a press was a hint label — only it knows the labels it just
-drew — and it tells the machine, which does the rest. Tests pin the
-ordering, and one pins the invariant that a capture mode may not bind a
-bare letter, since it could never see one. `devapp_tests` links that and
+two levels: selecting the row keyed `s` and *then* being read as a
+command. The one thing the app decides for itself is whether a press
+addressed something — only it knows the rows it just drew — and it tells
+the machine, which does the rest. Tests pin the ordering, and two pin
+the invariants underneath it: a capture mode may not bind a bare letter,
+since it could never see one, and **normal mode binds no bare letter or
+digit at all**, since those belong to the rows and the windows. `devapp_tests` links that and
 nothing else, so the whole navigation model is unit-tested without a
 window. `app.cpp` is the shell that drives it and `widgets.cpp` what
 goes inside a window; between them they are the only files that mention

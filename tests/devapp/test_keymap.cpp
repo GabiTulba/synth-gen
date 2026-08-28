@@ -88,9 +88,9 @@ TEST(keymap_holds_a_prefix_until_it_completes) {
 
 TEST(keymap_context_gates_a_binding) {
   KeyMachine m;
-  // `h` only means something while a control is selected.
-  CHECK(m.feed(bare(Key::H), CtxAny).kind == KeyMachine::Step::Kind::None);
-  KeyMachine::Step s = m.feed(bare(Key::H), CtxWidget);
+  // Left/Right only mean something while a control is selected.
+  CHECK(m.feed(bare(Key::Left), CtxAny).kind == KeyMachine::Step::Kind::None);
+  KeyMachine::Step s = m.feed(bare(Key::Left), CtxWidget);
   CHECK(s.kind == KeyMachine::Step::Kind::Fired);
   CHECK(s.action == Action::WidgetAdjust);
   CHECK(s.step < 0);
@@ -115,8 +115,8 @@ TEST(keymap_resize_is_a_mode_that_stays_open) {
 }
 
 TEST(keymap_escape_returns_to_normal_from_every_mode) {
-  for (Mode m : {Mode::Normal, Mode::Resize, Mode::Select, Mode::Hint,
-                 Mode::Search, Mode::Rename}) {
+  for (Mode m : {Mode::Normal, Mode::Resize, Mode::Select, Mode::Search,
+                 Mode::Rename}) {
     KeyMachine k;
     k.mode = m;
     KeyMachine::Step s = k.feed(bare(Key::Escape), CtxAny);
@@ -226,24 +226,35 @@ TEST(keymap_reset_drops_a_tapped_prefix) {
 
 // --- the layering: one press, one claim ------------------------------
 
-TEST(keymap_a_captured_press_stops_at_the_mode_that_read_it) {
-  // The bug this exists to prevent: `f` picks the hint labelled `f`,
-  // and then - having also reached the map - reopens the labels.
+TEST(keymap_a_captured_press_stops_before_the_map) {
+  // Bare letters and digits address what is on screen - a row of the
+  // focused window, a window of this tab - and the app claims them
+  // before the map. The claim has to end the press: acting at two
+  // levels is what made `f` pick a row and then reopen the labels back
+  // when they were an overlay.
   KeyMachine m;
-  m.mode = Mode::Hint;
-  KeyMachine::Step s = m.dispatch(bare(Key::F), /*captured=*/true, CtxAny);
+  KeyMachine::Step s = m.dispatch(bare(Key::S), /*captured=*/true, CtxAny);
   CHECK(s.kind == KeyMachine::Step::Kind::Consumed);
   CHECK(s.action == Action::None);
-  CHECK(m.mode == Mode::Hint);  // the app leaves hint mode itself, on a match
+  CHECK(m.mode == Mode::Normal);
+}
 
-  // The same press, uncaptured and back in normal mode, is what opens
-  // the labels in the first place.
-  KeyMachine n;
-  CHECK(n.dispatch(bare(Key::F), false, CtxAny).action == Action::EnterHint);
+TEST(keymap_normal_mode_binds_no_bare_letter_or_digit) {
+  // The invariant the whole scheme rests on: a bare letter is a row's
+  // key and a bare digit is a window's number, so the map must not want
+  // either. A binding here would be one a row could silently shadow.
+  for (const Binding& b : bindings()) {
+    if (b.mode != Mode::Normal) continue;
+    const Chord& c = b.sequence[0];
+    if (c.alt || c.ctrl) continue;
+    bool letter = c.key >= Key::A && c.key <= Key::Z;
+    bool digit = c.key >= Key::D0 && c.key <= Key::D9;
+    CHECK(!letter && !digit);
+  }
 }
 
 TEST(keymap_a_capture_mode_never_leaks_typing_to_the_map) {
-  for (Mode m : {Mode::Hint, Mode::Search, Mode::Rename}) {
+  for (Mode m : {Mode::Search, Mode::Rename}) {
     CHECK(modeCapturesText(m));
     KeyMachine k;
     k.mode = m;
@@ -334,10 +345,11 @@ TEST(keymap_a_window_scales_on_its_own) {
   CHECK(m.feed(ctrlPlus, CtxAny).arg == 1);
   CHECK(m.feed(ctrlMinus, CtxAny).arg == -1);
   CHECK(m.feed(ctrlZero, CtxAny).arg == 0);
-  // The bare keys still belong to the waveform, which is a different
-  // thing to zoom.
+  // Bare `=` still zooms the waveform - punctuation is not a row key -
+  // but the digits went to the windows, so fitting moved to Alt+0.
   CHECK(m.feed(bare(Key::Equal), CtxWave).action == Action::WaveZoom);
-  CHECK(m.feed(bare(Key::D0), CtxWave).action == Action::WaveFit);
+  CHECK(m.feed(bare(Key::D0), CtxWave).kind == KeyMachine::Step::Kind::None);
+  CHECK(m.feed(alt(Key::D0), CtxWave).action == Action::WaveFit);
 }
 
 TEST(keymap_every_mode_has_shortcuts_to_show) {
@@ -345,8 +357,8 @@ TEST(keymap_every_mode_has_shortcuts_to_show) {
   // returns, so a mode with nothing listed is an empty overlay.
   unsigned everything =
       CtxTiled | CtxNested | CtxContainer | CtxWidget | CtxWave;
-  for (Mode m : {Mode::Normal, Mode::Resize, Mode::Select, Mode::Hint,
-                 Mode::Search, Mode::Rename, Mode::Help}) {
+  for (Mode m : {Mode::Normal, Mode::Resize, Mode::Select, Mode::Search,
+                 Mode::Rename, Mode::Help}) {
     size_t listed = 0;
     for (const Binding* b : bindingsFor(m, everything))
       if (b->listed) listed++;

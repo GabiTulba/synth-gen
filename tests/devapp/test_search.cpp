@@ -78,13 +78,17 @@ TEST(search_window_elements_follow_the_panel_in_order) {
   ProjectMeta meta = buildDemo(tp);
   CHECK(meta.panels.size() == 1);
   std::vector<WindowElement> es = windowElements(meta.panels[0], meta);
-  CHECK(es.size() == 4);
+  CHECK(es.size() == 6);
   CHECK(es[0].kind == WindowElement::Kind::Control && es[0].name == "gain");
   CHECK(es[0].depth == 0);
   CHECK(es[1].name == "trim" && es[1].depth == 1);  // the component's part
-  // A group is one element under its own name, never one per lane.
+  // A group is a row - the budget bar - and each lane under it is a row
+  // of its own, because a lane is what has a value to select and nudge.
   CHECK(es[2].kind == WindowElement::Kind::Group && es[2].name == "env");
-  CHECK(es[3].kind == WindowElement::Kind::Target && es[3].name == "demo");
+  CHECK(es[3].kind == WindowElement::Kind::Lane && es[3].name == "env.attack");
+  CHECK(es[3].depth == 1);
+  CHECK(es[4].kind == WindowElement::Kind::Lane && es[4].name == "env.decay");
+  CHECK(es[5].kind == WindowElement::Kind::Target && es[5].name == "demo");
 }
 
 TEST(search_window_elements_skip_members_naming_nothing) {
@@ -119,7 +123,7 @@ TEST(search_index_covers_tabs_windows_and_elements) {
   }
   CHECK(tabsSeen == 2);
   CHECK(windows == 2);   // the overview and the one panel
-  CHECK(elements == 4);  // gain, trim, env, demo
+  CHECK(elements == 6);  // gain, trim, env + its two lanes, demo
 
   for (const SearchItem& it : index) {
     if (it.kind == SearchItem::Kind::Window && it.window.panel == "Voice") {
@@ -132,6 +136,8 @@ TEST(search_index_covers_tabs_windows_and_elements) {
     }
     if (it.element == "demo") CHECK(it.detail == "Voice - waveform");
     if (it.element == "env") CHECK(it.detail == "Voice - lanes");
+    // A lane is searchable in its own right now.
+    if (it.element == "env.attack") CHECK(it.detail == "Voice - lane");
   }
 }
 
@@ -232,7 +238,7 @@ TEST(search_reserved_keys_are_kept_and_the_rest_fill_in_around_them) {
   // order because of the reservation.
   std::vector<WindowElement> es = {row("attack", ""), row("sustain", "s"),
                                    row("release", ""), row("amount", "z")};
-  std::vector<std::string> labels = hintLabelsFor(es);
+  std::vector<std::string> labels = rowKeys(es);
   CHECK(labels.size() == 4);
   CHECK(labels[1] == "s");
   CHECK(labels[3] == "z");
@@ -251,7 +257,7 @@ TEST(search_a_reserved_key_is_never_a_prefix_of_an_automatic_one) {
     es.push_back(WindowElement{WindowElement::Kind::Control,
                                "c" + std::to_string(i), 0, ""});
   es[0].key = "a";
-  std::vector<std::string> labels = hintLabelsFor(es);
+  std::vector<std::string> labels = rowKeys(es);
   CHECK(labels[0] == "a");
   std::set<std::string> seen;
   for (const std::string& l : labels) {
@@ -262,7 +268,7 @@ TEST(search_a_reserved_key_is_never_a_prefix_of_an_automatic_one) {
   // ...and every label still resolves to exactly the row it belongs to.
   for (size_t i = 0; i < labels.size(); i++) {
     size_t at = 999;
-    CHECK(matchHint(labels, labels[i], at) == HintMatch::Exact);
+    CHECK(matchKey(labels, labels[i], at) == KeyMatch::Exact);
     CHECK(at == i);
   }
 }
@@ -272,33 +278,33 @@ TEST(search_unkeyed_rows_label_exactly_as_before) {
   for (int i = 0; i < 6; i++)
     es.push_back(WindowElement{WindowElement::Kind::Control,
                                "c" + std::to_string(i), 0, ""});
-  CHECK(hintLabelsFor(es) == hintLabels(6));
+  CHECK(rowKeys(es) == autoKeys(6));
 }
 
-TEST(search_hint_matching_tells_a_pick_from_a_dead_end) {
-  std::vector<std::string> single = hintLabels(6);  // a s d f g h
+TEST(search_key_matching_tells_a_pick_from_a_dead_end) {
+  std::vector<std::string> single = autoKeys(6);  // a s d f g h
   size_t at = 99;
-  CHECK(matchHint(single, "f", at) == HintMatch::Exact);
+  CHECK(matchKey(single, "f", at) == KeyMatch::Exact);
   CHECK(at == 3);
-  CHECK(matchHint(single, "z", at) == HintMatch::None);
-  CHECK(matchHint(single, "", at) == HintMatch::Prefix);
+  CHECK(matchKey(single, "z", at) == KeyMatch::None);
+  CHECK(matchKey(single, "", at) == KeyMatch::Prefix);
 
-  std::vector<std::string> pairs = hintLabels(40);  // aa as ad ...
-  CHECK(matchHint(pairs, "a", at) == HintMatch::Prefix);
-  CHECK(matchHint(pairs, "as", at) == HintMatch::Exact);
+  std::vector<std::string> pairs = autoKeys(40);  // aa as ad ...
+  CHECK(matchKey(pairs, "a", at) == KeyMatch::Prefix);
+  CHECK(matchKey(pairs, "as", at) == KeyMatch::Exact);
   CHECK(at == 1);
-  CHECK(matchHint(pairs, "az", at) == HintMatch::Exact);  // a? covers a-z
+  CHECK(matchKey(pairs, "az", at) == KeyMatch::Exact);  // a? covers a-z
   CHECK(at == 19);
   // 40 labels is every "a?" and the first few "s?", so nothing starts
   // with the third letter of the alphabet yet.
-  CHECK(matchHint(pairs, "d", at) == HintMatch::None);
-  CHECK(matchHint({}, "a", at) == HintMatch::None);
+  CHECK(matchKey(pairs, "d", at) == KeyMatch::None);
+  CHECK(matchKey({}, "a", at) == KeyMatch::None);
 }
 
-TEST(search_hint_labels_are_unique_and_never_a_prefix_of_each_other) {
+TEST(search_auto_keys_are_unique_and_never_a_prefix_of_each_other) {
   for (size_t n : {size_t(0), size_t(1), size_t(9), size_t(26), size_t(27),
                    size_t(60)}) {
-    std::vector<std::string> ls = hintLabels(n);
+    std::vector<std::string> ls = autoKeys(n);
     CHECK(ls.size() == n);
     std::set<std::string> seen;
     size_t width = ls.empty() ? 0 : ls[0].size();
@@ -308,7 +314,7 @@ TEST(search_hint_labels_are_unique_and_never_a_prefix_of_each_other) {
     }
   }
   // Stable across calls, and the home row comes first.
-  CHECK(hintLabels(3)[0] == "a");
-  CHECK(hintLabels(3)[1] == "s");
-  CHECK(hintLabels(30)[0] == "aa");
+  CHECK(autoKeys(3)[0] == "a");
+  CHECK(autoKeys(3)[1] == "s");
+  CHECK(autoKeys(30)[0] == "aa");
 }

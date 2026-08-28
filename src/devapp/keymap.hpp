@@ -19,7 +19,7 @@ enum class Key {
   N, O, P, Q, R, S, T, U, V, W, X, Y, Z,
   D0, D1, D2, D3, D4, D5, D6, D7, D8, D9,
   Left, Right, Up, Down,
-  Enter, Escape, Tab, Space, Slash, Comma, Period, Minus, Equal,
+  Enter, Escape, Tab, Space, Slash, Comma, Period, Minus, Equal, Backspace,
 };
 
 struct Chord {
@@ -45,9 +45,13 @@ enum Ctx : unsigned {
 };
 
 // The app's modes. Normal is the resting state; Resize is i3's resize
-// mode; Hint, Search and Rename capture typing, so only the bindings
-// listed for them (Escape, Enter, the arrows) ever reach the machine.
-enum class Mode { Normal, Resize, Select, Hint, Search, Rename, Help };
+// mode; Search and Rename capture typing, so only the bindings listed
+// for them (Escape, Enter, the arrows) ever reach the machine.
+//
+// Normal mode binds no bare letter or digit: those belong to the rows of
+// the focused window, each of which shows the key it answers to. A press
+// that names a row is claimed before the map ever sees it.
+enum class Mode { Normal, Resize, Select, Search, Rename, Help };
 const char* modeName(Mode m);
 
 // Whether the mode reads the typing itself - hint labels, a search
@@ -67,7 +71,7 @@ enum class Action {
   // the tree itself
   EnterSelect, FocusParent, FocusChild, ExtendSel, Group, Flatten,
   // app surfaces
-  OpenSearch, OpenHelp, ToggleOutline, ToggleWhichKey, EnterHint, LeaveMode,
+  OpenSearch, OpenHelp, ToggleOutline, ToggleWhichKey, LeaveMode,
   // the focused window's contents
   Scroll, ScrollPage, WidgetAdjust, WidgetActivate, WidgetReset, WidgetStep,
   WavePlay, WaveZoom, WaveFit, WaveLoop, ScaleWindow,

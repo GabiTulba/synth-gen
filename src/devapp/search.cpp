@@ -68,9 +68,17 @@ std::vector<WindowElement> windowElements(const PanelMeta& panel,
     if (plain)
       out.push_back(
           WindowElement{WindowElement::Kind::Control, m.name, m.depth, m.key});
-    else if (group)
+    else if (group) {
       out.push_back(
           WindowElement{WindowElement::Kind::Group, m.name, m.depth, m.key});
+      // The lanes under it: a lane is what has a value to select and
+      // nudge, so each is a row in its own right, named the way the
+      // metadata names it ("<group>.<lane>").
+      for (const ControlMeta& c : meta.controls)
+        if (c.group == m.name)
+          out.push_back(WindowElement{WindowElement::Kind::Lane, c.name,
+                                      m.depth + 1, {}});
+    }
   }
   for (const std::string& t : panel.targets)
     for (const TargetMeta& m : meta.targets)
@@ -144,8 +152,9 @@ std::vector<SearchItem> buildSearchIndex(const std::vector<Tab>& tabs,
         it.tab = tab;
         const char* what = e.kind == WindowElement::Kind::Target ? "waveform"
                            : e.kind == WindowElement::Kind::Group ? "lanes"
-                           : e.kind == WindowElement::Kind::Panel  ? "panel"
-                                                                  : "control";
+                           : e.kind == WindowElement::Kind::Lane  ? "lane"
+                           : e.kind == WindowElement::Kind::Panel ? "panel"
+                                                                 : "control";
         it.detail = p.name + " - " + what;
         out.push_back(std::move(it));
       }
@@ -193,7 +202,7 @@ std::vector<Match> searchItems(const std::vector<SearchItem>& items,
   return out;
 }
 
-std::vector<std::string> hintLabelsFor(const std::vector<WindowElement>& es) {
+std::vector<std::string> rowKeys(const std::vector<WindowElement>& es) {
   std::vector<std::string> out(es.size());
   std::set<std::string> taken;
   size_t needed = 0;
@@ -215,7 +224,7 @@ std::vector<std::string> hintLabelsFor(const std::vector<WindowElement>& es) {
   for (size_t ask = needed + taken.size();
        pool.size() < needed && ask <= needed + taken.size() + 64; ask++) {
     pool.clear();
-    for (const std::string& l : hintLabels(ask)) {
+    for (const std::string& l : autoKeys(ask)) {
       if (taken.count(l)) continue;
       if (l.size() > 1 && taken.count(l.substr(0, 1))) continue;
       pool.push_back(l);
@@ -228,21 +237,21 @@ std::vector<std::string> hintLabelsFor(const std::vector<WindowElement>& es) {
   return out;
 }
 
-HintMatch matchHint(const std::vector<std::string>& labels,
+KeyMatch matchKey(const std::vector<std::string>& labels,
                     std::string_view typed, size_t& index) {
-  if (typed.empty()) return labels.empty() ? HintMatch::None : HintMatch::Prefix;
+  if (typed.empty()) return labels.empty() ? KeyMatch::None : KeyMatch::Prefix;
   for (size_t i = 0; i < labels.size(); i++)
     if (labels[i] == typed) {
       index = i;
-      return HintMatch::Exact;
+      return KeyMatch::Exact;
     }
   for (const std::string& l : labels)
     if (l.size() > typed.size() && l.compare(0, typed.size(), typed) == 0)
-      return HintMatch::Prefix;
-  return HintMatch::None;
+      return KeyMatch::Prefix;
+  return KeyMatch::None;
 }
 
-std::vector<std::string> hintLabels(size_t n) {
+std::vector<std::string> autoKeys(size_t n) {
   // Home row first, then the rest of the keyboard by reachability.
   static const std::string alphabet = "asdfghjklqwertyuiopzxcvbnm";
   std::vector<std::string> out;

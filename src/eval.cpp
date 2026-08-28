@@ -828,6 +828,12 @@ class Interp {
         throw EvalError("panel '" + p.name + "': the key '" + k +
                         "' reserved for '" + m.name +
                         "' is not a single character");
+      // The dev app addresses its windows by digit and their rows by
+      // letter, so a digit here would name a window instead of a row.
+      if (k[0] >= '0' && k[0] <= '9')
+        throw EvalError("panel '" + p.name + "': the key '" + k +
+                        "' reserved for '" + m.name +
+                        "' is a digit, which the window numbers use");
       auto [it, fresh] = byKey.emplace(k, m.name);
       if (!fresh)
         throw EvalError("panel '" + p.name + "' reserves the key '" + k +

@@ -15,6 +15,10 @@ float gUiScale = 1.0f;
 // The control values worth recording: everything that differs from its
 // declaration's default. The same set goes to the project state file and
 // to the build's controls.json, so the two can be compared directly.
+std::string rowLabel(const std::string& key, const std::string& name) {
+  return key.empty() ? name : "[" + key + "] " + name;
+}
+
 std::map<std::string, double> unitOverrides(const UnitState& u) {
   std::map<std::string, double> overrides;
   for (auto& c : u.loaded.meta.controls) {
@@ -295,7 +299,9 @@ bool drawControlTail(UnitState& u, ControlUi& ui, const ControlMeta& c) {
 // invariant holds after every drag without any lane moving on its own.
 // Returns true if any lane is waiting on a rebuild.
 bool drawControlGroup(UnitState& u, const std::vector<ControlMeta>& controls,
-                      size_t first, size_t count) {
+                      size_t first, size_t count, const std::string& key,
+                      const std::vector<std::string>* laneKeys,
+                      std::map<std::string, Rect>* laneRects) {
   const ControlMeta& head = controls[first];
   double sum = 0;
   for (size_t k = 0; k < count; k++)
@@ -305,7 +311,8 @@ bool drawControlGroup(UnitState& u, const std::vector<ControlMeta>& controls,
   float width = std::max(200.0f * gUiScale,
                          ImGui::GetContentRegionAvail().x * 0.45f);
   ImGui::AlignTextToFramePadding();
-  ImGui::TextColored(ImVec4(0.7f, 0.8f, 1.0f, 1.0f), "%s", head.group.c_str());
+  ImGui::TextColored(ImVec4(0.7f, 0.8f, 1.0f, 1.0f), "%s",
+                     rowLabel(key, head.group).c_str());
   ImGui::SameLine();
   if (head.sumMin > 0)
     ImGui::TextDisabled("sum %.4g of %.4g (at least %.4g)", sum, head.sumMax,
@@ -321,6 +328,8 @@ bool drawControlGroup(UnitState& u, const std::vector<ControlMeta>& controls,
     ControlBand band = controlLaneBand(c, sum - ui.value);
     float lo = (float)band.lo, hi = (float)band.hi;
     ImGui::PushID((int)k);
+    ImVec2 laneTop = ImGui::GetCursorScreenPos();
+    float laneW = std::max(16.0f, ImGui::GetContentRegionAvail().x);
     bool edited = laneSliderFloat("##lane", &ui.value, (float)c.min,
                                   (float)c.max, lo, hi, width,
                                   16.0f * gUiScale);
@@ -333,9 +342,13 @@ bool drawControlGroup(UnitState& u, const std::vector<ControlMeta>& controls,
     }
     ImGui::SameLine();
     ImGui::AlignTextToFramePadding();
-    // The lane's own name; the group already named itself above.
+    // The lane's own name; the group already named itself above. A lane
+    // is a row of its own, so it wears its own key.
     const char* lane = c.name.c_str() + head.group.size() + 1;
-    ImGui::Text("%s  %.4g", lane, (double)ui.value);
+    std::string laneKey =
+        laneKeys && k < laneKeys->size() ? (*laneKeys)[k] : std::string();
+    ImGui::Text("%s  %.4g", rowLabel(laneKey, lane).c_str(),
+                (double)ui.value);
     if (hi < c.max - 1e-6) {
       ImGui::SameLine();
       ImGui::TextDisabled("(<= %.4g)", (double)hi);
@@ -344,6 +357,11 @@ bool drawControlGroup(UnitState& u, const std::vector<ControlMeta>& controls,
                           "budget;\nlower one of them to take more here");
     }
     anyDirty |= drawControlTail(u, ui, c);
+    if (laneRects) {
+      ImVec2 after = ImGui::GetCursorScreenPos();
+      (*laneRects)[c.name] =
+          Rect{laneTop.x, laneTop.y, laneW, std::max(2.0f, after.y - laneTop.y)};
+    }
     ImGui::PopID();
   }
 
@@ -369,7 +387,8 @@ bool drawControlGroup(UnitState& u, const std::vector<ControlMeta>& controls,
 // One ungrouped control: a knob or a slider, its name, and the pending
 // marker. Split out so a panel can draw one control at a time.
 // for a member it names.
-bool drawOneControl(UnitState& u, const ControlMeta& c) {
+bool drawOneControl(UnitState& u, const ControlMeta& c,
+                    const std::string& key) {
   {
     ControlUi& ui = u.controlUi[c.name];
     ImGui::PushID(c.name.c_str());
@@ -380,7 +399,7 @@ bool drawOneControl(UnitState& u, const ControlMeta& c) {
       released = ImGui::IsItemDeactivated() && ui.editing;
       ImGui::SameLine();
       ImGui::AlignTextToFramePadding();
-      ImGui::Text("%s  %.4g", c.name.c_str(), (double)ui.value);
+      ImGui::Text("%s  %.4g", rowLabel(key, c.name).c_str(), (double)ui.value);
     } else if (c.kind == "toggle") {
       // A tickbox has no drag: the click that flips it is also the end
       // of the edit, so the override write lands immediately.
@@ -391,14 +410,14 @@ bool drawOneControl(UnitState& u, const ControlMeta& c) {
       }
       ImGui::SameLine();
       ImGui::AlignTextToFramePadding();
-      ImGui::TextUnformatted(c.name.c_str());
+      ImGui::TextUnformatted(rowLabel(key, c.name).c_str());
     } else if (c.kind == "choice") {
       // One tickbox per option, the value their index. Labels come from
       // the build; "##k" keeps two same-named options apart for ImGui
       // without showing anything extra.
       int pick = (int)std::lround((double)ui.value);
       ImGui::AlignTextToFramePadding();
-      ImGui::TextUnformatted(c.name.c_str());
+      ImGui::TextUnformatted(rowLabel(key, c.name).c_str());
       for (size_t k = 0; k < c.options.size(); k++) {
         ImGui::SameLine();
         std::string label = c.options[k] + "##" + std::to_string(k);
@@ -418,7 +437,7 @@ bool drawOneControl(UnitState& u, const ControlMeta& c) {
       }
       released = ImGui::IsItemDeactivatedAfterEdit();
       ImGui::SameLine();
-      ImGui::TextUnformatted(c.name.c_str());
+      ImGui::TextUnformatted(rowLabel(key, c.name).c_str());
     } else {
       ImGui::SetNextItemWidth(
           std::max(160.0f * gUiScale,
@@ -427,7 +446,7 @@ bool drawOneControl(UnitState& u, const ControlMeta& c) {
                                   (float)c.max, "%.4g");
       released = ImGui::IsItemDeactivatedAfterEdit();
       ImGui::SameLine();
-      ImGui::TextUnformatted(c.name.c_str());
+      ImGui::TextUnformatted(rowLabel(key, c.name).c_str());
     }
     if (edited || released) noteControlEdit(u, ui, released);
     bool dirty = drawControlTail(u, ui, c);
@@ -442,7 +461,10 @@ bool drawOneControl(UnitState& u, const ControlMeta& c) {
 // limits depend on where the others sit. Returns false when no such
 // group exists.
 bool drawGroupByName(UnitState& u, const std::vector<ControlMeta>& controls,
-                     const std::string& group, bool& anyDirty) {
+                     const std::string& group, bool& anyDirty,
+                     const std::string& key,
+                     const std::vector<std::string>* laneKeys,
+                     std::map<std::string, Rect>* laneRects) {
   for (size_t i = 0; i < controls.size(); i++) {
     if (controls[i].group != group) continue;
     size_t n = 1;

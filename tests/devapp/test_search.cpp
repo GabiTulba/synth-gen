@@ -82,8 +82,9 @@ TEST(search_window_elements_follow_the_panel_in_order) {
   CHECK(es[0].kind == WindowElement::Kind::Control && es[0].name == "gain");
   CHECK(es[0].depth == 0);
   CHECK(es[1].name == "trim" && es[1].depth == 1);  // the component's part
-  // A group is a row - the budget bar - and each lane under it is a row
-  // of its own, because a lane is what has a value to select and nudge.
+  // A group is a heading - the budget bar - and each lane under it is a
+  // row of its own, because a lane is what has a value to select and
+  // nudge.
   CHECK(es[2].kind == WindowElement::Kind::Group && es[2].name == "env");
   CHECK(es[3].kind == WindowElement::Kind::Lane && es[3].name == "env.attack");
   CHECK(es[3].depth == 1);
@@ -95,7 +96,7 @@ TEST(search_window_elements_skip_members_naming_nothing) {
   ProjectMeta meta;
   PanelMeta p;
   p.name = "P";
-  p.controls = {PanelMember{"ghost", 0}};
+  p.controls = {PanelMember{"ghost", 0, ""}};
   p.targets = {"nowhere"};
   CHECK(windowElements(p, meta).empty());
 }
@@ -279,6 +280,44 @@ TEST(search_unkeyed_rows_label_exactly_as_before) {
     es.push_back(WindowElement{WindowElement::Kind::Control,
                                "c" + std::to_string(i), 0, ""});
   CHECK(rowKeys(es) == autoKeys(6));
+}
+
+TEST(search_tab_steps_over_a_group_header) {
+  // The group's row is its budget bar - nothing on it to nudge - so
+  // stepping lands on the lanes instead.
+  auto row = [](WindowElement::Kind k, const char* name) {
+    return WindowElement{k, name, 0, ""};
+  };
+  std::vector<WindowElement> es = {
+      row(WindowElement::Kind::Control, "gain"),
+      row(WindowElement::Kind::Group, "env"),
+      row(WindowElement::Kind::Lane, "env.attack"),
+      row(WindowElement::Kind::Lane, "env.decay"),
+      row(WindowElement::Kind::Target, "demo")};
+  std::vector<size_t> stops = tabStops(es);
+  CHECK(stops.size() == 4);
+  CHECK(stops[0] == 0 && stops[1] == 2 && stops[2] == 3 && stops[3] == 4);
+}
+
+TEST(search_a_group_heading_is_given_no_key) {
+  // Nothing on a heading answers to a key, so it is given none - and it
+  // does not spend one either: the letters run straight past it to the
+  // lanes, which is what the window's gutter shows.
+  auto row = [](WindowElement::Kind k, const char* name) {
+    return WindowElement{k, name, 0, ""};
+  };
+  std::vector<WindowElement> es = {
+      row(WindowElement::Kind::Control, "gain"),
+      row(WindowElement::Kind::Group, "env"),
+      row(WindowElement::Kind::Lane, "env.attack"),
+      row(WindowElement::Kind::Lane, "env.decay"),
+      row(WindowElement::Kind::Target, "demo")};
+  std::vector<std::string> keys = rowKeys(es);
+  CHECK(keys.size() == 5);
+  CHECK(keys[1].empty());
+  std::vector<std::string> four = autoKeys(4);
+  CHECK(keys[0] == four[0] && keys[2] == four[1] && keys[3] == four[2] &&
+        keys[4] == four[3]);
 }
 
 TEST(search_key_matching_tells_a_pick_from_a_dead_end) {

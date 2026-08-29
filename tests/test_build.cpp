@@ -5091,6 +5091,52 @@ TEST(build_a_panel_key_is_not_a_digit) {
   CHECK(saidThat(r, "is a digit"));
 }
 
+TEST(build_a_panel_refuses_a_key_on_a_multi_slider_group) {
+  // A group is a heading over its lanes - there is no value on it to
+  // select or nudge - so its window keys the lanes and leaves the
+  // heading bare. Reserving one for the group would name a row that
+  // cannot be reached, so the build says so rather than letting the dev
+  // app quietly drop it.
+  TempDir tp;
+  tp.write("a.synth", R"(
+open Core open Core.Control open Core.Arrange open Core.Render open Core.Sig
+let env : Scalar list Control =
+  Control.multi_slider ~name:"env" ~sum_min:0.0 ~sum_max:1.0
+    ~lanes:[ { name = "attack"; min = 0.0; max = 0.5; default = 0.05 };
+             { name = "decay";  min = 0.0; max = 0.5; default = 0.15 } ] ;;
+let a : Scalar = List.nth ~xs:env.value ~i:0 ~default:0.0 ;;
+let _ = render "demo" 8000.0 (sample (constant a) 0s 50ms) ;;
+let _ = Ui.panel ~name:"P" ~controls:[Ui.key ~k:"e" ~c:env.ui]
+          ~targets:["demo"] ;;
+)");
+  tp.write("build.json", projectManifest("groupkey", {"a.synth"}));
+  BuildResult r = buildProject(tp.dir.string());
+  CHECK(!r.ok);
+  CHECK(saidThat(r, "is reserved for the multi_slider group 'env'"));
+  CHECK(saidThat(r, "its lanes take keys of their own"));
+}
+
+TEST(build_a_panel_may_still_name_a_group_without_a_key) {
+  TempDir tp;
+  tp.write("a.synth", R"(
+open Core open Core.Control open Core.Arrange open Core.Render open Core.Sig
+let env : Scalar list Control =
+  Control.multi_slider ~name:"env" ~sum_min:0.0 ~sum_max:1.0
+    ~lanes:[ { name = "attack"; min = 0.0; max = 0.5; default = 0.05 };
+             { name = "decay";  min = 0.0; max = 0.5; default = 0.15 } ] ;;
+let a : Scalar = List.nth ~xs:env.value ~i:0 ~default:0.0 ;;
+let _ = render "demo" 8000.0 (sample (constant a) 0s 50ms) ;;
+let _ = Ui.panel ~name:"P" ~controls:[env.ui] ~targets:["demo"] ;;
+)");
+  tp.write("build.json", projectManifest("groupnokey", {"a.synth"}));
+  BuildResult r = buildProject(tp.dir.string());
+  CHECK(r.ok);
+  CHECK(r.panels.size() == 1);
+  CHECK(r.panels[0].controls.size() == 1);
+  CHECK(r.panels[0].controls[0].name == "env");
+  CHECK(r.panels[0].controls[0].key.empty());
+}
+
 TEST(build_the_same_key_in_another_panel_is_fine) {
   // The labels are a window's, so two windows may each use "g".
   BuildResult r = buildKeys(

@@ -73,7 +73,7 @@ enum class Action {
   // app surfaces
   OpenSearch, OpenHelp, ToggleOutline, ToggleWhichKey, LeaveMode,
   // the focused window's contents
-  Scroll, ScrollPage, WidgetAdjust, WidgetActivate, WidgetReset, WidgetStep,
+  Scroll, ScrollPage, ScrollX, WidgetAdjust, WidgetActivate, WidgetReset, WidgetStep,
   WavePlay, WaveZoom, WaveFit, WaveLoop, ScaleWindow,
   // the capture modes
   SearchAccept, SearchStep, RenameAccept,

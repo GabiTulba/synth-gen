@@ -91,6 +91,12 @@ std::vector<std::string> autoKeys(size_t n);
 // a panel that asks for one twice.
 std::vector<std::string> rowKeys(const std::vector<WindowElement>& es);
 
+// The rows Tab steps between: everything with something to do on it. A
+// group's own row is the budget bar it draws and holds no value, so
+// stepping passes over it and lands on its first lane - its key still
+// selects it, for anyone who wants it.
+std::vector<size_t> tabStops(const std::vector<WindowElement>& es);
+
 // What the keys typed so far amount to: one row exactly, the start of
 // at least one, or nothing that can ever match. On Exact, `index` is
 // the row picked.

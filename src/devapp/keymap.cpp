@@ -129,6 +129,14 @@ std::vector<Binding> buildTable() {
       "half a page down");
   add(v, N, ctrl(Key::U), Action::ScrollPage, 0, -0.5, CtxAny, "window",
       "half a page up");
+  // Sideways, for a panel too narrow for what is in it. Ctrl is what
+  // the arrows need here because the bare ones belong to the selected
+  // row, and Ctrl is already the window's own modifier (it scales it
+  // and pages it too).
+  add(v, N, ctrl(Key::Right), Action::ScrollX, 0, 0.25, CtxAny, "window",
+      "scroll right (a panel narrower than its contents)");
+  add(v, N, ctrl(Key::Left), Action::ScrollX, 0, -0.25, CtxAny, "window",
+      "scroll left");
   add(v, N, ctrl(Key::Equal), Action::ScaleWindow, 1, 0, CtxAny, "window",
       "draw this window bigger (Ctrl+0 puts it back)");
   add(v, N, ctrl(Key::Minus), Action::ScaleWindow, -1, 0, CtxAny, "window",

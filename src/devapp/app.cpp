@@ -29,6 +29,9 @@
 
 #include "imgui.h"
 #include "imgui_impl_sdl2.h"
+// For SetKeyOwner: Tab is the shell's row stepper, and taking it off
+// ImGui needs the owner API, which lives in the internal header.
+#include "imgui_internal.h"
 #include "imgui_impl_sdlrenderer2.h"
 #include "keymap.hpp"
 #include "layout.hpp"
@@ -117,6 +120,7 @@ struct Selection {
 struct Deferred {
   float scrollLines = 0;
   float scrollPages = 0;
+  float scrollX = 0;  // sideways, as a fraction of the visible width
   Action wave = Action::None;
   double waveStep = 0;
   void clear() { *this = Deferred{}; }
@@ -161,6 +165,19 @@ struct AppState {
   std::vector<std::string> rowOrder;
   std::vector<std::string> rowKeysNow;
   std::string rowTyped;  // a part-typed key, for windows with many rows
+  std::string rowsWindow;  // which window rowOrder/rowKeysNow describe
+  // What each window's body came to last frame: how tall it drew, the
+  // waveform height it drew it with, and how many waveforms shared
+  // that. Body height grows one-for-one with the waveforms in it, so
+  // these three are enough to solve for the height that fills the
+  // window exactly - see fitWaveHeight. `overflow` is what the
+  // scrollbar was showing, which is how --self-test sees one appear.
+  struct BodyFit {
+    float content = 0, per = 0, overflow = 0, spare = 0, sideways = 0;
+    float width = 0;  // how wide the body's rows came to
+    size_t targets = 0;
+  };
+  std::map<std::string, BodyFit> bodyFit;
   std::vector<SearchItem> index;
   std::vector<Match> matches;
   std::string searchQuery;
@@ -742,11 +759,12 @@ void drawTabBar(AppState& app, float width) {
 // One target inside a window: the row of facts - status, duration, rate,
 // channels - and then the waveform itself, fully interactive.
 void drawTargetElement(AppState& app, const TargetMeta& t, float waveHeight,
-                       std::set<std::string>& wanted, WavePanel** shown,
-                       const std::string& key) {
+                       float panelW, std::set<std::string>& wanted,
+                       WavePanel** shown, const std::string& key) {
   ImGui::PushID(t.name.c_str());
   ImGui::Spacing();
-  ImGui::SeparatorText(rowLabel(key, t.name).c_str());
+  ImGui::SeparatorText(
+      (key.empty() ? t.name : "[" + key + "] " + t.name).c_str());
 
   if (t.status != "ok") {
     ImGui::TextColored(kRed, "%s", t.error.empty() ? "not built"
@@ -778,7 +796,15 @@ void drawTargetElement(AppState& app, const TargetMeta& t, float waveHeight,
                      ? waveHeight + ImGui::GetFrameHeightWithSpacing() +
                            ImGui::GetTextLineHeightWithSpacing()
                      : ImGui::GetContentRegionAvail().y;
-  float blockW = std::max(16.0f, ImGui::GetContentRegionAvail().x);
+  // The canvas spans the panel's own width, not just the part of it in
+  // view. A panel wide enough to scroll sideways would otherwise slide
+  // its waveforms off to the left and leave a gap at the right edge -
+  // scrolling right carrying them away instead of revealing more of
+  // them. `panelW` is how wide the panel came to last frame, so every
+  // canvas in it gets the same width and they line up with each other
+  // and with the rows.
+  float blockW = std::max({16.0f, ImGui::GetContentRegionAvail().x,
+                           panelW - ImGui::GetCursorPos().x});
   if (!ImGui::IsRectVisible(ImVec2(blockW, blockH))) {
     ImGui::Dummy(ImVec2(blockW, blockH));
     ImGui::PopID();
@@ -789,7 +815,7 @@ void drawTargetElement(AppState& app, const TargetMeta& t, float waveHeight,
   wanted.insert(path);
   WavePanel& w = app.wave(path, t.name);
   if (shown) *shown = &w;
-  drawWaveContent(app.player, app.playError, w, waveHeight);
+  drawWaveContent(app.player, app.playError, w, waveHeight, blockW);
   ImGui::PopID();
 }
 
@@ -874,9 +900,8 @@ void drawOverviewBody(AppState& app, const WindowRef& self) {
       bool open = in != 0;
       ImVec2 top = ImGui::GetCursorScreenPos();
       float rowW = std::max(16.0f, ImGui::GetContentRegionAvail().x);
-      if (ImGui::Checkbox(
-              (rowLabel(keyOf[windowId(ref)], p.name) + "###p" + p.name).c_str(),
-              &open))
+      keyGutter(keyOf[windowId(ref)]);
+      if (ImGui::Checkbox((p.name + "###p" + p.name).c_str(), &open))
         app.togglePanel(ref);
       if (in) {
         ImGui::SameLine();
@@ -918,6 +943,64 @@ void drawOverviewBody(AppState& app, const WindowRef& self) {
 
 // One panel window's contents: its controls in the order the panel names
 // them - a component's parts indented under it - then its targets with
+// How tall each waveform is drawn, so that a panel does its best to fit
+// the room it was given rather than reaching for a scrollbar. Called
+// once the control rows above are already placed: what is left over,
+// less what the panel still owes below, split between the waveforms.
+//
+// The floor is the point below which a waveform stops being one - past
+// it the panel gives up and scrolls, which is the honest answer for a
+// window too short for what is in it.
+// How far down a body may draw before it needs a scrollbar, in the same
+// window-space coordinates GetCursorPos reports - so the fit below and
+// the measurement drawLeaf takes are the same quantity, which is what
+// makes the solve exact rather than nearly right.
+//
+// Not GetWindowHeight: that is the outer box, and a horizontal
+// scrollbar takes a strip off the bottom of it. Written as the cursor
+// plus what is left because both halves move with the scroll and the
+// sum does not.
+float bodyInnerHeight() {
+  return ImGui::GetCursorPos().y + ImGui::GetContentRegionAvail().y;
+}
+
+float fitWaveHeight(AppState& app, const std::string& id, size_t n,
+                   float floorPer) {
+  if (n == 0) return -1.0f;
+  // A pixel of slack: a body that comes to exactly the window's height
+  // is one rounding error away from a scrollbar, and the bar it would
+  // put up is the useless kind - a few pixels of travel to reach the
+  // last button.
+  float innerH = bodyInnerHeight() - 1.0f;
+
+  auto it = app.bodyFit.find(id);
+  if (it != app.bodyFit.end() && it->second.targets == n &&
+      it->second.per > 0 && it->second.content > 0) {
+    // Solved from the body's own measurement rather than estimated.
+    // Last frame it drew `content` tall with waveforms `per` tall, and
+    // everything else in it - the headings, the format lines, the
+    // transport rows, the control rows above, the defaults button
+    // below - is a fixed cost that does not move when the waveforms
+    // do. So content = fixed + n*per, and the height that fills the
+    // window exactly follows in one step. This counts the separator
+    // padding and the button's descender as they really drew, which is
+    // the part an estimate here kept getting a few pixels wrong - and
+    // a few pixels is all it takes to raise a scrollbar.
+    return std::max(floorPer,
+                    it->second.per + (innerH - it->second.content) / (float)n);
+  }
+
+  // No measurement yet - the window's first frame. An estimate close
+  // enough to draw once; the line above corrects it on the next.
+  const ImGuiStyle& st = ImGui::GetStyle();
+  float chrome = st.ItemSpacing.y * 2 + st.SeparatorTextPadding.y * 2 +
+                 ImGui::GetTextLineHeightWithSpacing() * 2 +
+                 ImGui::GetFrameHeightWithSpacing();
+  float footer = ImGui::GetFrameHeightWithSpacing() + st.ItemSpacing.y;
+  float room = innerH - ImGui::GetCursorPos().y - footer - (float)n * chrome;
+  return std::max(floorPer, room / (float)n);
+}
+
 // their waveforms. Every row's rectangle is recorded as it is drawn, so
 // the hint badges and the focus ring land on it.
 void drawPanelBody(AppState& app, UnitState& u, const PanelMeta& panel,
@@ -928,16 +1011,35 @@ void drawPanelBody(AppState& app, UnitState& u, const PanelMeta& panel,
   rects.clear();
 
   size_t drawable = 0;
+  float floorPer = 0;
   for (const WindowElement& e : els) {
     if (e.kind != WindowElement::Kind::Target) continue;
     for (const TargetMeta& t : u.loaded.meta.targets)
       if (t.name == e.name && t.status == "ok" && t.kind != "visual" &&
-          !t.artifact.empty())
+          !t.artifact.empty()) {
         drawable++;
+        // How short this one may be squeezed. A canvas splits its
+        // height between its channels and each lane has a floor of its
+        // own (drawWaveContent), so a stereo target needs twice the
+        // room a mono one does before the shape stops reading.
+        int ch = std::max(1, t.channels);
+        floorPer = std::max(floorPer,
+                            (float)ch * 28.0f * gUiScale + (ch - 1) * 4.0f);
+      }
   }
-  // A lone target fills the window; several get a readable fixed height
-  // each and the window scrolls.
-  float perTarget = drawable > 1 ? 150.0f * gUiScale : -1.0f;
+  // Worked out at the first target rather than here: by then the
+  // control rows are on screen and what is left is exactly what the
+  // waveforms have to share.
+  float perTarget = 0;
+  // How wide the body came to last frame - the widest control row, or
+  // more often a waveform's own transport row, which is what usually
+  // pushes a panel past its window. Every canvas is drawn to that same
+  // width, so they line up with the rows and with each other and
+  // scrolling sideways reveals more of them. Taken from the frame
+  // before because the first target cannot see how wide the last one
+  // will make the panel; the canvases are kept out of the measurement
+  // (drawWaveContent) so this settles instead of ratcheting.
+  float panelW = app.bodyFit[windowId(ref)].width;
 
   std::vector<std::string> keys = rowKeys(els);
   bool anyDirty = false;
@@ -970,14 +1072,16 @@ void drawPanelBody(AppState& app, UnitState& u, const PanelMeta& panel,
         for (size_t j = i + 1;
              j < els.size() && els[j].kind == WindowElement::Kind::Lane; j++)
           laneKeys.push_back(keys[j]);
-        drawGroupByName(u, controls, e.name, anyDirty, keys[i], &laneKeys,
-                        &rects);
+        drawGroupByName(u, controls, e.name, anyDirty, &laneKeys, &rects);
         break;
       }
       case WindowElement::Kind::Target:
+        if (perTarget == 0)
+          perTarget = fitWaveHeight(app, windowId(ref), drawable, floorPer);
         for (const TargetMeta& t : u.loaded.meta.targets)
           if (t.name == e.name)
-            drawTargetElement(app, t, perTarget, wanted, &wave, keys[i]);
+            drawTargetElement(app, t, perTarget, panelW, wanted, &wave,
+                              keys[i]);
         break;
       case WindowElement::Kind::Lane:
       case WindowElement::Kind::Panel:
@@ -1011,6 +1115,13 @@ void drawPanelBody(AppState& app, UnitState& u, const PanelMeta& panel,
   }
   if (!u.controlsError.empty())
     ImGui::TextColored(kRed, "controls: %s", u.controlsError.c_str());
+
+  // The other half of the measurement drawLeaf takes: what this frame's
+  // body height was drawn with, so the next frame can solve for the one
+  // that fits. A panel with no waveforms leaves nothing to solve.
+  AppState::BodyFit& fit = app.bodyFit[windowId(ref)];
+  fit.per = perTarget;
+  fit.targets = drawable;
 }
 
 // Draws one window's contents at its own scale, and puts the style back
@@ -1122,7 +1233,13 @@ void drawLeaf(AppState& app, const PlacedWindow& pw,
   if (ImGui::IsItemHovered()) ImGui::SetTooltip("close (Alt+q)");
   ImGui::Separator();
 
-  ImGui::BeginChild("body", ImVec2(0, 0), false);
+  // Sideways as well as down. Vertically a panel does its best not to
+  // need the bar (the waveforms give up their height first); across it
+  // has no such lever - a knob is the size it is, and a name is as long
+  // as it was written - so a window narrower than its widest row would
+  // otherwise just cut them off with nothing to say so.
+  ImGui::BeginChild("body", ImVec2(0, 0), false,
+                    ImGuiWindowFlags_HorizontalScrollbar);
   // A scroll the keyboard asked for lands on the focused window.
   if (pw.focused && app.deferred.scrollLines != 0)
     ImGui::SetScrollY(ImGui::GetScrollY() +
@@ -1131,6 +1248,9 @@ void drawLeaf(AppState& app, const PlacedWindow& pw,
   if (pw.focused && app.deferred.scrollPages != 0)
     ImGui::SetScrollY(ImGui::GetScrollY() +
                       app.deferred.scrollPages * ImGui::GetWindowHeight());
+  if (pw.focused && app.deferred.scrollX != 0)
+    ImGui::SetScrollX(ImGui::GetScrollX() +
+                      app.deferred.scrollX * ImGui::GetWindowWidth());
 
   if (ref.kind == WindowRef::Kind::Overview) {
     drawOverviewBody(app, ref);
@@ -1142,6 +1262,15 @@ void drawLeaf(AppState& app, const PlacedWindow& pw,
     else
       ImGui::TextDisabled("this panel is not in the build any more");
   }
+  // Read while the body is still the current window: what it came to,
+  // and whether that raised a bar. The waveform height it was drawn
+  // with was recorded by drawPanelBody on its way through.
+  AppState::BodyFit& fit = app.bodyFit[id];
+  fit.content = ImGui::GetCursorPos().y;
+  fit.overflow = ImGui::GetScrollMaxY();
+  fit.spare = bodyInnerHeight() - fit.content;
+  fit.sideways = ImGui::GetScrollMaxX();
+  fit.width = ImGui::GetCurrentWindow()->ContentSize.x;
   ImGui::EndChild();
   if (font) ImGui::PopFont();
   ImGui::End();
@@ -1581,6 +1710,15 @@ void refreshRows(AppState& app) {
   app.rowOrder.clear();
   app.rowKeysNow.clear();
   auto w = focusedWindow(app.tab());
+  // A part-typed key belongs to the window it was started in: focus
+  // moving anywhere - a digit, a direction, a tab, a search result, a
+  // window closing under it - abandons it rather than finishing it
+  // against a different set of rows.
+  std::string id = w ? windowId(*w) : std::string();
+  if (id != app.rowsWindow) {
+    app.rowsWindow = id;
+    app.rowTyped.clear();
+  }
   if (!w) return;
   std::vector<WindowElement> es = app.elementsOf(*w);
   app.rowKeysNow = rowKeys(es);
@@ -1680,18 +1818,22 @@ void activateSelected(AppState& app) {
 }
 
 void stepSelection(AppState& app, int by) {
-  refreshRows(app);
-  if (app.rowOrder.empty()) return;
+  // No refresh here: handleInput brought the rows up to date before it
+  // read the key that got us here, and nothing since has moved focus.
   auto w = focusedWindow(app.tab());
   if (!w) return;
+  std::vector<size_t> stops = tabStops(app.elementsOf(*w));
+  while (!stops.empty() && stops.back() >= app.rowOrder.size()) stops.pop_back();
+  if (stops.empty()) return;
+
   int at = -1;
   if (app.sel.active() && app.sel.window == *w)
-    for (size_t i = 0; i < app.rowOrder.size(); i++)
-      if (app.rowOrder[i] == app.sel.element) at = (int)i;
-  int n = (int)app.rowOrder.size();
+    for (size_t k = 0; k < stops.size(); k++)
+      if (app.rowOrder[stops[k]] == app.sel.element) at = (int)k;
+  int n = (int)stops.size();
   int next = at < 0 ? (by > 0 ? 0 : n - 1) : (at + by % n + n) % n;
   app.sel.window = *w;
-  app.sel.element = app.rowOrder[(size_t)next];
+  app.sel.element = app.rowOrder[stops[(size_t)next]];
 }
 
 void applyAction(AppState& app, const KeyMachine::Step& s) {
@@ -1753,6 +1895,7 @@ void applyAction(AppState& app, const KeyMachine::Step& s) {
       break;
     case Action::Scroll: app.deferred.scrollLines = (float)s.step; break;
     case Action::ScrollPage: app.deferred.scrollPages = (float)s.step; break;
+    case Action::ScrollX: app.deferred.scrollX = (float)s.step; break;
     case Action::WidgetAdjust: adjustSelected(app, s.step); break;
     case Action::WidgetActivate: activateSelected(app); break;
     case Action::WidgetReset: {
@@ -1795,8 +1938,6 @@ bool takeBareKey(AppState& app, Chord c) {
     if (want < ws.size()) {
       focusWindow(app.tab(), ws[want]);
       app.sel.clear();
-      app.rowTyped.clear();
-      refreshRows(app);
     }
     return true;  // a number is a window address, used or not
   }
@@ -1843,7 +1984,32 @@ void trackAltTap(AppState& app) {
   }
 }
 
+// Tab is ours. ImGui runs its own tabbing pass unconditionally - it is
+// how a form's text fields cycle, and it is live even with keyboard
+// navigation off (imgui.cpp, NavUpdateCreateTabbingRequest) - and it
+// does not merely move focus: landing on a slider or drag opens it for
+// typing, which is how pressing Tab here used to drop the caret into
+// some control's value. Claiming the key stops that pass from seeing
+// it, since the pass asks for Tab as an unowned key. The claim is
+// re-made every frame because ownership lapses on release, and it is
+// dropped while a field of ours is up so Tab reaches the caret there.
+void claimTabKey(AppState& app) {
+  if (app.keys.mode == Mode::Search || app.keys.mode == Mode::Rename) return;
+  // A fixed id rather than GetID: this runs before any window is
+  // opened, so there is no id stack worth hashing against - all the
+  // owner needs to be is stable and not zero.
+  ImGui::SetKeyOwner(ImGuiKey_Tab, (ImGuiID)0x5E7D7AB1);
+}
+
 void handleInput(AppState& app, unsigned ctx) {
+  claimTabKey(app);
+  // What the bare letters address, brought up to date before anything
+  // reads them. Focus moves for a dozen reasons - a direction, a tab, a
+  // search result, a window closing, a rebuild changing a panel's rows,
+  // the very first frame of all - and every one of them has to leave
+  // the letters naming what is actually on screen, so this is done from
+  // the focus itself once a frame rather than at each of those sites.
+  refreshRows(app);
   trackAltTap(app);
   Chord c = readChord();
   if (!c.valid()) return;
@@ -2116,6 +2282,9 @@ int main(int argc, char** argv) {
 
   bool done = false;
   int frames = 0;
+  size_t startupRows = 0;      // rows keyed on the opening frame
+  std::string tabbedTo = "(none)";  // where Tab left the selection
+  bool tabOpenedAnEdit = false;     // ...and whether ImGui grabbed it
   const ImGuiStyle restingStyle = ImGui::GetStyle();
   Uint64 last = SDL_GetPerformanceCounter();
   while (!done) {
@@ -2202,6 +2371,7 @@ int main(int argc, char** argv) {
         ImGuiKey key;
         bool alt;
         bool ctrl = false;
+        bool shift = false;
       };
       // Every other frame: ImGui trickles a queue that changes one key
       // twice, so the modifier released with a chord is still down on
@@ -2229,6 +2399,23 @@ int main(int argc, char** argv) {
           // back: a scale left applied would compound every frame.
           {31, ImGuiKey_Minus, false, true},
           {33, ImGuiKey_Minus, false, true},
+          // Tab steps the rows of a panel window - the one place ImGui
+          // would otherwise run its own tabbing pass and drop the caret
+          // into whichever slider it landed on.
+          {35, ImGuiKey_2, false},
+          {37, ImGuiKey_Tab, false},
+          {39, ImGuiKey_Tab, false},
+          // A panel with room to spare, so the waveform fitting has
+          // something to solve rather than bottoming out on its floor:
+          // the busiest panel of the three, alone in a tab of its own.
+          {41, ImGuiKey_3, false},              // focus Kick
+          {43, ImGuiKey_3, true, false, true},  // send it to tab 3
+          {45, ImGuiKey_3, true},               // and follow it there
+          // ...and sideways, which at this window size does nothing -
+          // the point is that it is bound, reaches the body, and clamps
+          // rather than running off the end.
+          {47, ImGuiKey_RightArrow, false, true},
+          {49, ImGuiKey_RightArrow, false, true},
       };
       for (const Press& k : script) {
         if (k.frame != frames) continue;
@@ -2245,8 +2432,10 @@ int main(int argc, char** argv) {
         }
         if (k.alt) io.AddKeyEvent(ImGuiMod_Alt, true);
         if (k.ctrl) io.AddKeyEvent(ImGuiMod_Ctrl, true);
+        if (k.shift) io.AddKeyEvent(ImGuiMod_Shift, true);
         io.AddKeyEvent(k.key, true);
         io.AddKeyEvent(k.key, false);
+        if (k.shift) io.AddKeyEvent(ImGuiMod_Shift, false);
         if (k.ctrl) io.AddKeyEvent(ImGuiMod_Ctrl, false);
         if (k.alt) io.AddKeyEvent(ImGuiMod_Alt, false);
       }
@@ -2260,7 +2449,41 @@ int main(int argc, char** argv) {
     ImGui_ImplSDLRenderer2_NewFrame();
     ImGui_ImplSDL2_NewFrame();
     ImGui::NewFrame();
+    // ImGui's tabbing pass only runs for the window it considers
+    // focused, which in the real app is whichever leaf was last
+    // clicked. Nothing clicks in here, so the script hands that focus
+    // over itself - without it the Tab frames below would pass whether
+    // the key was claimed or not.
+    if (selfTest && frames >= 36)
+      if (auto w = focusedWindow(app.tab())) {
+        // The rows live in the leaf's scrolling child, so that is the
+        // window a click lands in and the one ImGui would tab through.
+        // Found by name rather than focused through a hook in the
+        // drawing code: the child's id is ImGui's to make, not ours.
+        std::string want = "###win " + windowId(*w) + "/body_";
+        ImGuiContext& gg = *ImGui::GetCurrentContext();
+        for (ImGuiWindow* iw : gg.Windows)
+          if (std::string(iw->Name).rfind(want, 0) == 0)
+            ImGui::FocusWindow(iw);
+      }
     drawFrame(app);
+    if (selfTest) {
+      // Before a single key has been typed: whatever holds focus on the
+      // opening frame has to have its rows keyed already, or the letters
+      // on screen would address nothing until something else moved the
+      // focus for them.
+      if (frames == 0) startupRows = app.rowKeysNow.size();
+      // What Tab left behind, read on the frames after the two presses.
+      if (frames >= 38 && frames <= 40) {
+        tabbedTo = app.sel.active() ? app.sel.element : "(none)";
+        // ImGui's tabbing pass activates what it lands on, and on a
+        // slider that means opening it for typing. Nothing of ours ever
+        // wants an active item here, so anything active is that pass
+        // having got the key.
+        if (ImGui::IsAnyItemActive() || ImGui::GetIO().WantTextInput)
+          tabOpenedAnEdit = true;
+      }
+    }
     ImGui::Render();
     SDL_SetRenderDrawColor(renderer, 18, 18, 22, 255);
     SDL_RenderClear(renderer);
@@ -2275,7 +2498,7 @@ int main(int argc, char** argv) {
     }
     app.maybeSave(dtMs);
 
-    if (selfTest && ++frames >= 37) done = true;
+    if (selfTest && ++frames >= 55) done = true;
     if (!selfTest && !vsync) {
       double frameMs = (double)(SDL_GetPerformanceCounter() - now) * 1000.0 /
                        (double)SDL_GetPerformanceFrequency();
@@ -2325,6 +2548,35 @@ int main(int argc, char** argv) {
                 app.activeTab);
     std::printf("self-test: %zu row(s) keyed, left mode %s, selection '%s'\n",
                 labelled, endedIn.c_str(), picked.c_str());
+    std::printf("self-test: %zu row(s) keyed on the opening frame\n",
+                startupRows);
+    if (startupRows == 0) selfTestFailed = true;
+    std::printf("self-test: tab stepped to '%s', imgui took the key: %s\n",
+                tabbedTo.c_str(), tabOpenedAnEdit ? "YES" : "no");
+    if (tabbedTo == "(none)" || tabOpenedAnEdit) selfTestFailed = true;
+    // A window whose waveforms were fitted to it should not also need a
+    // scrollbar: that is the whole point of fitting them. Reported per
+    // window so the one that overflowed is named, not just counted.
+    for (auto& [id, fit] : app.bodyFit) {
+      if (fit.targets == 0) continue;
+      if (fit.overflow > 0)
+        std::printf("self-test: window '%s' scrolls %.0fpx past its bottom "
+                    "(waveforms at %.0fpx, the floor)\n",
+                    id.c_str(), fit.overflow, fit.per);
+      else
+        std::printf("self-test: window '%s' fits, %.0fpx to spare "
+                    "(waveforms at %.0fpx)\n",
+                    id.c_str(), fit.spare, fit.per);
+      if (fit.sideways > 0)
+        std::printf("self-test: window '%s' reaches %.0fpx past its right "
+                    "edge - Ctrl+Left/Right\n",
+                    id.c_str(), fit.sideways);
+      // A window with room left over should have spent it on the
+      // waveforms: more than a line of slack means the solve did not
+      // converge, which is a scrollbar waiting to happen elsewhere.
+      if (fit.overflow == 0 && fit.spare > ImGui::GetTextLineHeight())
+        selfTestFailed = true;
+    }
     for (auto& [id, scale] : app.windowScales) {
       int at = gFonts.indexNear(gFonts.base * scale);
       std::printf("self-test: window '%s' draws at %.0f%% - font baked at "

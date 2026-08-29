@@ -94,10 +94,14 @@ struct WavePanel {
   bool hasSelection() const { return selStart >= 0 && selEnd > selStart; }
 };
 
-// The key a row answers to, at the head of its name: "[s] sustain". The
-// keys are always on screen rather than summoned, so this is how every
-// row is titled.
-std::string rowLabel(const std::string& key, const std::string& name);
+// The key a row answers to, drawn in a gutter at the head of the row
+// and followed by whatever the row draws. Every row starts with one, so
+// the keys line up in a column down the left of the window and a row
+// you can address is never one you have to hunt for. Empty draws the
+// gutter and nothing in it, keeping the rows aligned.
+void keyGutter(const std::string& key);
+// The width that gutter takes, for anything laying out around it.
+float keyGutterWidth();
 
 // One ungrouped control: a knob, slider, tickbox or option list, its
 // name, the pending marker and its reset button. Returns true while it
@@ -106,12 +110,13 @@ bool drawOneControl(UnitState& u, const ControlMeta& c,
                     const std::string& key = {});
 
 // One multi_slider group: lanes that share a budget for their sum, each
-// drawn against the band the others leave it. `laneKeys` is the key
-// each lane answers to, in lane order, and `laneRects` collects where
-// they landed - a lane is a row like any other, selected and nudged on
-// its own.
+// drawn against the band the others leave it. The heading answers to no
+// key of its own - there is nothing to select in it - so only the lanes
+// are keyed: `laneKeys` is the key each answers to, in lane order, and
+// `laneRects` collects where they landed, a lane being a row like any
+// other, selected and nudged on its own.
 bool drawControlGroup(UnitState& u, const std::vector<ControlMeta>& controls,
-                      size_t first, size_t count, const std::string& key = {},
+                      size_t first, size_t count,
                       const std::vector<std::string>* laneKeys = nullptr,
                       std::map<std::string, Rect>* laneRects = nullptr);
 
@@ -119,15 +124,18 @@ bool drawControlGroup(UnitState& u, const std::vector<ControlMeta>& controls,
 // exists, which is how a caller tells a group member from a control.
 bool drawGroupByName(UnitState& u, const std::vector<ControlMeta>& controls,
                      const std::string& group, bool& anyDirty,
-                     const std::string& key = {},
                      const std::vector<std::string>* laneKeys = nullptr,
                      std::map<std::string, Rect>* laneRects = nullptr);
 
 // The waveform: min/max envelope lanes per channel, wheel zoom about the
 // cursor, right-drag pan, left-drag selection, and playback of the
-// selection or the visible range. `availY` is the vertical room to take;
-// -1 fills what is left of the window.
+// selection or the visible range. `availY` is the vertical room to take
+// and `availX` the horizontal, each -1 to fill what is left of the
+// window. A panel wide enough to scroll sideways passes its own width
+// rather than the visible one, so scrolling reveals more of the
+// waveform instead of carrying it off the left edge.
 void drawWaveContent(AudioPlayer& player, std::string& playError,
-                     WavePanel& p, float availY = -1.0f);
+                     WavePanel& p, float availY = -1.0f,
+                     float availX = -1.0f);
 
 }  // namespace synth::devapp

@@ -99,7 +99,7 @@ and how big it is.
   is the **overview**: per unit the project name, build status,
   diagnostics, and the tick list of its panels. Ticking one there is how
   a window comes into existence; the row also says which tab is holding
-  it. Those rows are elements like any other — `f` labels them, `Tab`
+  it. Those rows are elements like any other — each wears its key, `Tab`
   steps through them and `Enter` ticks them — and ticking one keeps the
   focus on the overview, so a run of them is a run of keystrokes.
 - **Tabs** are numbered and can be named (`Alt+,`). `Alt+<n>` goes to a
@@ -140,8 +140,11 @@ and how big it is.
     and the next window opened here goes that way instead.
   - Grouping *everything* in a container re-orients that container
     rather than nesting a copy of it inside itself.
-- Each window **scrolls** its own contents (`j` / `k`, `Ctrl+d` /
-  `Ctrl+u`), so a panel with more in it than fits is never truncated,
+- Each window **scrolls** its own contents (`Up` / `Down`, `Ctrl+d` /
+  `Ctrl+u` for half a page, `Ctrl+Left` / `Ctrl+Right` sideways — the
+  bare arrows belong to the selected row, so the window's own scrolling
+  takes the modifier it already uses for paging and scaling), so a panel
+  with more in it than fits is never truncated,
   and **draws at its own scale**: `Ctrl+=` and `Ctrl+-` make one
   window's contents bigger or smaller, `Ctrl+0` puts it back. This is a
   re-render, not a magnification — the padding, spacing, scrollbars,
@@ -180,6 +183,8 @@ from it, so it cannot drift out of date.
 | a letter | select the row that shows it |
 | a digit | focus the window that shows it |
 | `Tab` / `Shf+Tab` | select the next row / the one before |
+| `Up` / `Down`, `Ctrl+d` / `Ctrl+u` | scroll this window, a line or half a page |
+| `Ctrl+Left` / `Ctrl+Right` | scroll it sideways, when it is narrower than its rows |
 | `Ctrl+=` / `Ctrl+-` / `Ctrl+0` | draw this window bigger / smaller / at 100% |
 | `Left` `Right` (`Shf` for finer) | nudge the selected control; `Alt+Backspace` puts it back to its default |
 | `Enter` | flip a tickbox, take the next option, or show/hide a panel from the overview |
@@ -196,7 +201,9 @@ from it, so it cannot drift out of date.
   modifier, nothing to summon. A panel can reserve a row's letter with
   `Core.Ui.key` where it lists the controller; everything else takes the
   first free letter in panel order, so a reservation costs no other row
-  its key. Automatic keys are all the same length and never start with a
+  its key. A `multi_slider` heading is the exception, and wears none:
+  there is nothing on it to select, so the letters run past it to its
+  lanes, which are rows like any other. Automatic keys are all the same length and never start with a
   reserved letter, so the typing is never ambiguous.
 - **Every window wears its number**, counted in tree order — the same
   order the layout reads in. A bare digit focuses that window. Numbers
@@ -207,7 +214,12 @@ from it, so it cannot drift out of date.
 - A `multi_slider` **lane is a row of its own**, keyed and nudged
   separately, under the budget bar its group draws. Nudging one is
   clamped to the band the other lanes leave it, exactly as dragging it
-  is, so no lane ever moves because another one did.
+  is, so no lane ever moves because another one did. The group's own row
+  is that budget bar and holds no value, so `Tab` steps over it onto the
+  first lane — its key still selects it.
+- The keys sit in a **gutter down the left of the window**, so they line
+  up in a column and every row's widget starts at the same place. A row
+  with no key still gets the gutter, which is what keeps them aligned.
 - A keyboard edit goes through exactly the same path as a drag: it
   writes the unit's `controls.json` and shows the same pending `*`.
 
@@ -247,9 +259,35 @@ from it, so it cannot drift out of date.
   applies immediately). The canvas owns the wheel while the pointer is
   over it, so zooming never scrolls the window out from under you.
   Visual targets name their `.svg` instead; playback is audio-only.
-- A window with one target gives it the whole space; with several, each
-  gets a readable fixed height and the window scrolls. Audio is decoded
-  only for targets actually on screen and released when they scroll away
+- **Waveforms are sized to the window they are in.** Everything else in
+  a panel — the control rows, each waveform's heading, format line and
+  transport row, the `defaults` button at the bottom — costs the same
+  whatever height the waveforms are drawn at, so the body's height is
+  that fixed cost plus one share per target. The panel measures what it
+  actually came to last frame and solves for the share that fills the
+  window exactly, to within a pixel. One target takes the lot; four
+  share it. A panel reaches for a scrollbar only when its own rows do
+  not fit, not merely because it has waveforms in it — and never for
+  the few pixels a button's descender would otherwise cost it.
+
+  The split stops at a floor: a canvas divides its height between the
+  channels it has, and a lane below about 28px stops showing a shape at
+  all, so a stereo target holds out for twice the room a mono one does.
+  Under that floor the panel gives up and scrolls, which is the honest
+  answer for a window too short for what is in it — make it taller, or
+  send a panel to a tab of its own.
+
+  Across, a panel has no such lever: a knob is the size it is and a name
+  is as long as it was written, and the widgets that size themselves to
+  the window already stop at a minimum width. So a window narrower than
+  its widest row gets a horizontal scrollbar rather than quietly cutting
+  the row off at the edge. The waveforms are drawn to the panel's whole
+  width rather than to the part of it in view, so scrolling sideways
+  reveals more of them instead of carrying them off the left edge — and
+  they are the one thing that does not *set* that width, or the two
+  would push each other wider every frame.
+
+  Audio is decoded only for targets actually on screen and released when they scroll away
   or the window closes — a couple of minutes of stereo costs about 90 MB
   as samples.
 - Shows the build's live controls (`Core.Control`) with the widget each

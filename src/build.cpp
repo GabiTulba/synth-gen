@@ -715,13 +715,28 @@ static BuildResult buildUnitImpl(const std::string& projectDir,
       if (!c.group.empty()) groupNames.insert(c.group);
     }
     for (auto& p : panels) {
-      for (auto& m : p.controls)
+      for (auto& m : p.controls) {
         if (!controlNames.count(m.name) && !groupNames.count(m.name)) {
           r.diags.error(p.file, p.span,
                         "panel '" + p.name + "': no control or control group "
                         "named '" + m.name + "'");
           evalOk = false;
+          continue;
         }
+        // A group heading has no value to nudge - its lanes do, and the
+        // window keys those on its behalf. Reserving a key for the group
+        // would name a row that cannot be selected, so it is refused
+        // here rather than silently ignored by the dev app.
+        if (!m.keys.empty() && groupNames.count(m.name) &&
+            !controlNames.count(m.name)) {
+          r.diags.error(p.file, p.span,
+                        "panel '" + p.name + "': the key '" + m.keys.front() +
+                            "' is reserved for the multi_slider group '" +
+                            m.name + "', which is a heading rather than a "
+                            "row - its lanes take keys of their own");
+          evalOk = false;
+        }
+      }
       for (auto& n : p.targets)
         if (!byName.count(n)) {
           r.diags.error(p.file, p.span,

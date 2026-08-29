@@ -538,7 +538,7 @@ panel to name.
 
   ```
   let _ = Ui.panel ~name:"Kick"
-            ~controls:[ Ui.key ~k:"e" ~c:env.ui ;
+            ~controls:[ Ui.key ~k:"a" ~c:amp.ui ;
                         Ui.key ~k:"s" ~c:sustain.ui ;
                         decay_curve.ui ;
                         noise_amp.ui ]
@@ -556,6 +556,18 @@ panel to name.
   the first free key in panel order, so reserving one never costs
   another row its label, and a window with no reservations labels
   exactly as it did before they existed.
+
+  A `multi_slider` group is the one controller a key cannot be reserved
+  for. It draws as a heading over its lanes, and a heading holds no
+  value to select or nudge — the lanes do, and each takes a key of its
+  own — so naming one is a build error rather than a label the dev app
+  would have to quietly drop:
+
+  ```
+  error: panel 'Kick': the key 'e' is reserved for the multi_slider
+         group 'asdr lanes', which is a heading rather than a row - its
+         lanes take keys of their own
+  ```
 
   A panel that reserves one key twice, or gives one controller two keys,
   is a build error — the labels are what its window shows, so each can

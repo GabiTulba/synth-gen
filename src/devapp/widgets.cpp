@@ -2,11 +2,12 @@
 
 #include <algorithm>
 #include <cmath>
-#include <cstdio>
-#include <cstdlib>
 #include <set>
 
 #include "imgui.h"
+// For DC.CursorMaxPos: the canvas is sized by the panel, not the
+// other way round, so it must not report a width of its own.
+#include "imgui_internal.h"
 
 namespace synth::devapp {
 
@@ -15,8 +16,21 @@ float gUiScale = 1.0f;
 // The control values worth recording: everything that differs from its
 // declaration's default. The same set goes to the project state file and
 // to the build's controls.json, so the two can be compared directly.
-std::string rowLabel(const std::string& key, const std::string& name) {
-  return key.empty() ? name : "[" + key + "] " + name;
+float keyGutterWidth() { return 30.0f * gUiScale; }
+
+void keyGutter(const std::string& key) {
+  // Measured from where the row itself begins, not from the window's
+  // edge, so a row nested under a component keeps its indent instead of
+  // being dragged back into the top-level column.
+  float rowStart = ImGui::GetCursorPosX();
+  ImGui::AlignTextToFramePadding();
+  if (key.empty())
+    ImGui::TextUnformatted(" ");
+  else
+    ImGui::TextDisabled("[%s]", key.c_str());
+  // An absolute stop rather than a plain SameLine: every row's widget
+  // then starts at the same x, whatever its key is.
+  ImGui::SameLine(rowStart + keyGutterWidth());
 }
 
 std::map<std::string, double> unitOverrides(const UnitState& u) {
@@ -299,7 +313,7 @@ bool drawControlTail(UnitState& u, ControlUi& ui, const ControlMeta& c) {
 // invariant holds after every drag without any lane moving on its own.
 // Returns true if any lane is waiting on a rebuild.
 bool drawControlGroup(UnitState& u, const std::vector<ControlMeta>& controls,
-                      size_t first, size_t count, const std::string& key,
+                      size_t first, size_t count,
                       const std::vector<std::string>* laneKeys,
                       std::map<std::string, Rect>* laneRects) {
   const ControlMeta& head = controls[first];
@@ -310,9 +324,13 @@ bool drawControlGroup(UnitState& u, const std::vector<ControlMeta>& controls,
   ImGui::PushID(head.group.c_str());
   float width = std::max(200.0f * gUiScale,
                          ImGui::GetContentRegionAvail().x * 0.45f);
+  // An empty gutter, not a key: the heading is a label over the lanes,
+  // and only they are selectable. It still leads with the gutter so the
+  // lane keys below it line up in the same column as every other row's.
+  keyGutter({});
   ImGui::AlignTextToFramePadding();
   ImGui::TextColored(ImVec4(0.7f, 0.8f, 1.0f, 1.0f), "%s",
-                     rowLabel(key, head.group).c_str());
+                     head.group.c_str());
   ImGui::SameLine();
   if (head.sumMin > 0)
     ImGui::TextDisabled("sum %.4g of %.4g (at least %.4g)", sum, head.sumMax,
@@ -330,6 +348,9 @@ bool drawControlGroup(UnitState& u, const std::vector<ControlMeta>& controls,
     ImGui::PushID((int)k);
     ImVec2 laneTop = ImGui::GetCursorScreenPos();
     float laneW = std::max(16.0f, ImGui::GetContentRegionAvail().x);
+    // A lane is a row like any other, so it leads with its own key.
+    keyGutter(laneKeys && k < laneKeys->size() ? (*laneKeys)[k]
+                                               : std::string());
     bool edited = laneSliderFloat("##lane", &ui.value, (float)c.min,
                                   (float)c.max, lo, hi, width,
                                   16.0f * gUiScale);
@@ -345,10 +366,7 @@ bool drawControlGroup(UnitState& u, const std::vector<ControlMeta>& controls,
     // The lane's own name; the group already named itself above. A lane
     // is a row of its own, so it wears its own key.
     const char* lane = c.name.c_str() + head.group.size() + 1;
-    std::string laneKey =
-        laneKeys && k < laneKeys->size() ? (*laneKeys)[k] : std::string();
-    ImGui::Text("%s  %.4g", rowLabel(laneKey, lane).c_str(),
-                (double)ui.value);
+    ImGui::Text("%s  %.4g", lane, (double)ui.value);
     if (hi < c.max - 1e-6) {
       ImGui::SameLine();
       ImGui::TextDisabled("(<= %.4g)", (double)hi);
@@ -392,6 +410,8 @@ bool drawOneControl(UnitState& u, const ControlMeta& c,
   {
     ControlUi& ui = u.controlUi[c.name];
     ImGui::PushID(c.name.c_str());
+    // Every row leads with its key, whatever kind of control follows.
+    keyGutter(key);
     bool edited = false, released = false;
     if (c.kind == "knob") {
       edited = knobFloat("##knob", &ui.value, (float)c.min, (float)c.max,
@@ -399,7 +419,7 @@ bool drawOneControl(UnitState& u, const ControlMeta& c,
       released = ImGui::IsItemDeactivated() && ui.editing;
       ImGui::SameLine();
       ImGui::AlignTextToFramePadding();
-      ImGui::Text("%s  %.4g", rowLabel(key, c.name).c_str(), (double)ui.value);
+      ImGui::Text("%s  %.4g", c.name.c_str(), (double)ui.value);
     } else if (c.kind == "toggle") {
       // A tickbox has no drag: the click that flips it is also the end
       // of the edit, so the override write lands immediately.
@@ -410,14 +430,14 @@ bool drawOneControl(UnitState& u, const ControlMeta& c,
       }
       ImGui::SameLine();
       ImGui::AlignTextToFramePadding();
-      ImGui::TextUnformatted(rowLabel(key, c.name).c_str());
+      ImGui::TextUnformatted(c.name.c_str());
     } else if (c.kind == "choice") {
       // One tickbox per option, the value their index. Labels come from
       // the build; "##k" keeps two same-named options apart for ImGui
       // without showing anything extra.
       int pick = (int)std::lround((double)ui.value);
       ImGui::AlignTextToFramePadding();
-      ImGui::TextUnformatted(rowLabel(key, c.name).c_str());
+      ImGui::TextUnformatted(c.name.c_str());
       for (size_t k = 0; k < c.options.size(); k++) {
         ImGui::SameLine();
         std::string label = c.options[k] + "##" + std::to_string(k);
@@ -437,7 +457,7 @@ bool drawOneControl(UnitState& u, const ControlMeta& c,
       }
       released = ImGui::IsItemDeactivatedAfterEdit();
       ImGui::SameLine();
-      ImGui::TextUnformatted(rowLabel(key, c.name).c_str());
+      ImGui::TextUnformatted(c.name.c_str());
     } else {
       ImGui::SetNextItemWidth(
           std::max(160.0f * gUiScale,
@@ -446,7 +466,7 @@ bool drawOneControl(UnitState& u, const ControlMeta& c,
                                   (float)c.max, "%.4g");
       released = ImGui::IsItemDeactivatedAfterEdit();
       ImGui::SameLine();
-      ImGui::TextUnformatted(rowLabel(key, c.name).c_str());
+      ImGui::TextUnformatted(c.name.c_str());
     }
     if (edited || released) noteControlEdit(u, ui, released);
     bool dirty = drawControlTail(u, ui, c);
@@ -462,14 +482,13 @@ bool drawOneControl(UnitState& u, const ControlMeta& c,
 // group exists.
 bool drawGroupByName(UnitState& u, const std::vector<ControlMeta>& controls,
                      const std::string& group, bool& anyDirty,
-                     const std::string& key,
                      const std::vector<std::string>* laneKeys,
                      std::map<std::string, Rect>* laneRects) {
   for (size_t i = 0; i < controls.size(); i++) {
     if (controls[i].group != group) continue;
     size_t n = 1;
     while (i + n < controls.size() && controls[i + n].group == group) n++;
-    anyDirty |= drawControlGroup(u, controls, i, n);
+    anyDirty |= drawControlGroup(u, controls, i, n, laneKeys, laneRects);
     return true;
   }
   return false;
@@ -485,7 +504,7 @@ bool drawGroupByName(UnitState& u, const std::vector<ControlMeta>& controls,
 // share; pass -1 to fill whatever is left, which is what a view that
 // owns its window wants.
 void drawWaveContent(AudioPlayer& player, std::string& playError,
-                     WavePanel& p, float availY) {
+                     WavePanel& p, float availY, float availX) {
   if (!p.error.empty()) {
     ImGui::TextColored(ImVec4(1.0f, 0.45f, 0.45f, 1.0f), "cannot load %s: %s",
                        p.artifactPath.c_str(), p.error.c_str());
@@ -557,14 +576,30 @@ void drawWaveContent(AudioPlayer& player, std::string& playError,
   if (availY < 0) availY = ImGui::GetContentRegionAvail().y;
   float laneH = std::max(28.0f * gUiScale,
                          (availY - (channels - 1) * laneGap) / channels);
-  ImVec2 canvasSize(std::max(120.0f, ImGui::GetContentRegionAvail().x),
+  // Its width is the caller's to decide: in a panel that scrolls
+  // sideways the canvas spans the whole of it, not just what is on
+  // screen, so scrolling reveals more of the waveform rather than
+  // carrying it off the edge.
+  if (availX <= 0) availX = ImGui::GetContentRegionAvail().x;
+  ImVec2 canvasSize(std::max(120.0f, availX),
                     channels * laneH + (channels - 1) * laneGap);
   ImVec2 pos = ImGui::GetCursorScreenPos();
+  // The canvas takes its width from the panel rather than setting it:
+  // it is drawn as wide as the panel's other rows made it, so letting
+  // it report that width back as content of its own would keep the two
+  // pushing each other wider every frame. Everything else in the panel
+  // still counts, which is what decides how wide it is.
+  ImGuiWindow* body = ImGui::GetCurrentWindow();
+  float rowsRight = body->DC.CursorMaxPos.x;
   ImGui::InvisibleButton("wave_canvas", canvasSize);
+  body->DC.CursorMaxPos.x = rowsRight;
   // The canvas owns the wheel while the pointer is on it: a window that
   // scrolls sits around every waveform now, and zooming must not scroll
   // it out from under the cursor at the same time.
   ImGui::SetItemKeyOwner(ImGuiKey_MouseWheelY);
+  // ...and sideways too, now that the panel around it can scroll that
+  // way: a trackpad swipe over a waveform is aimed at the waveform.
+  ImGui::SetItemKeyOwner(ImGuiKey_MouseWheelX);
   bool hovered = ImGui::IsItemHovered();
   ImDrawList* dl = ImGui::GetWindowDrawList();
   ImGuiIO& io = ImGui::GetIO();

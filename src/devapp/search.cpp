@@ -69,8 +69,10 @@ std::vector<WindowElement> windowElements(const PanelMeta& panel,
       out.push_back(
           WindowElement{WindowElement::Kind::Control, m.name, m.depth, m.key});
     else if (group) {
+      // A group is a heading, not a row: its lanes are what hold a value
+      // and answer to a key, so the heading itself carries none.
       out.push_back(
-          WindowElement{WindowElement::Kind::Group, m.name, m.depth, m.key});
+          WindowElement{WindowElement::Kind::Group, m.name, m.depth, {}});
       // The lanes under it: a lane is what has a value to select and
       // nudge, so each is a row in its own right, named the way the
       // metadata names it ("<group>.<lane>").
@@ -207,6 +209,9 @@ std::vector<std::string> rowKeys(const std::vector<WindowElement>& es) {
   std::set<std::string> taken;
   size_t needed = 0;
   for (size_t i = 0; i < es.size(); i++) {
+    // A group heading is not addressable, so it neither takes a key nor
+    // asks for one - the letters go to its lanes instead.
+    if (es[i].kind == WindowElement::Kind::Group) continue;
     if (es[i].key.empty()) {
       needed++;
       continue;
@@ -233,7 +238,16 @@ std::vector<std::string> rowKeys(const std::vector<WindowElement>& es) {
 
   size_t next = 0;
   for (size_t i = 0; i < es.size(); i++)
-    if (out[i].empty() && next < pool.size()) out[i] = pool[next++];
+    if (es[i].kind != WindowElement::Kind::Group && out[i].empty() &&
+        next < pool.size())
+      out[i] = pool[next++];
+  return out;
+}
+
+std::vector<size_t> tabStops(const std::vector<WindowElement>& es) {
+  std::vector<size_t> out;
+  for (size_t i = 0; i < es.size(); i++)
+    if (es[i].kind != WindowElement::Kind::Group) out.push_back(i);
   return out;
 }
 

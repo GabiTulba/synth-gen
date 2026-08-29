@@ -15,6 +15,7 @@ namespace {
 Chord alt(Key k) { return Chord{k, true, false, false}; }
 Chord altShift(Key k) { return Chord{k, true, true, false}; }
 Chord bare(Key k) { return Chord{k, false, false, false}; }
+Chord ctrl(Key k) { return Chord{k, false, false, true}; }
 
 const Binding* find(Mode m, Chord c) {
   for (const Binding& b : bindings())
@@ -63,6 +64,25 @@ TEST(keymap_fires_a_single_chord) {
   CHECK(s.arg == (int)Dir::Right);
   CHECK(m.mode == Mode::Normal);
   CHECK(m.pending.empty());
+}
+
+TEST(keymap_scrolls_a_window_both_ways) {
+  // The bare arrows belong to the selected row, so a window that is
+  // narrower than its widest control is reached with Ctrl - the same
+  // modifier that pages it and scales it.
+  KeyMachine m;
+  KeyMachine::Step right = m.feed(ctrl(Key::Right), CtxAny);
+  CHECK(right.kind == KeyMachine::Step::Kind::Fired);
+  CHECK(right.action == Action::ScrollX);
+  CHECK(right.step > 0);
+  KeyMachine::Step left = m.feed(ctrl(Key::Left), CtxAny);
+  CHECK(left.action == Action::ScrollX);
+  CHECK(left.step == -right.step);
+  // ...and it is offered whatever is selected, unlike the bare arrows,
+  // which only mean anything on a row with a value.
+  const Binding* b = find(Mode::Normal, ctrl(Key::Right));
+  CHECK(b && b->need == CtxAny);
+  CHECK(find(Mode::Normal, bare(Key::Right))->need == CtxWidget);
 }
 
 TEST(keymap_drops_an_unbound_chord) {

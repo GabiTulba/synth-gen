@@ -108,6 +108,15 @@ if(SYNTHGRAPH_BUILD_DEVAPP)
     add_test(NAME devapp_selftest
              COMMAND synth-dev --self-test
                      ${CMAKE_CURRENT_SOURCE_DIR}/examples/pluck)
+    # The controls project again, in a window too small and too magnified
+    # for it, so
+    # the panels have to scroll both ways. Layouts that settle at one
+    # size can hunt between two at another - a waveform sized to the
+    # panel that then resizes the panel, say - and a run is the only
+    # thing that can see that: it does not show in a still frame.
+    add_test(NAME devapp_selftest_squeezed
+             COMMAND synth-dev --self-test --size 1200x400 --scale 2
+                     ${CMAKE_CURRENT_SOURCE_DIR}/examples/controls)
   endif()
 endif()
 

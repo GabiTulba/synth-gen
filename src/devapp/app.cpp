@@ -172,10 +172,25 @@ struct AppState {
   // these three are enough to solve for the height that fills the
   // window exactly - see fitWaveHeight. `overflow` is what the
   // scrollbar was showing, which is how --self-test sees one appear.
+  // `changed` is the last frame on which any of this differed from the
+  // frame before. With the input stopped a body must come to rest; one
+  // still moving is drawing two layouts on alternate frames, which
+  // reads as a doubled, fuzzy edge rather than as movement. --self-test
+  // checks it, because that is invisible in a still.
   struct BodyFit {
     float content = 0, per = 0, overflow = 0, spare = 0, sideways = 0;
     float width = 0;  // how wide the body's rows came to
     size_t targets = 0;
+    // How wide each target's wave block came to, by target name. A
+    // block scrolled out of view is not drawn, so its stand-in claims
+    // this on its behalf - see drawTargetElement.
+    std::map<std::string, float> waveRow;
+    int changed = 0;
+    bool sameAs(const BodyFit& o) const {
+      return content == o.content && per == o.per && overflow == o.overflow &&
+             sideways == o.sideways && width == o.width &&
+             targets == o.targets;
+    }
   };
   std::map<std::string, BodyFit> bodyFit;
   std::vector<SearchItem> index;
@@ -759,7 +774,7 @@ void drawTabBar(AppState& app, float width) {
 // One target inside a window: the row of facts - status, duration, rate,
 // channels - and then the waveform itself, fully interactive.
 void drawTargetElement(AppState& app, const TargetMeta& t, float waveHeight,
-                       float panelW, std::set<std::string>& wanted,
+                       AppState::BodyFit& fit, std::set<std::string>& wanted,
                        WavePanel** shown, const std::string& key) {
   ImGui::PushID(t.name.c_str());
   ImGui::Spacing();
@@ -800,13 +815,31 @@ void drawTargetElement(AppState& app, const TargetMeta& t, float waveHeight,
   // view. A panel wide enough to scroll sideways would otherwise slide
   // its waveforms off to the left and leave a gap at the right edge -
   // scrolling right carrying them away instead of revealing more of
-  // them. `panelW` is how wide the panel came to last frame, so every
+  // them. `fit.width` is how wide the panel came to last frame - the
+  // widest control row, or more often a waveform's own transport row,
+  // which is what usually pushes a panel past its window - so every
   // canvas in it gets the same width and they line up with each other
-  // and with the rows.
+  // and with the rows. Taken from the frame before because the first
+  // target cannot see how wide the last one will make the panel.
   float blockW = std::max({16.0f, ImGui::GetContentRegionAvail().x,
-                           panelW - ImGui::GetCursorPos().x});
+                           fit.width - ImGui::GetCursorPos().x});
+  ImGuiWindow* body = ImGui::GetCurrentWindow();
+  float startX = ImGui::GetCursorScreenPos().x;
+  auto seen = fit.waveRow.find(t.name);
   if (!ImGui::IsRectVisible(ImVec2(blockW, blockH))) {
-    ImGui::Dummy(ImVec2(blockW, blockH));
+    // The stand-in reserves the height, and claims the width the block
+    // itself claimed the last time it was drawn - not the width it
+    // would be drawn at now. The two differ: a block is as wide as the
+    // panel, so a stand-in sized to the panel would be feeding the
+    // panel's width back into the panel's own measurement, and being
+    // scrolled away would make a panel wider than being on screen
+    // does. Then the horizontal scrollbar that raises takes a strip
+    // off the bottom, which changes what is scrolled away, which
+    // changes the width again - a panel drawn at two heights on
+    // alternate frames, which does not read as movement but as a
+    // bottom edge drawn twice, a few pixels out of register.
+    ImGui::Dummy(ImVec2(seen == fit.waveRow.end() ? 16.0f : seen->second,
+                        blockH));
     ImGui::PopID();
     return;
   }
@@ -815,7 +848,13 @@ void drawTargetElement(AppState& app, const TargetMeta& t, float waveHeight,
   wanted.insert(path);
   WavePanel& w = app.wave(path, t.name);
   if (shown) *shown = &w;
+  // Drawn with the content width measured around it and nothing else's,
+  // so what the block itself came to is what a later stand-in reserves.
+  float outer = body->DC.CursorMaxPos.x;
+  body->DC.CursorMaxPos.x = startX;
   drawWaveContent(app.player, app.playError, w, waveHeight, blockW);
+  fit.waveRow[t.name] = std::max(16.0f, body->DC.CursorMaxPos.x - startX);
+  body->DC.CursorMaxPos.x = std::max(outer, body->DC.CursorMaxPos.x);
   ImGui::PopID();
 }
 
@@ -964,8 +1003,8 @@ float bodyInnerHeight() {
   return ImGui::GetCursorPos().y + ImGui::GetContentRegionAvail().y;
 }
 
-float fitWaveHeight(AppState& app, const std::string& id, size_t n,
-                   float floorPer) {
+float fitWaveHeight(const AppState::BodyFit& last, size_t n,
+                    float floorPer) {
   if (n == 0) return -1.0f;
   // A pixel of slack: a body that comes to exactly the window's height
   // is one rounding error away from a scrollbar, and the bar it would
@@ -973,21 +1012,34 @@ float fitWaveHeight(AppState& app, const std::string& id, size_t n,
   // last button.
   float innerH = bodyInnerHeight() - 1.0f;
 
-  auto it = app.bodyFit.find(id);
-  if (it != app.bodyFit.end() && it->second.targets == n &&
-      it->second.per > 0 && it->second.content > 0) {
-    // Solved from the body's own measurement rather than estimated.
+  if (last.targets == n && last.per > 0 && last.content > 0) {
+    // Corrected from the body's own measurement rather than estimated.
     // Last frame it drew `content` tall with waveforms `per` tall, and
     // everything else in it - the headings, the format lines, the
     // transport rows, the control rows above, the defaults button
     // below - is a fixed cost that does not move when the waveforms
-    // do. So content = fixed + n*per, and the height that fills the
-    // window exactly follows in one step. This counts the separator
-    // padding and the button's descender as they really drew, which is
-    // the part an estimate here kept getting a few pixels wrong - and
-    // a few pixels is all it takes to raise a scrollbar.
-    return std::max(floorPer,
-                    it->second.per + (innerH - it->second.content) / (float)n);
+    // do. So the slack the body left is the slack to hand out, and it
+    // counts the separator padding and the button's descender as they
+    // really drew - the part an estimate here kept getting a few
+    // pixels wrong, and a few pixels is all it takes to raise a
+    // scrollbar.
+    //
+    // In whole pixels, and only while a whole one is going spare.
+    // Dividing the slack out exactly would be right if a body were a
+    // continuous function of the height it is given, and it is not:
+    // ImGui truncates the cursor to a pixel at every row, so a
+    // half-pixel handed to each of two waveforms comes back as nothing
+    // and is offered again next frame. The panel then alternates
+    // between two heights a pixel or two apart forever, which does not
+    // look like movement - it looks like the bottom of the panel is
+    // drawn twice, slightly out of register.
+    float per = last.per;
+    float slack = innerH - last.content;
+    if (slack < 0)
+      per -= std::ceil(-slack / (float)n);  // overflowing: give some back
+    else if (slack >= (float)n)
+      per += std::floor(slack / (float)n);  // a whole pixel each to spare
+    return std::max(std::ceil(floorPer), per);
   }
 
   // No measurement yet - the window's first frame. An estimate close
@@ -998,7 +1050,7 @@ float fitWaveHeight(AppState& app, const std::string& id, size_t n,
                  ImGui::GetFrameHeightWithSpacing();
   float footer = ImGui::GetFrameHeightWithSpacing() + st.ItemSpacing.y;
   float room = innerH - ImGui::GetCursorPos().y - footer - (float)n * chrome;
-  return std::max(floorPer, room / (float)n);
+  return std::max(std::ceil(floorPer), std::floor(room / (float)n));
 }
 
 // their waveforms. Every row's rectangle is recorded as it is drawn, so
@@ -1031,15 +1083,10 @@ void drawPanelBody(AppState& app, UnitState& u, const PanelMeta& panel,
   // control rows are on screen and what is left is exactly what the
   // waveforms have to share.
   float perTarget = 0;
-  // How wide the body came to last frame - the widest control row, or
-  // more often a waveform's own transport row, which is what usually
-  // pushes a panel past its window. Every canvas is drawn to that same
-  // width, so they line up with the rows and with each other and
-  // scrolling sideways reveals more of them. Taken from the frame
-  // before because the first target cannot see how wide the last one
-  // will make the panel; the canvases are kept out of the measurement
-  // (drawWaveContent) so this settles instead of ratcheting.
-  float panelW = app.bodyFit[windowId(ref)].width;
+  // What this body came to last frame: how tall, how wide, and what
+  // each waveform in it was drawn at. Read here and written back at the
+  // end, so the next frame draws from what this one actually measured.
+  AppState::BodyFit& fit = app.bodyFit[windowId(ref)];
 
   std::vector<std::string> keys = rowKeys(els);
   bool anyDirty = false;
@@ -1077,10 +1124,10 @@ void drawPanelBody(AppState& app, UnitState& u, const PanelMeta& panel,
       }
       case WindowElement::Kind::Target:
         if (perTarget == 0)
-          perTarget = fitWaveHeight(app, windowId(ref), drawable, floorPer);
+          perTarget = fitWaveHeight(fit, drawable, floorPer);
         for (const TargetMeta& t : u.loaded.meta.targets)
           if (t.name == e.name)
-            drawTargetElement(app, t, perTarget, panelW, wanted, &wave,
+            drawTargetElement(app, t, perTarget, fit, wanted, &wave,
                               keys[i]);
         break;
       case WindowElement::Kind::Lane:
@@ -1119,7 +1166,6 @@ void drawPanelBody(AppState& app, UnitState& u, const PanelMeta& panel,
   // The other half of the measurement drawLeaf takes: what this frame's
   // body height was drawn with, so the next frame can solve for the one
   // that fits. A panel with no waveforms leaves nothing to solve.
-  AppState::BodyFit& fit = app.bodyFit[windowId(ref)];
   fit.per = perTarget;
   fit.targets = drawable;
 }
@@ -1266,11 +1312,13 @@ void drawLeaf(AppState& app, const PlacedWindow& pw,
   // and whether that raised a bar. The waveform height it was drawn
   // with was recorded by drawPanelBody on its way through.
   AppState::BodyFit& fit = app.bodyFit[id];
+  AppState::BodyFit was = fit;
   fit.content = ImGui::GetCursorPos().y;
   fit.overflow = ImGui::GetScrollMaxY();
   fit.spare = bodyInnerHeight() - fit.content;
   fit.sideways = ImGui::GetScrollMaxX();
   fit.width = ImGui::GetCurrentWindow()->ContentSize.x;
+  if (!fit.sameAs(was)) fit.changed = ImGui::GetFrameCount();
   ImGui::EndChild();
   if (font) ImGui::PopFont();
   ImGui::End();
@@ -2142,7 +2190,9 @@ int usage() {
                "Options:\n"
                "  --fullscreen  fill the whole display (borderless)\n"
                "  --scale N     scale the UI by N, e.g. 2 on a small/dense "
-               "screen\n");
+               "screen\n"
+               "  --size WxH    open at this size instead of the remembered "
+               "one\n");
   return 2;
 }
 
@@ -2152,6 +2202,7 @@ int main(int argc, char** argv) {
   bool selfTest = false;
   bool selfTestFailed = false;  // a checked expectation the run did not meet
   bool fullscreen = false;
+  int askedW = 0, askedH = 0;  // --size, 0 = whatever was remembered
   std::string projectDir = ".";
   for (int i = 1; i < argc; i++) {
     std::string a = argv[i];
@@ -2160,6 +2211,11 @@ int main(int argc, char** argv) {
     else if (a == "--scale" && i + 1 < argc) {
       gUiScale = std::strtof(argv[++i], nullptr);
       if (!(gUiScale >= 0.5f && gUiScale <= 8.0f)) return usage();
+    }
+    else if (a == "--size" && i + 1 < argc) {
+      if (std::sscanf(argv[++i], "%dx%d", &askedW, &askedH) != 2 ||
+          askedW < 200 || askedH < 200)
+        return usage();
     }
     else if (a == "--help" || a[0] == '-') return usage();
     else projectDir = a;
@@ -2199,8 +2255,13 @@ int main(int argc, char** argv) {
   int winX = SDL_WINDOWPOS_CENTERED, winY = SDL_WINDOWPOS_CENTERED;
   int winW = 900, winH = 600;
   // A saved size always applies; a saved position only when it is still
-  // on-screen. --fullscreen wins over both.
-  if (app.windowGeom.valid && !fullscreen && !selfTest) {
+  // on-screen. --fullscreen wins over both, and --size over everything:
+  // it is how the self-test reaches a window size other than the one it
+  // starts at, which several of its checks need.
+  if (askedW) {
+    winW = askedW;
+    winH = askedH;
+  } else if (app.windowGeom.valid && !fullscreen && !selfTest) {
     winW = app.windowGeom.w;
     winH = app.windowGeom.h;
     if (positionOnSomeDisplay(app.windowGeom.x, app.windowGeom.y)) {
@@ -2283,6 +2344,7 @@ int main(int argc, char** argv) {
   bool done = false;
   int frames = 0;
   size_t startupRows = 0;      // rows keyed on the opening frame
+  std::string startupWindow = "(none)";  // ...and what held focus then
   std::string tabbedTo = "(none)";  // where Tab left the selection
   bool tabOpenedAnEdit = false;     // ...and whether ImGui grabbed it
   const ImGuiStyle restingStyle = ImGui::GetStyle();
@@ -2472,7 +2534,16 @@ int main(int argc, char** argv) {
       // opening frame has to have its rows keyed already, or the letters
       // on screen would address nothing until something else moved the
       // focus for them.
-      if (frames == 0) startupRows = app.rowKeysNow.size();
+      // The first frame that has a focused window at all - the tabs are
+      // built on the way in, and until they are there is nothing for a
+      // letter to address. Nothing has been typed this early, so
+      // whatever holds focus here holds it because the layout said so.
+      if (startupWindow == "(none)" && frames < 30)
+        if (auto w = focusedWindow(app.tab()))
+          if (app.rowsWindow == windowId(*w)) {
+            startupWindow = windowId(*w);
+            startupRows = app.rowKeysNow.size();
+          }
       // What Tab left behind, read on the frames after the two presses.
       if (frames >= 38 && frames <= 40) {
         tabbedTo = app.sel.active() ? app.sel.element : "(none)";
@@ -2548,12 +2619,32 @@ int main(int argc, char** argv) {
                 app.activeTab);
     std::printf("self-test: %zu row(s) keyed, left mode %s, selection '%s'\n",
                 labelled, endedIn.c_str(), picked.c_str());
-    std::printf("self-test: %zu row(s) keyed on the opening frame\n",
-                startupRows);
-    if (startupRows == 0) selfTestFailed = true;
+    std::printf("self-test: %zu row(s) keyed before a key was typed (focus "
+                "'%s')\n",
+                startupRows, startupWindow.c_str());
+    // The overview is the one window with no rows of its own to key, so
+    // a saved layout that opens on it keys none and is right to.
+    if (startupRows == 0 && startupWindow != "@overview") selfTestFailed = true;
     std::printf("self-test: tab stepped to '%s', imgui took the key: %s\n",
                 tabbedTo.c_str(), tabOpenedAnEdit ? "YES" : "no");
     if (tabbedTo == "(none)" || tabOpenedAnEdit) selfTestFailed = true;
+    // Nothing has been typed for several frames by now, so every body
+    // must have come to rest. One still moving is drawing two layouts
+    // on alternate frames - a scrollbar appearing and disappearing,
+    // say - which on screen is not movement but a doubled, fuzzy edge,
+    // and a still frame looks perfectly correct. Only the run can see
+    // it, so the run checks for it.
+    int lastMove = 0;
+    std::string restless = "(none)";
+    for (auto& [id, fit] : app.bodyFit)
+      if (fit.changed > lastMove) {
+        lastMove = fit.changed;
+        restless = id;
+      }
+    std::printf("self-test: layouts came to rest %d frame(s) before the end "
+                "(last to settle: '%s')\n",
+                ImGui::GetFrameCount() - lastMove, restless.c_str());
+    if (ImGui::GetFrameCount() - lastMove < 4) selfTestFailed = true;
     // A window whose waveforms were fitted to it should not also need a
     // scrollbar: that is the whole point of fitting them. Reported per
     // window so the one that overflowed is named, not just counted.

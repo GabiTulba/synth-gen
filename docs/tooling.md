@@ -80,11 +80,14 @@ everything else. Setup instructions are in
 
 ```sh
 build/synth-dev examples/pluck
+build/synth-dev --scale 2 --size 1400x900 examples/pluck
 ```
 
 `src/devapp/` is an SDL2 + Dear ImGui artifact browser/player. It is a
 *pure consumer* of build output — it reads `metadata.json`, never
-compiler internals.
+compiler internals. `--scale N` magnifies the whole UI, `--size WxH`
+opens at a given size rather than the remembered one, and
+`--fullscreen` fills the display.
 
 ### The shell
 
@@ -264,11 +267,21 @@ from it, so it cannot drift out of date.
   transport row, the `defaults` button at the bottom — costs the same
   whatever height the waveforms are drawn at, so the body's height is
   that fixed cost plus one share per target. The panel measures what it
-  actually came to last frame and solves for the share that fills the
-  window exactly, to within a pixel. One target takes the lot; four
-  share it. A panel reaches for a scrollbar only when its own rows do
-  not fit, not merely because it has waveforms in it — and never for
-  the few pixels a button's descender would otherwise cost it.
+  actually came to last frame and corrects the share from the slack it
+  had left over. One target takes the lot; four share it. A panel
+  reaches for a scrollbar only when its own rows do not fit, not merely
+  because it has waveforms in it — and never for the few pixels a
+  button's descender would otherwise cost it.
+
+  The share is a whole number of pixels, and is only reopened when a
+  whole pixel is going spare for every waveform. Dividing the slack out
+  exactly would be right if a panel's height were a continuous function
+  of the height it is handed, and it is not — every row's position is
+  truncated to a pixel, so half a pixel handed to each of two waveforms
+  comes back unspent and is offered again next frame. A panel that did
+  that would alternate between two heights a pixel or two apart for as
+  long as it was on screen, which does not read as movement: it reads
+  as a bottom edge drawn twice, slightly out of register.
 
   The split stops at a floor: a canvas divides its height between the
   channels it has, and a lane below about 28px stops showing a shape at
@@ -285,7 +298,12 @@ from it, so it cannot drift out of date.
   width rather than to the part of it in view, so scrolling sideways
   reveals more of them instead of carrying them off the left edge — and
   they are the one thing that does not *set* that width, or the two
-  would push each other wider every frame.
+  would push each other wider every frame. A target scrolled out of
+  view holds the width it had when it was last drawn, for the same
+  reason: if being scrolled away made a panel a different width from
+  being on screen, the scrollbar that came and went with it would take
+  a strip off the bottom of the panel, which would change what was
+  scrolled away.
 
   Audio is decoded only for targets actually on screen and released when they scroll away
   or the window closes — a couple of minutes of stereo costs about 90 MB
@@ -361,6 +379,17 @@ from it, so it cannot drift out of date.
   reports what they left behind. That is the only coverage the seam
   between a key event and a chord has, and it runs against two projects,
   one of which has several windows and rows to address.
+- It also checks that every panel has **come to rest** by the time the
+  typing stops: that its height, width, waveform height and scroll
+  extents were the same on the last several frames as on the ones
+  before. A layout that solves itself from what it measured last frame
+  can hunt between two answers instead of settling on one, and a panel
+  redrawn at two heights on alternate frames does not look like it is
+  moving — it looks like its bottom edge is drawn twice, a pixel or two
+  out of register. No single frame is wrong, so only a run can catch it.
+  Whether it hunts depends on the window size, which is why one of the
+  runs passes `--size` and `--scale` to squeeze the panels until they
+  scroll both ways.
 
 ### How it is put together
 

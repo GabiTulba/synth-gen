@@ -3,6 +3,7 @@
 #include <map>
 #include <set>
 #include <string>
+#include <vector>
 
 #include "layout.hpp"
 #include "test_framework.hpp"
@@ -16,22 +17,57 @@ Chord alt(Key k) { return Chord{k, true, false, false}; }
 Chord altShift(Key k) { return Chord{k, true, true, false}; }
 Chord bare(Key k) { return Chord{k, false, false, false}; }
 Chord ctrl(Key k) { return Chord{k, false, false, true}; }
+Chord shift(Key k) { return Chord{k, false, true, false}; }
 
-const Binding* find(Mode m, Chord c) {
+// The binding a chord resolves to in `ctx`, the way dispatch picks it.
+const Binding* find(Mode m, Chord c, unsigned ctx = CtxAny) {
   for (const Binding& b : bindings())
-    if (b.mode == m && b.sequence.size() == 1 && b.sequence[0] == c) return &b;
+    if (b.mode == m && b.sequence.size() == 1 && b.sequence[0] == c &&
+        (b.need & ctx) == b.need && (b.deny & ctx) == 0)
+      return &b;
   return nullptr;
+}
+
+// Every context the app can actually be in. Two rules from contextBits
+// in app.cpp: a selected row is a waveform or a control, never both,
+// and neither can be selected without a row being selected at all.
+std::vector<unsigned> reachableContexts() {
+  std::vector<unsigned> out;
+  for (unsigned c = 0; c < 64; c++) {
+    if ((c & CtxWave) && (c & CtxWidget)) continue;
+    if ((c & (CtxWave | CtxWidget)) && !(c & CtxRow)) continue;
+    out.push_back(c);
+  }
+  return out;
 }
 
 }  // namespace
 
-TEST(keymap_binds_no_chord_twice_in_one_mode) {
-  // Ambiguity here would mean the resolved action depends on table
-  // order, which nobody reading the table could predict.
-  std::set<std::pair<int, std::string>> seen;
+TEST(keymap_no_chord_is_ambiguous_in_any_context) {
+  // A chord may be bound twice in one mode - Enter and the bare up and
+  // down arrows mean one thing on a waveform and another elsewhere -
+  // but never in a context where both could fire. Ambiguity there would
+  // mean the resolved action depends on table order, which nobody
+  // reading the table could predict.
+  for (unsigned ctx : reachableContexts()) {
+    std::set<std::pair<int, std::string>> seen;
+    for (const Binding& b : bindings()) {
+      if ((b.need & ctx) != b.need || (b.deny & ctx) != 0) continue;
+      auto key = std::make_pair((int)b.mode, sequenceName(b.sequence));
+      CHECK(seen.insert(key).second);
+    }
+  }
+}
+
+TEST(keymap_every_binding_is_reachable_somewhere) {
+  // The other half of it: a binding whose need and deny masks cannot
+  // both be satisfied is dead text in the table and an entry in a help
+  // pane for a key that does nothing.
   for (const Binding& b : bindings()) {
-    auto key = std::make_pair((int)b.mode, sequenceName(b.sequence));
-    CHECK(seen.insert(key).second);
+    bool live = false;
+    for (unsigned ctx : reachableContexts())
+      if ((b.need & ctx) == b.need && (b.deny & ctx) == 0) live = true;
+    CHECK(live);
   }
 }
 
@@ -82,7 +118,8 @@ TEST(keymap_scrolls_a_window_both_ways) {
   // which only mean anything on a row with a value.
   const Binding* b = find(Mode::Normal, ctrl(Key::Right));
   CHECK(b && b->need == CtxAny);
-  CHECK(find(Mode::Normal, bare(Key::Right))->need == CtxWidget);
+  CHECK(find(Mode::Normal, bare(Key::Right), CtxRow | CtxWidget)->need ==
+        CtxWidget);
 }
 
 TEST(keymap_drops_an_unbound_chord) {
@@ -372,13 +409,70 @@ TEST(keymap_a_window_scales_on_its_own) {
   CHECK(m.feed(alt(Key::D0), CtxWave).action == Action::WaveFit);
 }
 
+TEST(keymap_a_selected_waveform_claims_the_bare_arrows) {
+  KeyMachine m;
+  // With no waveform selected the arrows scroll the panel, as ever.
+  CHECK(m.feed(bare(Key::Up), CtxAny).action == Action::Scroll);
+  CHECK(m.feed(bare(Key::Down), CtxAny).action == Action::Scroll);
+  // With one selected they drive it instead: up and down zoom, left and
+  // right move the view, and Shift makes every step a fine one.
+  CHECK(m.feed(bare(Key::Up), CtxWave).action == Action::WaveZoom);
+  CHECK(m.feed(bare(Key::Up), CtxWave).step < 1.0);   // in
+  CHECK(m.feed(bare(Key::Down), CtxWave).step > 1.0);  // out
+  KeyMachine::Step right = m.feed(bare(Key::Right), CtxWave);
+  CHECK(right.action == Action::WaveMove);
+  CHECK(right.step > 0);
+  CHECK(m.feed(bare(Key::Left), CtxWave).step == -right.step);
+  CHECK(m.feed(shift(Key::Right), CtxWave).step == right.step / 10);
+  // Paging the panel is still there for when the arrows are spoken for.
+  CHECK(m.feed(ctrl(Key::D), CtxWave).action == Action::ScrollPage);
+}
+
+TEST(keymap_enter_on_a_waveform_opens_the_head_machine) {
+  KeyMachine m;
+  // A row that is not a waveform still activates on Enter.
+  CHECK(m.feed(bare(Key::Enter), CtxRow).action == Action::WidgetActivate);
+  CHECK(m.mode == Mode::Normal);
+  KeyMachine::Step s = m.feed(bare(Key::Enter), CtxRow | CtxWave);
+  CHECK(s.action == Action::WaveSelect);
+  CHECK(m.mode == Mode::Wave);
+  // Enter inside the mode stays inside it - the app leaves when the
+  // pair settles, which the table cannot see.
+  CHECK(m.feed(bare(Key::Enter), CtxAny).action == Action::WaveSelect);
+  CHECK(m.mode == Mode::Wave);
+  CHECK(m.feed(bare(Key::Escape), CtxAny).action == Action::LeaveMode);
+  CHECK(m.mode == Mode::Normal);
+}
+
+TEST(keymap_wave_mode_takes_both_hands) {
+  KeyMachine m;
+  m.feed(bare(Key::Enter), CtxWave);
+  CHECK(m.mode == Mode::Wave);
+  // hjkl and the arrows are the same keys, and bare letters reach the
+  // map here because a mode's rows are not addressable by hint.
+  KeyMachine::Step l = m.feed(bare(Key::L), CtxAny);
+  CHECK(l.action == Action::WaveMove);
+  CHECK(l.step == m.feed(bare(Key::Right), CtxAny).step);
+  CHECK(m.feed(bare(Key::H), CtxAny).step == -l.step);
+  CHECK(m.feed(shift(Key::L), CtxAny).step == l.step / 10);
+  KeyMachine::Step k = m.feed(bare(Key::K), CtxAny);
+  CHECK(k.action == Action::WaveZoom);
+  CHECK(k.step < 1.0);
+  CHECK(k.step == m.feed(bare(Key::Up), CtxAny).step);
+  CHECK(m.feed(bare(Key::J), CtxAny).step > 1.0);
+  // Shift is the finer step in both directions, never the coarser one.
+  CHECK(m.feed(shift(Key::K), CtxAny).step > k.step);
+  CHECK(m.feed(shift(Key::J), CtxAny).step <
+        m.feed(bare(Key::J), CtxAny).step);
+}
+
 TEST(keymap_every_mode_has_shortcuts_to_show) {
   // The `?` overlay and the which-key pane render whatever this
   // returns, so a mode with nothing listed is an empty overlay.
   unsigned everything =
       CtxTiled | CtxNested | CtxContainer | CtxWidget | CtxWave;
-  for (Mode m : {Mode::Normal, Mode::Resize, Mode::Select, Mode::Search,
-                 Mode::Rename, Mode::Help}) {
+  for (Mode m : {Mode::Normal, Mode::Resize, Mode::Select, Mode::Wave,
+                 Mode::Search, Mode::Rename, Mode::Help}) {
     size_t listed = 0;
     for (const Binding* b : bindingsFor(m, everything))
       if (b->listed) listed++;
@@ -404,4 +498,5 @@ TEST(keymap_mode_names_are_stable) {
   CHECK(std::string(modeName(Mode::Normal)) == "normal");
   CHECK(std::string(modeName(Mode::Resize)) == "resize");
   CHECK(std::string(modeName(Mode::Help)) == "help");
+  CHECK(std::string(modeName(Mode::Wave)) == "wave");
 }

@@ -78,9 +78,9 @@ struct WavePanel {
   synth::WavData wav;
   std::vector<PeakBins> bins;  // per channel
   WaveView view;
-  double selStart = -1, selEnd = -1;  // selection in frames; -1 = none
-  double dragAnchor = -1;             // frame where a selection drag began
-  bool loop = false;                  // replay the played range
+  WaveSelection sel;       // the selection, and the keys placing it
+  double dragAnchor = -1;  // frame where a selection drag began
+  bool loop = false;       // replay the played range
 
   void open(const std::string& path, const std::string& name);
   // Reopens from saved UI state, clamped to whatever length the file has
@@ -91,7 +91,7 @@ struct WavePanel {
   // when the stamp looks unchanged - a same-sized rewrite inside the
   // filesystem's mtime granularity is invisible to it.
   void reloadIfChanged(bool force);
-  bool hasSelection() const { return selStart >= 0 && selEnd > selStart; }
+  bool hasSelection() const { return sel.has(); }
 };
 
 // The key a row answers to, drawn in a gutter at the head of the row
@@ -129,7 +129,9 @@ bool drawGroupByName(UnitState& u, const std::vector<ControlMeta>& controls,
 
 // The waveform: min/max envelope lanes per channel, wheel zoom about the
 // cursor, right-drag pan, left-drag selection, and playback of the
-// selection or the visible range. `availY` is the vertical room to take
+// selection or the visible range. The keyboard's own zoom, pan and
+// selection go through `p.sel` and `p.view` before this is called; all
+// it does with them is draw the heads `p.sel` is placing. `availY` is the vertical room to take
 // and `availX` the horizontal, each -1 to fill what is left of the
 // window. A panel wide enough to scroll sideways passes its own width
 // rather than the visible one, so scrolling reveals more of the

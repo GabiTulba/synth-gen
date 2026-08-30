@@ -51,7 +51,7 @@ enum Ctx : unsigned {
 // Normal mode binds no bare letter or digit: those belong to the rows of
 // the focused window, each of which shows the key it answers to. A press
 // that names a row is claimed before the map ever sees it.
-enum class Mode { Normal, Resize, Select, Search, Rename, Help };
+enum class Mode { Normal, Resize, Select, Wave, Search, Rename, Help };
 const char* modeName(Mode m);
 
 // Whether the mode reads the typing itself - hint labels, a search
@@ -74,7 +74,7 @@ enum class Action {
   OpenSearch, OpenHelp, ToggleOutline, ToggleWhichKey, LeaveMode,
   // the focused window's contents
   Scroll, ScrollPage, ScrollX, WidgetAdjust, WidgetActivate, WidgetReset, WidgetStep,
-  WavePlay, WaveZoom, WaveFit, WaveLoop, ScaleWindow,
+  WavePlay, WaveZoom, WaveMove, WaveSelect, WaveFit, WaveLoop, ScaleWindow,
   // the capture modes
   SearchAccept, SearchStep, RenameAccept,
 };
@@ -86,6 +86,12 @@ struct Binding {
   int arg = 0;       // a Dir, a tab number, a step count
   double step = 0;   // a resize fraction, a widget nudge, a zoom factor
   unsigned need = CtxAny;  // every bit must hold for this to apply
+  // ...and no bit here may hold. For the chords two bindings want in
+  // one mode: Enter and the bare arrows mean one thing on a waveform
+  // and another on a control or the window behind it. Each side naming
+  // the context it stands aside for keeps the pair unambiguous whatever
+  // order the table happens to list them in.
+  unsigned deny = 0;
   const char* group = "";  // the heading it is listed under
   const char* help = "";   // what it does, in the user's words
   // An alias or one of a numbered run (Alt+2 … Alt+9): it works, but the

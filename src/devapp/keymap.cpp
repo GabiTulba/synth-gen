@@ -21,9 +21,9 @@ int dirArg(Dir d) { return (int)d; }
 constexpr Key kDigits[9] = {Key::D1, Key::D2, Key::D3, Key::D4, Key::D5,
                             Key::D6, Key::D7, Key::D8, Key::D9};
 
-void add(std::vector<Binding>& v, Mode mode, Chord c, Action a, int arg,
-         double step, unsigned need, const char* group, const char* help,
-         bool listed = true) {
+Binding& add(std::vector<Binding>& v, Mode mode, Chord c, Action a, int arg,
+             double step, unsigned need, const char* group, const char* help,
+             bool listed = true) {
   Binding b;
   b.mode = mode;
   b.sequence = {c};
@@ -35,6 +35,7 @@ void add(std::vector<Binding>& v, Mode mode, Chord c, Action a, int arg,
   b.help = help;
   b.listed = listed;
   v.push_back(std::move(b));
+  return v.back();
 }
 
 std::vector<Binding> buildTable() {
@@ -120,11 +121,53 @@ std::vector<Binding> buildTable() {
   add(v, N, alt(Key::W), Action::ToggleWhichKey, 0, 0, CtxAny, "app",
       "show shortcuts as you type them");
 
+  // --- a selected waveform ----------------------------------------------
+  // The bare arrows drive the waveform while one is selected, rather
+  // than scrolling the panel behind it or nudging a control - the
+  // takeover a selected slider already does with Left and Right. Every
+  // chord shared with those two (Enter and all four arrows) says which
+  // context it stands aside for, so which one fires never depends on
+  // where it sits in this table. Ctrl+d and Ctrl+u still page the
+  // panel, and Escape lets the row go.
+  add(v, N, ch(Key::Right), Action::WaveMove, 0, 0.04, CtxWave, "wave",
+      "move the view right (Shf for a fine step)")
+      .deny = CtxWidget;
+  add(v, N, ch(Key::Left), Action::WaveMove, 0, -0.04, CtxWave, "wave",
+      "move it left")
+      .deny = CtxWidget;
+  add(v, N, shift(Key::Right), Action::WaveMove, 0, 0.004, CtxWave, "wave", "",
+      false)
+      .deny = CtxWidget;
+  add(v, N, shift(Key::Left), Action::WaveMove, 0, -0.004, CtxWave, "wave", "",
+      false)
+      .deny = CtxWidget;
+  add(v, N, ch(Key::Up), Action::WaveZoom, 0, 1.0 / 1.5, CtxWave, "wave",
+      "zoom in (Shf for a fine step; = and - do it too)");
+  add(v, N, ch(Key::Down), Action::WaveZoom, 0, 1.5, CtxWave, "wave",
+      "zoom out");
+  add(v, N, shift(Key::Up), Action::WaveZoom, 0, 1.0 / 1.1, CtxWave, "wave", "",
+      false);
+  add(v, N, shift(Key::Down), Action::WaveZoom, 0, 1.1, CtxWave, "wave", "",
+      false);
+  add(v, N, ch(Key::Equal), Action::WaveZoom, 0, 1.0 / 1.5, CtxWave, "wave", "",
+      false);
+  add(v, N, ch(Key::Minus), Action::WaveZoom, 0, 1.5, CtxWave, "wave", "",
+      false);
+  add(v, N, ch(Key::Enter), Action::WaveSelect, 0, 0, CtxWave, "wave",
+      "select a range: place a head, Enter fixes it, Enter again confirms");
+  add(v, N, ch(Key::Space), Action::WavePlay, 0, 0, CtxWave, "wave",
+      "play the selection, or stop");
+  add(v, N, alt(Key::D0), Action::WaveFit, 0, 0, CtxWave, "wave",
+      "fit the whole artifact");
+  add(v, N, alt(Key::P), Action::WaveLoop, 0, 0, CtxWave, "wave",
+      "loop what you play");
+
   // --- inside the focused window ---------------------------------------
   add(v, N, ch(Key::Down), Action::Scroll, 0, 3, CtxAny, "window",
-      "scroll down (Ctrl+d for half a page)");
-  add(v, N, ch(Key::Up), Action::Scroll, 0, -3, CtxAny, "window",
-      "scroll up");
+      "scroll down (Ctrl+d for half a page)")
+      .deny = CtxWave;
+  add(v, N, ch(Key::Up), Action::Scroll, 0, -3, CtxAny, "window", "scroll up")
+      .deny = CtxWave;
   add(v, N, ctrl(Key::D), Action::ScrollPage, 0, 0.5, CtxAny, "window",
       "half a page down");
   add(v, N, ctrl(Key::U), Action::ScrollPage, 0, -0.5, CtxAny, "window",
@@ -148,33 +191,26 @@ std::vector<Binding> buildTable() {
 
   // --- a selected control ----------------------------------------------
   add(v, N, ch(Key::Right), Action::WidgetAdjust, 0, 0.04, CtxWidget, "widget",
-      "nudge it up (Shf for a fine step)");
+      "nudge it up (Shf for a fine step)")
+      .deny = CtxWave;
   add(v, N, ch(Key::Left), Action::WidgetAdjust, 0, -0.04, CtxWidget, "widget",
-      "nudge it down");
+      "nudge it down")
+      .deny = CtxWave;
   add(v, N, shift(Key::Right), Action::WidgetAdjust, 0, 0.004, CtxWidget,
-      "widget", "", false);
+      "widget", "", false)
+      .deny = CtxWave;
   add(v, N, shift(Key::Left), Action::WidgetAdjust, 0, -0.004, CtxWidget,
-      "widget", "", false);
+      "widget", "", false)
+      .deny = CtxWave;
   add(v, N, ch(Key::Enter), Action::WidgetActivate, 0, 0, CtxRow, "widget",
-      "flip a tickbox, take the next option, or show/hide a panel");
+      "flip a tickbox, take the next option, or show/hide a panel")
+      .deny = CtxWave;
   add(v, N, alt(Key::Backspace), Action::WidgetReset, 0, 0, CtxWidget,
       "widget", "back to the value the source declares");
   add(v, N, ch(Key::Tab), Action::WidgetStep, 1, 0, CtxAny, "window",
       "select the next widget (Shf+Tab for the one before)");
   add(v, N, shift(Key::Tab), Action::WidgetStep, -1, 0, CtxAny, "window", "",
       false);
-
-  // --- a selected waveform ---------------------------------------------
-  add(v, N, ch(Key::Space), Action::WavePlay, 0, 0, CtxWave, "wave",
-      "play the selection, or stop");
-  add(v, N, ch(Key::Equal), Action::WaveZoom, 0, 1.0 / 1.5, CtxWave, "wave",
-      "zoom in");
-  add(v, N, ch(Key::Minus), Action::WaveZoom, 0, 1.5, CtxWave, "wave",
-      "zoom out");
-  add(v, N, alt(Key::D0), Action::WaveFit, 0, 0, CtxWave, "wave",
-      "fit the whole artifact");
-  add(v, N, alt(Key::P), Action::WaveLoop, 0, 0, CtxWave, "wave",
-      "loop what you play");
 
   // --- resize mode ------------------------------------------------------
   const Mode R = Mode::Resize;
@@ -243,6 +279,53 @@ std::vector<Binding> buildTable() {
   add(v, S, ch(Key::Enter), Action::LeaveMode, 0, 0, CtxAny, "select", "",
       false);
 
+  // --- wave select mode -------------------------------------------------
+  // What Enter on a waveform opens: one head sitting where the cursor
+  // is, Enter to fix it and open the second, Enter again to settle the
+  // pair. Both hands work - hjkl and the arrows are the same keys - and
+  // Shift cuts every step to a tenth, exactly as it does on a slider.
+  const Mode W = Mode::Wave;
+  struct { Key letter, arrow; double step; const char* help; } walks[] = {
+      {Key::L, Key::Right, 0.04, "move the head right (Shf for a fine step)"},
+      {Key::H, Key::Left, -0.04, "move it left"},
+  };
+  for (auto& w : walks) {
+    add(v, W, ch(w.letter), Action::WaveMove, 0, w.step, CtxAny, "wave",
+        w.help);
+    add(v, W, ch(w.arrow), Action::WaveMove, 0, w.step, CtxAny, "wave", "",
+        false);
+    add(v, W, shift(w.letter), Action::WaveMove, 0, w.step / 10, CtxAny, "wave",
+        "", false);
+    add(v, W, shift(w.arrow), Action::WaveMove, 0, w.step / 10, CtxAny, "wave",
+        "", false);
+  }
+  struct {
+    Key letter, arrow;
+    double step, fine;
+    const char* help;
+  } zooms[] = {
+      {Key::K, Key::Up, 1.0 / 1.5, 1.0 / 1.1, "zoom in, the head staying put"},
+      {Key::J, Key::Down, 1.5, 1.1, "zoom out"},
+  };
+  for (auto& z : zooms) {
+    add(v, W, ch(z.letter), Action::WaveZoom, 0, z.step, CtxAny, "wave",
+        z.help);
+    add(v, W, ch(z.arrow), Action::WaveZoom, 0, z.step, CtxAny, "wave", "",
+        false);
+    add(v, W, shift(z.letter), Action::WaveZoom, 0, z.fine, CtxAny, "wave", "",
+        false);
+    add(v, W, shift(z.arrow), Action::WaveZoom, 0, z.fine, CtxAny, "wave", "",
+        false);
+  }
+  add(v, W, ch(Key::Enter), Action::WaveSelect, 0, 0, CtxAny, "wave",
+      "fix this head - and, once both are placed, confirm the selection");
+  add(v, W, ch(Key::Space), Action::WavePlay, 0, 0, CtxAny, "wave",
+      "play what is selected so far");
+  add(v, W, shift(Key::Slash), Action::OpenHelp, 0, 0, CtxAny, "wave",
+      "? - these shortcuts, written out");
+  add(v, W, ch(Key::Escape), Action::LeaveMode, 0, 0, CtxAny, "wave",
+      "cancel: put back the selection this opened with");
+
   // --- the capture modes ------------------------------------------------
   // The app reads the typing itself; only these reach the machine.
   add(v, Mode::Search, ch(Key::Escape), Action::LeaveMode, 0, 0, CtxAny,
@@ -263,7 +346,7 @@ std::vector<Binding> buildTable() {
 }
 
 bool applies(const Binding& b, unsigned ctx) {
-  return (b.need & ctx) == b.need;
+  return (b.need & ctx) == b.need && (b.deny & ctx) == 0;
 }
 
 bool startsWith(const std::vector<Chord>& seq, const std::vector<Chord>& pre) {
@@ -290,6 +373,7 @@ const char* modeName(Mode m) {
     case Mode::Normal: return "normal";
     case Mode::Resize: return "resize";
     case Mode::Select: return "select";
+    case Mode::Wave: return "wave";
     case Mode::Search: return "search";
     case Mode::Rename: return "rename";
     case Mode::Help: return "help";
@@ -305,6 +389,10 @@ Mode modeAfter(Mode from, Action a) {
   switch (a) {
     case Action::EnterResize: return Mode::Resize;
     case Action::EnterSelect: return Mode::Select;
+    // Enter on a waveform opens the head machine and every Enter inside
+    // it stays put; the app drops back to Normal when the pair settles,
+    // which is the one thing the table cannot see from here.
+    case Action::WaveSelect: return Mode::Wave;
     case Action::OpenSearch: return Mode::Search;
     case Action::OpenHelp: return Mode::Help;
     case Action::RenameTab: return Mode::Rename;

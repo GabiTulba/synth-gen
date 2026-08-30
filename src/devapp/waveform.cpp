@@ -39,6 +39,55 @@ void WaveView::clamp() {
   }
 }
 
+void WaveSelection::begin(const WaveView& v) {
+  heldStart = start;
+  heldEnd = end;
+  cursor = std::clamp(has() ? start : v.start + v.span() * 0.5, 0.0,
+                      (double)v.frames);
+  anchor = cursor;
+  phase = Phase::First;
+  // Only the head shows until the pair is settled: a highlight left
+  // over from the old selection would read as the one being placed.
+  clear();
+}
+
+bool WaveSelection::advance() {
+  if (phase == Phase::First) {
+    anchor = cursor;
+    phase = Phase::Second;
+    return false;
+  }
+  if (phase != Phase::Second) return false;
+  start = std::min(anchor, cursor);
+  end = std::max(anchor, cursor);
+  // Both heads on the same frame is not a range; it is the way to say
+  // "nothing selected" without reaching for the clear button.
+  if (end - start < 1) clear();
+  phase = Phase::Off;
+  return true;
+}
+
+void WaveSelection::cancel() {
+  start = heldStart;
+  end = heldEnd;
+  phase = Phase::Off;
+}
+
+void WaveSelection::moveCursor(double deltaFrames, WaveView& v) {
+  if (phase == Phase::Off) return;
+  cursor = std::clamp(cursor + deltaFrames, 0.0, (double)v.frames);
+  // The head leads the view: walking past an edge scrolls the window
+  // rather than leaving the head somewhere off screen.
+  if (cursor < v.start)
+    v.pan(cursor - v.start);
+  else if (cursor > v.end)
+    v.pan(cursor - v.end);
+  if (phase == Phase::Second) {
+    start = std::min(anchor, cursor);
+    end = std::max(anchor, cursor);
+  }
+}
+
 PeakBins buildPeakBins(const std::vector<double>& channel, int binSize) {
   PeakBins b;
   b.binSize = std::max(1, binSize);

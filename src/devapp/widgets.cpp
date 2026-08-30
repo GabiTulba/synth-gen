@@ -78,16 +78,16 @@ void WavePanel::restore(const std::string& path, const WavePanelState& st) {
     view.clamp();
   }
   if (st.selStart >= 0 && st.selEnd > st.selStart) {
-    selStart = std::min(st.selStart, (double)wav.frames());
-    selEnd = std::min(st.selEnd, (double)wav.frames());
-    if (selEnd - selStart < 1) selStart = selEnd = -1;
+    sel.start = std::min(st.selStart, (double)wav.frames());
+    sel.end = std::min(st.selEnd, (double)wav.frames());
+    if (sel.end - sel.start < 1) sel.clear();
   }
 }
 
 void WavePanel::load() {
   error.clear();
   bins.clear();
-  selStart = selEnd = -1;
+  sel = WaveSelection{};
   dragAnchor = -1;
   try {
     wav = synth::readWav(artifactPath);
@@ -112,17 +112,35 @@ void WavePanel::reloadIfChanged(bool force) {
   if (!force && now == stamp) return;
   stamp = now;
   WaveView old = view;
-  double oldSelStart = selStart, oldSelEnd = selEnd;
+  WaveSelection oldSel = sel;
+  double oldDrag = dragAnchor;
   load();
   if (error.empty() && old.frames > 0) {
     view = old;
     view.frames = wav.frames();
     view.clamp();
-    if (oldSelStart >= 0) {
-      selStart = std::min(oldSelStart, (double)wav.frames());
-      selEnd = std::min(oldSelEnd, (double)wav.frames());
-      if (selEnd - selStart < 1) selStart = selEnd = -1;
+    // The sound changed; the range picked out of it did not. A rebuild
+    // has to leave a selection alone - and, more than that, has to leave
+    // one still being made alone: the heads Enter has placed so far and
+    // the frame a mouse drag is anchored to. Dropping those ends the
+    // gesture under the user's hand, and rebuilds land in the middle of
+    // gestures often, because the app's own state file lives in the
+    // directory the daemon watches. Everything is pulled back inside
+    // the new length, which is all that can have gone stale.
+    double last = (double)wav.frames();
+    sel = oldSel;
+    if (sel.start >= 0) {
+      sel.start = std::min(sel.start, last);
+      sel.end = std::min(sel.end, last);
+      if (sel.end - sel.start < 1) sel.clear();
     }
+    if (sel.heldStart >= 0) {
+      sel.heldStart = std::min(sel.heldStart, last);
+      sel.heldEnd = std::min(sel.heldEnd, last);
+    }
+    sel.anchor = std::clamp(sel.anchor, 0.0, last);
+    sel.cursor = std::clamp(sel.cursor, 0.0, last);
+    dragAnchor = oldDrag < 0 ? -1 : std::min(oldDrag, last);
   }
 }
 
@@ -520,13 +538,27 @@ void drawWaveContent(AudioPlayer& player, std::string& playError,
 
   bool isThisPlaying =
       player.playing() && player.currentPath() == p.artifactPath;
+  // One width for every label this button can wear, so starting
+  // playback or making a selection does not resize the row - and, since
+  // the row is what the panel measures itself by, does not resize the
+  // canvas underneath the drag that is making the selection.
+  const ImGuiStyle& style = ImGui::GetStyle();
+  static const char* kPlayLabels[] = {"stop", "play view", "play selection"};
+  float playW = 0;
+  for (const char* label : kPlayLabels)
+    playW = std::max(playW, ImGui::CalcTextSize(label).x);
+  playW += style.FramePadding.x * 2;
+  // SmallButton is Button with no vertical padding; this is that, with a
+  // width of our choosing.
+  ImGui::PushStyleVar(ImGuiStyleVar_FramePadding,
+                      ImVec2(style.FramePadding.x, 0));
   if (isThisPlaying) {
-    if (ImGui::SmallButton("stop")) player.stop();
+    if (ImGui::Button("stop", ImVec2(playW, 0))) player.stop();
   } else {
-    if (ImGui::SmallButton(p.hasSelection() ? "play selection"
-                                            : "play view")) {
-      double from = p.hasSelection() ? p.selStart : v.start;
-      double to = p.hasSelection() ? p.selEnd : v.end;
+    if (ImGui::Button(p.hasSelection() ? "play selection" : "play view",
+                      ImVec2(playW, 0))) {
+      double from = p.hasSelection() ? p.sel.start : v.start;
+      double to = p.hasSelection() ? p.sel.end : v.end;
       playError.clear();
       if (!player.playRange(p.artifactPath, (int64_t)std::floor(from),
                                 (int64_t)std::ceil(to), playError,
@@ -535,6 +567,7 @@ void drawWaveContent(AudioPlayer& player, std::string& playError,
         playError = p.targetName + ": " + playError;
     }
   }
+  ImGui::PopStyleVar();
   ImGui::SameLine();
   // Replays the played range (the selection, usually) until stopped;
   // toggling mid-play applies to the running playback too.
@@ -546,27 +579,40 @@ void drawWaveContent(AudioPlayer& player, std::string& playError,
   if (ImGui::SmallButton("zoom out")) v.zoomAt(0.5, 1.5);
   ImGui::SameLine();
   if (ImGui::SmallButton("fit")) v.reset(v.frames);
-  if (p.hasSelection()) {
-    ImGui::SameLine();
-    if (ImGui::SmallButton("zoom to selection")) {
-      v.start = p.selStart;
-      v.end = p.selEnd;
-      v.clamp();
-    }
-    ImGui::SameLine();
-    if (ImGui::SmallButton("clear selection")) p.selStart = p.selEnd = -1;
+  // Always drawn, greyed out when there is nothing to act on, rather
+  // than appearing with the selection. A row that changes width when a
+  // selection exists makes the canvas resize in the middle of the drag
+  // making it - which moves the very pixels being dragged over, and can
+  // scroll the block out from under the mouse.
+  ImGui::SameLine();
+  ImGui::BeginDisabled(!p.hasSelection());
+  if (ImGui::SmallButton("zoom to selection")) {
+    v.start = p.sel.start;
+    v.end = p.sel.end;
+    v.clamp();
   }
+  ImGui::SameLine();
+  if (ImGui::SmallButton("clear selection")) p.sel.clear();
+  ImGui::EndDisabled();
   ImGui::SameLine();
   if (rate > 0) {
     std::string info = "view " + formatSeconds(v.start / rate) + " - " +
                        formatSeconds(v.end / rate);
     if (p.hasSelection())
-      info += " | selection " + formatSeconds(p.selStart / rate) + " - " +
-              formatSeconds(p.selEnd / rate) + " (" +
-              formatSeconds((p.selEnd - p.selStart) / rate) + ")";
-    else
-      info += " | drag: select, wheel: zoom, right-drag: pan";
+      info += " | selection " + formatSeconds(p.sel.start / rate) + " - " +
+              formatSeconds(p.sel.end / rate) + " (" +
+              formatSeconds((p.sel.end - p.sel.start) / rate) + ")";
+    // Reported without counting towards the panel's width, the same way
+    // the canvas below does not count. A status line says what the view
+    // and the selection are; it does not get to decide how wide the
+    // panel is. Letting it would make the canvas's width depend on
+    // whether there is a selection and how long its numbers print -
+    // which resizes the canvas while it is being dragged in, and moves
+    // the mapping from pixels back to frames under the drag.
+    ImGuiWindow* row = ImGui::GetCurrentWindow();
+    float beforeInfo = row->DC.CursorMaxPos.x;
     ImGui::TextDisabled("%s", info.c_str());
+    row->DC.CursorMaxPos.x = beforeInfo;
   }
 
   int channels = (int)p.wav.channels.size();
@@ -623,19 +669,23 @@ void drawWaveContent(AudioPlayer& player, std::string& playError,
   if (hovered && ImGui::IsMouseDragging(ImGuiMouseButton_Right, 0))
     v.pan(-io.MouseDelta.x * v.span() / width);
 
-  if (ImGui::IsItemActivated())
+  if (ImGui::IsItemActivated()) {
+    // The mouse takes the selection over: whatever heads the keyboard
+    // was placing are dropped, and the shell drops the mode with them.
+    p.sel.phase = WaveSelection::Phase::Off;
     p.dragAnchor = std::clamp(xToFrame(io.MousePos.x), 0.0, (double)v.frames);
+  }
   if (ImGui::IsItemActive() && ImGui::IsMouseDown(ImGuiMouseButton_Left) &&
       p.dragAnchor >= 0) {
     double cur = std::clamp(xToFrame(io.MousePos.x), 0.0, (double)v.frames);
-    p.selStart = std::min(p.dragAnchor, cur);
-    p.selEnd = std::max(p.dragAnchor, cur);
+    p.sel.start = std::min(p.dragAnchor, cur);
+    p.sel.end = std::max(p.dragAnchor, cur);
   }
   if (ImGui::IsItemDeactivated()) {
     // A click without a real drag (under ~2px of travel) clears the
     // selection instead of leaving a sliver selected.
-    if (p.hasSelection() && p.selEnd - p.selStart < v.span() / width * 2.0)
-      p.selStart = p.selEnd = -1;
+    if (p.hasSelection() && p.sel.end - p.sel.start < v.span() / width * 2.0)
+      p.sel.clear();
     p.dragAnchor = -1;
   }
 
@@ -661,15 +711,31 @@ void drawWaveContent(AudioPlayer& player, std::string& playError,
     }
   }
 
-  if (p.hasSelection() && p.selEnd > v.start && p.selStart < v.end) {
-    float x0 = std::max(frameToX(p.selStart), pos.x);
-    float x1 = std::min(frameToX(p.selEnd), pos.x + (float)width);
+  if (p.hasSelection() && p.sel.end > v.start && p.sel.start < v.end) {
+    float x0 = std::max(frameToX(p.sel.start), pos.x);
+    float x1 = std::min(frameToX(p.sel.end), pos.x + (float)width);
     dl->AddRectFilled(ImVec2(x0, pos.y), ImVec2(x1, pos.y + canvasSize.y),
                       IM_COL32(120, 160, 255, 48));
     dl->AddLine(ImVec2(x0, pos.y), ImVec2(x0, pos.y + canvasSize.y),
                 IM_COL32(150, 180, 255, 180));
     dl->AddLine(ImVec2(x1, pos.y), ImVec2(x1, pos.y + canvasSize.y),
                 IM_COL32(150, 180, 255, 180));
+  }
+
+  // The heads Enter is placing: the one the arrows move, and the one an
+  // earlier Enter already fixed. The range between them is drawn by the
+  // selection above - `moveCursor` keeps it live while the second head
+  // walks - so these two lines are all that is left to say.
+  if (p.sel.placing()) {
+    auto head = [&](double f, ImU32 col) {
+      if (f < v.start || f > v.end) return;
+      float x = frameToX(f);
+      dl->AddLine(ImVec2(x, pos.y), ImVec2(x, pos.y + canvasSize.y), col,
+                  2.0f);
+    };
+    if (p.sel.phase == WaveSelection::Phase::Second)
+      head(p.sel.anchor, IM_COL32(150, 180, 255, 200));
+    head(p.sel.cursor, IM_COL32(255, 210, 120, 240));
   }
 
   if (isThisPlaying && rate > 0) {

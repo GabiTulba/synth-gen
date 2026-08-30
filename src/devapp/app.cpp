@@ -509,8 +509,8 @@ struct AppState {
       p.target = w.targetName;
       p.viewStart = w.view.start;
       p.viewEnd = w.view.end;
-      p.selStart = w.selStart;
-      p.selEnd = w.selEnd;
+      p.selStart = w.sel.start;
+      p.selEnd = w.sel.end;
       p.loop = w.loop;
       keep[path] = std::move(p);
     }
@@ -540,6 +540,14 @@ struct AppState {
   void maybeSave(double dtMs) {
     sinceSaveMs += dtMs;
     if (sinceSaveMs < 750.0) return;
+    // Not in the middle of placing a selection. Half of one is not
+    // state worth keeping, and writing it costs far more than the
+    // write: this file sits in the directory the daemon watches, so
+    // saving renames a file there, which reads as a change, which
+    // rebuilds - every 750ms for as long as the gesture lasts. The
+    // timer is left standing so the save lands as soon as it is over.
+    for (const auto& [path, w] : waves)
+      if (w.sel.placing() || w.dragAnchor >= 0) return;
     sinceSaveMs = 0;
     save();
   }
@@ -713,6 +721,15 @@ void drawDiagnostics(AppState& app, const UnitState& u) {
   }
 }
 
+// The waveform placing a selection head, if any. At most one ever is:
+// the machine opens on the selected row and closes when the pair
+// settles, so this is also the answer to "is wave mode still live?".
+WavePanel* placingWave(AppState& app) {
+  for (auto& [path, w] : app.waves)
+    if (w.sel.placing()) return &w;
+  return nullptr;
+}
+
 // The bar along the top: one entry per tab, the one on screen
 // highlighted, then what mode the keyboard is in. Clicking a tab is the
 // mouse's Alt+<n>.
@@ -752,6 +769,21 @@ void drawTabBar(AppState& app, float width) {
                                 " -- (Esc)";
   if (!app.keys.prefixLabel().empty())
     right = app.keys.prefixLabel() + "  (Esc cancels)";
+  if (app.keys.mode == Mode::Wave) {
+    // Where the head is, and what the next Enter will do with it. The
+    // panel has not been drawn yet on the frame the mode opens, so the
+    // bare form covers that one frame.
+    right = "-- select: place a head -- (Enter, Esc)";
+    if (WavePanel* w = placingWave(app)) {
+      double rate = w->wav.rate > 0 ? w->wav.rate : 1;
+      right = w->sel.phase == WaveSelection::Phase::First
+                  ? "-- select: " + formatSeconds(w->sel.cursor / rate) +
+                        " -- (Enter fixes it, Esc)"
+                  : "-- select: " + formatSeconds(w->sel.start / rate) + " - " +
+                        formatSeconds(w->sel.end / rate) +
+                        " -- (Enter confirms, Esc)";
+    }
+  }
   if (app.keys.mode == Mode::Select) {
     Run r = focusedRun(app.tab());
     int n = r.valid ? r.count() : 1;
@@ -826,7 +858,22 @@ void drawTargetElement(AppState& app, const TargetMeta& t, float waveHeight,
   ImGuiWindow* body = ImGui::GetCurrentWindow();
   float startX = ImGui::GetCursorScreenPos().x;
   auto seen = fit.waveRow.find(t.name);
+  // Claimed before the skip below, not after it: `wanted` means the
+  // target is still on a window somewhere, not that its pixels are on
+  // screen this frame. Claiming it after would release the panel the
+  // moment the block scrolled off - throwing away the decode, the zoom
+  // and any selection half-made in it, and re-decoding on the way back.
+  std::string path = (fs::path(app.rootDir) / t.artifact).string();
+  wanted.insert(path);
   if (!ImGui::IsRectVisible(ImVec2(blockW, blockH))) {
+    // A panel already open still answers to the keyboard with its block
+    // scrolled out of sight: the row is selected, so the keys are aimed
+    // at it wherever it happens to have landed. Nothing is decoded here
+    // that was not decoded already.
+    if (shown) {
+      auto open = app.waves.find(path);
+      if (open != app.waves.end()) *shown = &open->second;
+    }
     // The stand-in reserves the height, and claims the width the block
     // itself claimed the last time it was drawn - not the width it
     // would be drawn at now. The two differ: a block is as wide as the
@@ -844,8 +891,8 @@ void drawTargetElement(AppState& app, const TargetMeta& t, float waveHeight,
     return;
   }
 
-  std::string path = (fs::path(app.rootDir) / t.artifact).string();
-  wanted.insert(path);
+  // Only now is it decoded: reserving its space above costs nothing,
+  // and a couple of minutes of stereo is ~90 MB.
   WavePanel& w = app.wave(path, t.name);
   if (shown) *shown = &w;
   // Drawn with the content width measured around it and nothing else's,
@@ -866,14 +913,44 @@ void applyWaveRequest(AppState& app, WavePanel& w) {
       if (app.player.playing() && app.player.currentPath() == w.artifactPath) {
         app.player.stop();
       } else {
-        double from = w.hasSelection() ? w.selStart : w.view.start;
-        double to = w.hasSelection() ? w.selEnd : w.view.end;
+        double from = w.hasSelection() ? w.sel.start : w.view.start;
+        double to = w.hasSelection() ? w.sel.end : w.view.end;
         app.playError.clear();
         app.player.playRange(w.artifactPath, (int64_t)std::floor(from),
                              (int64_t)std::ceil(to), app.playError, w.loop);
       }
       break;
-    case Action::WaveZoom: w.view.zoomAt(0.5, app.deferred.waveStep); break;
+    case Action::WaveZoom: {
+      // Zooming while a head is out keeps that head where it is, so it
+      // does not slide off the edge of the view the moment you zoom in
+      // to place it accurately; otherwise the middle stays put.
+      double frac = 0.5;
+      if (w.sel.placing() && w.view.span() > 0)
+        frac = std::clamp((w.sel.cursor - w.view.start) / w.view.span(), 0.0,
+                          1.0);
+      w.view.zoomAt(frac, app.deferred.waveStep);
+      break;
+    }
+    case Action::WaveMove: {
+      // One step is a fraction of what is on screen, so it feels the
+      // same at every zoom. It walks the head while one is out, and the
+      // view itself the rest of the time.
+      double delta = app.deferred.waveStep * w.view.span();
+      if (w.sel.placing())
+        w.sel.moveCursor(delta, w.view);
+      else
+        w.view.pan(delta);
+      break;
+    }
+    case Action::WaveSelect:
+      if (!w.sel.placing())
+        w.sel.begin(w.view);
+      else if (w.sel.advance())
+        // The pair is settled, so the mode that placed it is over. The
+        // end of drawFrame would reach the same conclusion, but the key
+        // that confirms a selection should be the thing that ends it.
+        app.keys.mode = Mode::Normal;
+      break;
     case Action::WaveFit: w.view.reset(w.view.frames); break;
     case Action::WaveLoop:
       w.loop = !w.loop;
@@ -1719,8 +1796,14 @@ Chord readChord() {
   c.alt = io.KeyAlt;
   c.shift = io.KeyShift;
   c.ctrl = io.KeyCtrl;
-  // Auto-repeat is wanted: holding Alt+l should walk across the windows,
-  // and holding `l` in resize mode should keep resizing.
+  // Auto-repeat is wanted for the keys that nudge something: holding
+  // Alt+l walks across the windows, holding `l` keeps resizing or keeps
+  // walking a selection head. It is not wanted for the keys that step a
+  // state machine or flip a switch - Enter placing the next head of a
+  // selection, Space starting playback, Escape leaving a mode. Those
+  // have to happen once per press however long the press is held; a
+  // press held past ImGui's repeat delay would otherwise run the whole
+  // machine through in one go.
   for (int i = 0; i < 26; i++)
     if (ImGui::IsKeyPressed((ImGuiKey)(ImGuiKey_A + i), true)) {
       c.key = (Key)((int)Key::A + i);
@@ -1734,17 +1817,25 @@ Chord readChord() {
   static const struct {
     ImGuiKey imk;
     Key key;
+    bool repeat;
   } rest[] = {
-      {ImGuiKey_LeftArrow, Key::Left},   {ImGuiKey_RightArrow, Key::Right},
-      {ImGuiKey_UpArrow, Key::Up},       {ImGuiKey_DownArrow, Key::Down},
-      {ImGuiKey_Enter, Key::Enter},      {ImGuiKey_KeypadEnter, Key::Enter},
-      {ImGuiKey_Escape, Key::Escape},    {ImGuiKey_Tab, Key::Tab},
-      {ImGuiKey_Space, Key::Space},      {ImGuiKey_Slash, Key::Slash},
-      {ImGuiKey_Comma, Key::Comma},      {ImGuiKey_Period, Key::Period},
-      {ImGuiKey_Minus, Key::Minus},      {ImGuiKey_Equal, Key::Equal},
+      {ImGuiKey_LeftArrow, Key::Left, true},
+      {ImGuiKey_RightArrow, Key::Right, true},
+      {ImGuiKey_UpArrow, Key::Up, true},
+      {ImGuiKey_DownArrow, Key::Down, true},
+      {ImGuiKey_Enter, Key::Enter, false},
+      {ImGuiKey_KeypadEnter, Key::Enter, false},
+      {ImGuiKey_Escape, Key::Escape, false},
+      {ImGuiKey_Tab, Key::Tab, true},
+      {ImGuiKey_Space, Key::Space, false},
+      {ImGuiKey_Slash, Key::Slash, false},
+      {ImGuiKey_Comma, Key::Comma, true},
+      {ImGuiKey_Period, Key::Period, true},
+      {ImGuiKey_Minus, Key::Minus, true},
+      {ImGuiKey_Equal, Key::Equal, true},
   };
   for (auto& r : rest)
-    if (ImGui::IsKeyPressed(r.imk, true)) {
+    if (ImGui::IsKeyPressed(r.imk, r.repeat)) {
       c.key = r.key;
       return c;
     }
@@ -1938,6 +2029,13 @@ void applyAction(AppState& app, const KeyMachine::Step& s) {
     case Action::ToggleOutline: app.outline = !app.outline; break;
     case Action::ToggleWhichKey: app.whichKey = !app.whichKey; break;
     case Action::LeaveMode:
+      // Escaping out of the head machine puts back the selection it
+      // opened with and stops there: the row stays selected, because
+      // the waveform is still what the keys are aimed at.
+      if (WavePanel* w = placingWave(app)) {
+        w->sel.cancel();
+        break;
+      }
       app.sel.clear();
       app.rowTyped.clear();
       break;
@@ -1955,6 +2053,8 @@ void applyAction(AppState& app, const KeyMachine::Step& s) {
     case Action::ScaleWindow: app.scaleFocusedWindow(s.arg); break;
     case Action::WavePlay:
     case Action::WaveZoom:
+    case Action::WaveMove:
+    case Action::WaveSelect:
     case Action::WaveFit:
     case Action::WaveLoop:
       app.deferred.wave = s.action;
@@ -2116,8 +2216,8 @@ void releaseUnusedWaves(AppState& app, const std::set<std::string>& wanted) {
     st.target = w.targetName;
     st.viewStart = w.view.start;
     st.viewEnd = w.view.end;
-    st.selStart = w.selStart;
-    st.selEnd = w.selEnd;
+    st.selStart = w.sel.start;
+    st.selEnd = w.sel.end;
     st.loop = w.loop;
     app.savedWaves[it->first] = std::move(st);
     it = app.waves.erase(it);
@@ -2160,6 +2260,13 @@ void drawFrame(AppState& app) {
   if (placement.windows.empty()) drawEmptyTab(app, area);
   dragDividers(app, placement, area);
   releaseUnusedWaves(app, wanted);
+  // Wave mode lasts exactly as long as the head machine it drives. The
+  // mouse taking the selection over, the panel being released, the row
+  // going away - and the row never having been drawn, so the machine
+  // never opened at all - all end the mode here rather than leaving the
+  // keyboard in a mode with nothing under it.
+  if (app.keys.mode == Mode::Wave && !placingWave(app))
+    app.keys.mode = Mode::Normal;
 
   drawFocusRing(app);
   if (app.outline) drawOutline(app, area);
@@ -2348,6 +2455,21 @@ int main(int argc, char** argv) {
   std::string tabbedTo = "(none)";  // where Tab left the selection
   bool tabOpenedAnEdit = false;     // ...and whether ImGui grabbed it
   const ImGuiStyle restingStyle = ImGui::GetStyle();
+  // What the scripted drag below came to, gathered frame by frame and
+  // read out in the report at the end. `grabbed` separates a drag that
+  // took hold of a canvas and then lost it - the bug - from one that
+  // never reached a canvas at all, which is the honest answer in a
+  // window too short to show one.
+  std::vector<double> gDragEnds;
+  bool gDragGrabbed = false, gDragLostGrip = false;
+  // What the typed selection settled on, and what a held Enter did to
+  // the machine - read out in the report at the end.
+  double gKeySelStart = -1, gKeySelEnd = -1;
+  int gHeldEnterPhase = -1;
+  // Whether the selected row had a decoded panel to look at: in a window
+  // too short to show one there is nothing to check, which is not the
+  // same as the check having failed.
+  bool gKeyPanelSeen = false;
   Uint64 last = SDL_GetPerformanceCounter();
   while (!done) {
     SDL_Event e;
@@ -2398,12 +2520,13 @@ int main(int argc, char** argv) {
     }
 
     // ...and every overlay: one frame per mode, with a row selected, so
-    // the smoke test draws the search, help, select and which-key
-    // surfaces as well as the tiling. An unbalanced Begin/End in any of
-    // them is an assert here rather than a crash in front of the user.
-    if (selfTest && frames >= 1 && frames <= 4) {
+    // the smoke test draws the search, help, select, resize and wave
+    // surfaces, and the which-key pane, as well as the tiling. An
+    // unbalanced Begin/End in any of them is an assert here rather than
+    // a crash in front of the user.
+    if (selfTest && frames >= 1 && frames <= 5) {
       static const Mode modes[] = {Mode::Search, Mode::Help, Mode::Select,
-                                   Mode::Resize};
+                                   Mode::Resize, Mode::Wave};
       app.keys.mode = modes[frames - 1];  // one frame each
       app.outline = true;
       app.altHeld = true;
@@ -2414,6 +2537,33 @@ int main(int argc, char** argv) {
           app.sel.window = *w;
           app.sel.element = els[0].name;
         }
+      }
+      refreshRows(app);
+    }
+
+    // Which row is a waveform differs between the two projects the
+    // self-test runs, so the script's Enters are aimed by hand rather
+    // than by typing a hint label. A tab with no waveform in it leaves
+    // the selection alone and the Enters below do nothing, which is the
+    // right answer for a project that has none.
+    if (selfTest && frames == 57) {
+      bool found = false;
+      // Whichever tab it ended up in: the script above moves windows
+      // between tabs, so where a waveform is by now is not fixed.
+      for (const Tab& t : app.tabs) {
+        for (const WindowRef& w : windowsIn(t)) {
+          for (const WindowElement& e : app.elementsOf(w)) {
+            if (e.kind != WindowElement::Kind::Target) continue;
+            app.gotoTab(t.index);
+            focusWindow(app.tab(), w);
+            app.sel.window = w;
+            app.sel.element = e.name;
+            found = true;
+            break;
+          }
+          if (found) break;
+        }
+        if (found) break;
       }
       refreshRows(app);
     }
@@ -2478,6 +2628,26 @@ int main(int argc, char** argv) {
           // rather than running off the end.
           {47, ImGuiKey_RightArrow, false, true},
           {49, ImGuiKey_RightArrow, false, true},
+          // Frame 29 unticked a panel and closed its window; tick it
+          // back on, because what it holds is the waveform the rest of
+          // this needs.
+          {51, ImGuiKey_1, false},      // the overview
+          {53, ImGuiKey_A, false},      // its first row: the tickbox
+          {55, ImGuiKey_Enter, false},  // press it: the panel is back
+          // ...and then the one place a sequence rather than a single
+          // press decides the outcome: Enter opens the head machine,
+          // `l` walks a head, and the Enters after it fix and then
+          // settle the pair. The report below prints what it came to.
+          {59, ImGuiKey_Enter, false},  // open, one head under the cursor
+          {61, ImGuiKey_L, false},      // walk it right
+          {63, ImGuiKey_Enter, false},  // fix it, open the second
+          {65, ImGuiKey_L, false},
+          {67, ImGuiKey_L, false},
+          {69, ImGuiKey_Enter, false},  // settle the pair
+          // The machine the held Enter below opens is left open by it,
+          // by design - one press, one step. Escape puts it away so the
+          // app comes to rest with nothing half-placed.
+          {106, ImGuiKey_Escape, false},
       };
       for (const Press& k : script) {
         if (k.frame != frames) continue;
@@ -2510,6 +2680,30 @@ int main(int argc, char** argv) {
 
     ImGui_ImplSDLRenderer2_NewFrame();
     ImGui_ImplSDL2_NewFrame();
+    // ...and the other way of making a selection: a left-drag across
+    // the canvas, typed into ImGui's mouse queue the way the keys above
+    // are typed into its key queue. It walks right at a steady 15px a
+    // frame, which is what makes the check after it meaningful - the
+    // selection has to grow by the same amount every frame, and the
+    // drag has to keep its grip the whole way.
+    // Enter held down for well past ImGui's auto-repeat delay. It opens
+    // the head machine once and leaves it there: a key that steps a
+    // state machine must not repeat, or one long press runs the machine
+    // to the end and the selection settles before it was placed.
+    if (selfTest && frames >= 92 && frames <= 104) {
+      ImGuiIO& io = ImGui::GetIO();
+      if (frames == 92) io.AddKeyEvent(ImGuiKey_Enter, true);
+      if (frames == 104) io.AddKeyEvent(ImGuiKey_Enter, false);
+      SDL_Delay(50);  // ~600ms held, twice the repeat delay
+    }
+    static Rect gDragRow{};
+    if (selfTest && frames >= 72 && frames <= 90 && gDragRow.w > 0) {
+      ImGuiIO& io = ImGui::GetIO();
+      io.AddMousePosEvent(gDragRow.x + 120.0f + (frames - 72) * 15.0f,
+                          gDragRow.y + gDragRow.h - 20.0f);
+      if (frames == 74) io.AddMouseButtonEvent(0, true);
+      if (frames == 88) io.AddMouseButtonEvent(0, false);
+    }
     ImGui::NewFrame();
     // ImGui's tabbing pass only runs for the window it considers
     // focused, which in the real app is whichever leaf was last
@@ -2529,6 +2723,50 @@ int main(int argc, char** argv) {
             ImGui::FocusWindow(iw);
       }
     drawFrame(app);
+    // A rebuild lands in the middle of each gesture on purpose. It is
+    // the ordinary case, not a rare one: the app writes its own state
+    // into the directory the daemon watches, so a gesture that lasts a
+    // second is very likely to have one land in it. Neither the heads
+    // Enter has placed nor a mouse drag's anchor may be lost to it.
+    if (selfTest && (frames == 66 || frames == 81))
+      for (auto& [pp, w] : app.waves) w.reloadIfChanged(true);
+    // What the typed Enter/l/Enter/l/l/Enter settled on, read before the
+    // drag below replaces it.
+    if (selfTest && frames == 70)
+      for (auto& [pp, w] : app.waves)
+        if (w.targetName == app.sel.element) {  // the one the keys drove
+          gKeySelStart = w.sel.start;
+          gKeySelEnd = w.sel.end;
+          gKeyPanelSeen = true;
+        }
+    // Where that drag has to land, taken from the row the keyboard just
+    // selected - the rects are recorded as the rows are drawn.
+    if (selfTest && frames == 71)
+      for (auto& [wid, rects] : app.elementRects)
+        for (auto& [name, r] : rects)
+          if (name == app.sel.element) gDragRow = r;
+    if (selfTest && frames == 103)
+      for (auto& [pp, w] : app.waves)
+        if (w.targetName == app.sel.element) gHeldEnterPhase = (int)w.sel.phase;
+    // What it came to, frame by frame: the far end of the selection
+    // while the button is down, and whether the canvas still had hold
+    // of the drag. A selection that stops growing, jumps, or loses its
+    // anchor before the button comes up is the bug this watches for -
+    // a canvas that resizes under the drag making it.
+    if (selfTest && frames >= 75 && frames <= 87) {
+      // One panel at most is under the drag; the others are open on the
+      // same screen and have no anchor, which is not the same as this
+      // one letting go.
+      const WavePanel* dragged = nullptr;
+      for (auto& [pp, w] : app.waves)
+        if (w.dragAnchor >= 0) dragged = &w;
+      if (dragged) {
+        gDragGrabbed = true;
+        gDragEnds.push_back(dragged->sel.end);
+      } else if (gDragGrabbed) {
+        gDragLostGrip = true;  // let go before the button came up
+      }
+    }
     if (selfTest) {
       // Before a single key has been typed: whatever holds focus on the
       // opening frame has to have its rows keyed already, or the letters
@@ -2569,7 +2807,7 @@ int main(int argc, char** argv) {
     }
     app.maybeSave(dtMs);
 
-    if (selfTest && ++frames >= 55) done = true;
+    if (selfTest && ++frames >= 112) done = true;
     if (!selfTest && !vsync) {
       double frameMs = (double)(SDL_GetPerformanceCounter() - now) * 1000.0 /
                        (double)SDL_GetPerformanceFrequency();
@@ -2698,7 +2936,7 @@ int main(int argc, char** argv) {
     if (!intact) selfTestFailed = true;
     // What `?` would list where the app came to rest - the overlay is
     // only as good as this, and an empty one is a bug worth catching.
-    for (Mode m : {Mode::Normal, Mode::Select, Mode::Resize}) {
+    for (Mode m : {Mode::Normal, Mode::Select, Mode::Resize, Mode::Wave}) {
       size_t listed = 0;
       for (const Binding* b : bindingsFor(m, CtxTiled | CtxNested))
         if (b->listed) listed++;
@@ -2713,14 +2951,73 @@ int main(int argc, char** argv) {
       for (const std::string& l : lines)
         std::printf("self-test:   %s\n", l.c_str());
     }
+    // The drag: it must have kept its grip for every frame the button
+    // was down, and grown by the same amount each frame. A canvas that
+    // resizes mid-drag - because the row above it got wider when the
+    // selection appeared - shows up here as a step out of line, and a
+    // block scrolled out from under the drag as a lost grip.
+    // The typed selection: it must have settled on the range the moves
+    // asked for, rebuild in the middle of it or not.
+    if (!gKeyPanelSeen) {
+      std::printf("self-test: typed selection had no waveform open here\n");
+    } else if (gKeySelStart >= 0) {
+      std::printf("self-test: typed selection settled on %.0f - %.0f\n",
+                  gKeySelStart, gKeySelEnd);
+    } else {
+      std::printf("self-test: typed selection came to nothing\n");
+      selfTestFailed = true;
+    }
+    // A held Enter opens the machine and stops there: phase 1 is the
+    // first head out and waiting. Anything further along means the
+    // press repeated and stepped the machine more than once.
+    if (gHeldEnterPhase >= 0) {
+      std::printf("self-test: Enter held ~600ms left the machine at "
+                  "phase %d (1 = one step, as it should be)\n",
+                  gHeldEnterPhase);
+      if (gHeldEnterPhase != 1) selfTestFailed = true;
+    }
+    if (!gDragGrabbed) {
+      // Nothing to drag on: a window too short for a canvas, or one
+      // whose canvas is scrolled away. Not a failure - just not the
+      // configuration that exercises this.
+      std::printf("self-test: canvas drag found no canvas under it here\n");
+    } else if (gDragEnds.size() >= 3) {
+      double step = gDragEnds[1] - gDragEnds[0], worst = 0;
+      for (size_t i = 1; i < gDragEnds.size(); i++)
+        worst = std::max(worst, std::abs((gDragEnds[i] - gDragEnds[i - 1]) -
+                                         step));
+      std::printf("self-test: canvas drag over %zu frame(s), %.0f frame(s) a "
+                  "step, worst wobble %.0f, grip held: %s\n",
+                  gDragEnds.size(), step, worst,
+                  gDragLostGrip ? "NO" : "yes");
+      // A wobble of a step or more is the canvas having moved under the
+      // drag, not a rounding difference.
+      if (gDragLostGrip || step <= 0 || worst >= step) selfTestFailed = true;
+    } else {
+      std::printf("self-test: canvas drag took hold but drew no steps\n");
+      selfTestFailed = true;
+    }
     for (auto& [path, w] : app.waves) {
-      if (w.error.empty())
-        std::printf("self-test: waveform '%s' %lld frame(s), %zu channel(s)\n",
-                    w.targetName.c_str(), (long long)w.wav.frames(),
-                    w.wav.channels.size());
-      else
+      if (!w.error.empty()) {
         std::printf("self-test: waveform '%s' failed: %s\n",
                     w.targetName.c_str(), w.error.c_str());
+        continue;
+      }
+      std::printf("self-test: waveform '%s' %lld frame(s), %zu channel(s)\n",
+                  w.targetName.c_str(), (long long)w.wav.frames(),
+                  w.wav.channels.size());
+      // What the typed Enter/l/Enter/l/l/Enter above settled on. A head
+      // still out means an Enter went missing on the way through, and a
+      // selection of nothing means the moves did.
+      if (w.sel.placing()) {
+        std::printf("self-test:   selection UNSETTLED (a head is still out)\n");
+        selfTestFailed = true;
+      } else if (w.sel.has()) {
+        std::printf("self-test:   selection %.0f - %.0f frame(s) of %lld\n",
+                    w.sel.start, w.sel.end, (long long)w.wav.frames());
+      } else {
+        std::printf("self-test:   no selection\n");
+      }
     }
   }
 

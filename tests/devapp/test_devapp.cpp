@@ -227,6 +227,108 @@ TEST(waveview_pan_clamps_to_file) {
   CHECK_NEAR(v.span(), 100.0, 1e-6);
 }
 
+TEST(waveselection_enter_places_two_heads) {
+  WaveView v;
+  v.reset(48000);
+  WaveSelection s;
+  // Nothing selected, so the machine opens in the middle of the view.
+  s.begin(v);
+  CHECK(s.placing());
+  CHECK(s.phase == WaveSelection::Phase::First);
+  CHECK_NEAR(s.cursor, 24000.0, 1e-6);
+  CHECK(!s.has());  // only the head shows until the pair settles
+
+  s.moveCursor(-4000, v);
+  CHECK_NEAR(s.cursor, 20000.0, 1e-6);
+  CHECK(!s.advance());  // the first Enter fixes this head, no more
+  CHECK(s.phase == WaveSelection::Phase::Second);
+  CHECK_NEAR(s.anchor, 20000.0, 1e-6);
+
+  // The second head walks and the range follows it as it goes.
+  s.moveCursor(9000, v);
+  CHECK(s.has());
+  CHECK_NEAR(s.start, 20000.0, 1e-6);
+  CHECK_NEAR(s.end, 29000.0, 1e-6);
+  CHECK(s.advance());  // and this Enter settles it
+  CHECK(!s.placing());
+  CHECK_NEAR(s.start, 20000.0, 1e-6);
+  CHECK_NEAR(s.end, 29000.0, 1e-6);
+}
+
+TEST(waveselection_second_head_may_land_left_of_the_first) {
+  WaveView v;
+  v.reset(1000);
+  WaveSelection s;
+  s.begin(v);       // 500
+  s.advance();      // fixed there
+  s.moveCursor(-200, v);
+  s.advance();
+  // Placed right to left, the range still reads low to high.
+  CHECK_NEAR(s.start, 300.0, 1e-6);
+  CHECK_NEAR(s.end, 500.0, 1e-6);
+}
+
+TEST(waveselection_two_heads_on_one_frame_select_nothing) {
+  WaveView v;
+  v.reset(1000);
+  WaveSelection s;
+  s.begin(v);
+  s.advance();
+  CHECK(s.advance());  // both Enters in the same place
+  CHECK(!s.has());
+  CHECK(s.start == -1);
+}
+
+TEST(waveselection_opens_on_the_selection_it_finds) {
+  WaveView v;
+  v.reset(1000);
+  WaveSelection s;
+  s.start = 200;
+  s.end = 700;
+  s.begin(v);
+  CHECK_NEAR(s.cursor, 200.0, 1e-6);  // the left edge, not the middle
+  // Escape puts back exactly what was there before it opened.
+  s.moveCursor(100, v);
+  s.advance();
+  s.moveCursor(50, v);
+  s.cancel();
+  CHECK(!s.placing());
+  CHECK_NEAR(s.start, 200.0, 1e-6);
+  CHECK_NEAR(s.end, 700.0, 1e-6);
+}
+
+TEST(waveselection_head_stays_in_the_file_and_drags_the_view) {
+  WaveView v;
+  v.reset(1000);
+  v.zoomAt(0.5, 0.1);  // span 100, centred: [450, 550)
+  WaveSelection s;
+  s.begin(v);
+  CHECK_NEAR(s.cursor, 500.0, 1e-6);
+  // Walking off the right edge scrolls the view after the head rather
+  // than leaving it off screen.
+  s.moveCursor(80, v);
+  CHECK_NEAR(s.cursor, 580.0, 1e-6);
+  CHECK_NEAR(v.end, 580.0, 1e-6);
+  CHECK_NEAR(v.span(), 100.0, 1e-6);
+  // And it never leaves the file, however hard it is pushed.
+  s.moveCursor(1e9, v);
+  CHECK_NEAR(s.cursor, 1000.0, 1e-6);
+  s.moveCursor(-1e9, v);
+  CHECK_NEAR(s.cursor, 0.0, 1e-6);
+  CHECK_NEAR(v.start, 0.0, 1e-6);
+  CHECK_NEAR(v.span(), 100.0, 1e-6);
+}
+
+TEST(waveselection_ignores_moves_while_closed) {
+  WaveView v;
+  v.reset(1000);
+  WaveSelection s;
+  s.moveCursor(100, v);
+  CHECK(!s.placing());
+  CHECK_NEAR(s.cursor, 0.0, 1e-6);
+  CHECK(!s.advance());
+}
+
 TEST(minmax_columns_raw_and_binned_agree) {
   // A ramp from -1 to 1: each column's envelope is its slice's endpoints,
   // and the binned path must agree with the raw scan.
